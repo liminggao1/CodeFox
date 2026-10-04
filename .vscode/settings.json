@@ -1,0 +1,12 @@
+{
+  "python.defaultInterpreterPath": "/home/gaogao/miniconda3/envs/learncc/bin/python",
+  "python.analysis.extraPaths": ["${workspaceFolder}/src"],
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": ["tests"],
+  "terminal.integrated.env.linux": {
+    "PYTHONPATH": "${workspaceFolder}/src"
+  },
+  "files.encoding": "utf8",
+  "files.eol": "\n"
+}

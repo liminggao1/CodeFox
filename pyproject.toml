@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-harness"
+version = "0.1.0"
+description = "Local code agent harness: agent loop, tools, teams, workflows, and goals in one Python package"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.25.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+agent-harness = "agent_harness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agent_harness = ["skills/*/*", "skills/*/*/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

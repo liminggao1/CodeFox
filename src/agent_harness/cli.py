@@ -4,9 +4,10 @@
 Interactive session: prompts go to the integrated host loop, with /goal handled
 locally by the goal controller.
 
-  python cli.py                    interactive session
-  python cli.py workflow demo      run the sample workflow with the mock runner
-  python cli.py workflow resume    resume the last workflow run from its journal
+  agent-harness                    interactive session
+  python -m agent_harness          same, without installing the console script
+  agent-harness workflow demo      run the sample workflow with the mock runner
+  agent-harness workflow resume    resume the last workflow run from its journal
 """
 
 from __future__ import annotations
@@ -14,14 +15,9 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from agent import goal as goal_module  # noqa: E402
-from agent import host, workflow  # noqa: E402
+from . import goal as goal_module
+from . import host, workflow
 
 
 def handle_goal_command(query: str) -> tuple[bool, str]:
@@ -48,7 +44,7 @@ def handle_goal_command(query: str) -> tuple[bool, str]:
 def run_cli() -> None:
     host.CLI_ACTIVE = True
     host.start_runtime_services()
-    print("agent-harness: s15 host + s16 workflow + s17 goal")
+    print("agent-harness: agent loop + tools + workflow + goal")
     print("Enter a question, press Enter to send. Type q to quit.")
     print("Set a completion condition with /goal <condition>.\n")
 
@@ -86,7 +82,9 @@ def run_cli() -> None:
         print()
 
 
-def main(argv: list[str]) -> None:
+def main(argv: list[str] | None = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
     if argv and argv[0] == "workflow":
         # The demo path stays offline; only the interactive host calls the API.
         workflow.RUNNER_FACTORY = workflow.MockAgentRunner

@@ -1,7 +1,7 @@
-"""Workflow runtime tests, ported from tests/test_workflow_goal_lessons.py.
+"""Workflow runtime tests.
 
-Chapter-specific install/load helpers are gone: the Workflow tool is native to
-the host tool pool, so those cases assert the real pool and runner wiring.
+The Workflow tool is native to the host tool pool, so these cases assert the
+real pool and runner wiring.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import multiprocessing
+import os
 import subprocess
 import sys
 import threading
@@ -19,7 +20,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-from agent import workflow  # noqa: E402
+from agent_harness import workflow  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -29,19 +30,25 @@ def deterministic_runner(monkeypatch):
 
 
 def run_cli(*args: str, cwd: Path) -> str:
+    env = dict(os.environ)
+    path_entries = [str(PROJECT_ROOT / "src")]
+    if env.get("PYTHONPATH"):
+        path_entries.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(path_entries)
     result = subprocess.run(
-        [sys.executable, str(PROJECT_ROOT / "cli.py"), "workflow", *args],
+        [sys.executable, "-m", "agent_harness", "workflow", *args],
         cwd=cwd,
         capture_output=True,
         text=True,
         timeout=180,
+        env=env,
     )
     assert result.returncode == 0, result.stderr
     return result.stdout
 
 
 def acquire_lock_in_child(run_id: str, store: str, results) -> None:
-    from agent import workflow as child_workflow
+    from agent_harness import workflow as child_workflow
 
     child_workflow.STORE = Path(store)
     try:

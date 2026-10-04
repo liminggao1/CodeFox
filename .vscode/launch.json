@@ -1,0 +1,65 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Agent 交互（真实 API）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agent_harness",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "pythonArgs": ["-Xfrozen_modules=off"],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    },
+    {
+      "name": "Agent 交互（外部终端，输入更稳）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agent_harness",
+      "cwd": "${workspaceFolder}",
+      "console": "externalTerminal",
+      "justMyCode": true,
+      "pythonArgs": ["-Xfrozen_modules=off"],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    },
+    {
+      "name": "Workflow demo（离线，不联网）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agent_harness",
+      "args": ["workflow", "demo"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "pythonArgs": ["-Xfrozen_modules=off"],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    },
+    {
+      "name": "端到端自检（离线）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/debug_pass.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "pythonArgs": ["-Xfrozen_modules=off"]
+    },
+    {
+      "name": "pytest（当前文件）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q", "${file}"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "pythonArgs": ["-Xfrozen_modules=off"]
+    }
+  ]
+}

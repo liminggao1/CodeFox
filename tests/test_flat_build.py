@@ -13,7 +13,7 @@ FLAT_FILE = PROJECT_ROOT / "flat" / "agent_full.py"
 
 def load_builder():
     spec = importlib.util.spec_from_file_location(
-        "build_flat", PROJECT_ROOT / "tools" / "build_flat.py"
+        "build_flat", PROJECT_ROOT / "scripts" / "build_flat.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -28,7 +28,7 @@ def test_build_is_deterministic() -> None:
 def test_committed_flat_file_is_current() -> None:
     builder = load_builder()
     assert FLAT_FILE.read_text(encoding="utf-8") == builder.build(), (
-        "flat/agent_full.py is stale; run `python tools/build_flat.py`"
+        "flat/agent_full.py is stale; run `python scripts/build_flat.py`"
     )
 
 

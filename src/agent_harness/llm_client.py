@@ -1,6 +1,6 @@
 """Provider-agnostic LLM client shim.
 
-Chapters build their client like this::
+Callers build their client like this::
 
     from llm_client import Anthropic
 
@@ -17,7 +17,7 @@ nothing changes for Anthropic-compatible endpoints.
 
 ``LLM_API=responses``: an adapter is returned that speaks the OpenAI
 Responses API (``POST /v1/responses``) upstream and translates the request
-and the reply on the fly. Chapter code never sees the difference.
+and the reply on the fly. Callers never see the difference.
 """
 
 import json
@@ -128,7 +128,7 @@ def _error_for(status: int, detail: str) -> APIStatusError:
 class Block(dict):
     """A content block that also supports attribute access.
 
-    Chapter code reads ``block.type``, ``block.text``, ``block.input`` and
+    Callers read ``block.type``, ``block.text``, ``block.input`` and
     ``block.name``; transcripts and tests read blocks as dicts. A dict with
     attribute fallback satisfies both, so callers need no changes.
     """
@@ -144,7 +144,7 @@ class Block(dict):
 
 
 class Message:
-    """The Messages-shaped reply returned to chapter code."""
+    """The Messages-shaped reply returned to callers."""
 
     def __init__(self, content, stop_reason, usage=None, model=None, id=None):
         self.content = content
@@ -307,7 +307,7 @@ def _describe(error: urllib.error.HTTPError) -> str:
 
 
 class _Messages:
-    """Exposes the ``create`` entry point chapter code calls."""
+    """Exposes the ``create`` entry point callers use."""
 
     def __init__(self, client):
         self._client = client
@@ -369,7 +369,7 @@ class ResponsesClient:
 
 
 # ---------------------------------------------------------------------------
-# Entry point used by every chapter
+# Public entry point
 # ---------------------------------------------------------------------------
 
 def Anthropic(*args, **kwargs):

@@ -1,8 +1,7 @@
-"""Goal layer extracted from s17_goal_loop.
+"""The goal layer: a session-scoped goal plus an independent, tool-free evaluator.
 
-A session-scoped goal plus an independent, tool-free evaluator. The host calls
-GoalController.evaluate_after_turn() when the model stops requesting tools and
-continues the same loop while the goal reports "block".
+The host calls GoalController.evaluate_after_turn() when the model stops
+requesting tools and continues the same loop while the goal reports "block".
 """
 
 from __future__ import annotations

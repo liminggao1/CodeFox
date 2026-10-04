@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-agent.workflow - workflow runtime extracted from s16_workflow_runtime.
+agent.workflow - the workflow runtime.
 
 A saved orchestration runs through one Workflow tool call. The host appends
 this tool to its pool; state lives under the launch directory in .runtime/.
@@ -162,7 +162,7 @@ def validate_meta(meta):
 
 
 def check_permission(meta, settings=None):
-    """Apply the s03 allow/deny gate before launching a workflow."""
+    """Apply the allow/deny permission gate before launching a workflow."""
     settings = settings or {}
     if meta["name"] in settings.get("deny", []):
         raise WorkflowInputError(f"workflow '{meta['name']}' denied by settings")
@@ -803,7 +803,7 @@ async def run_demo(argv):
     if argv and argv[0] == "resume":
         resume_id = _read_last_run()
         if not resume_id:
-            print("nothing to resume; run `python cli.py workflow demo` first.")
+            print("nothing to resume; run `agent-harness workflow demo` first.")
             return
         print(f"resuming {resume_id}; unchanged agent() calls use the journal cache\n")
     else:

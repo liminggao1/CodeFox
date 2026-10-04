@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-agent.host - integrated harness from s15, plus workflow runs and goals.
+agent.host - the integrated harness: tools, teams, workflow runs, and goals.
 
 Everything the model can do lives here: built-in tools, persistent teams,
 MCP tools, cron, memory, background work, workflow runs, and the goal Stop
@@ -49,15 +49,7 @@ try:
 except ImportError:
     READLINE_AVAILABLE = False
 
-import sys
-
-# Make the shared client shim importable no matter which directory this
-# chapter is launched from. Chapter scripts run with sys.path[0] set to
-# their own folder, so the repository root is not on the path by default.
-_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
-from llm_client import Anthropic
+from .llm_client import Anthropic
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -65,14 +57,14 @@ if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_DIR = Path(__file__).resolve().parent
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 PRIMARY_MODEL = MODEL
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL_ID")
 
-# Runtime state follows the launch directory; assets follow the project.
-SKILLS_DIR = PROJECT_ROOT / "skills"
+# Runtime state follows the launch directory; assets ship inside the package.
+SKILLS_DIR = PACKAGE_DIR / "skills"
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
 
@@ -2911,7 +2903,7 @@ def run_connect_mcp(name: str) -> str:
 
 # -- Tool Definitions --
 
-# The model sees tool schemas; Python executes handlers. S15 keeps both tables
+# The model sees tool schemas; Python executes handlers. The harness keeps both tables
 # explicit so every added capability is visible in one place.
 BUILTIN_TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
@@ -3355,4 +3347,3 @@ def async_event_loop(history: list, context: dict, session_state: dict):
             agent_loop(history, context, active_request)
             context.update(update_context(context, history))
             print_turn_assistants(history, turn_start)
-

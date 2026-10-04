@@ -1,8 +1,7 @@
 """Goal layer tests: controller decisions plus host-loop integration.
 
-Ported from tests/test_goal_loop.py. The controller-level cases run unchanged;
-the session-level cases drive agent.host's loop with a scripted client instead
-of s17's standalone AgentSession.
+Controller-level cases cover the decision rules; the session-level cases drive
+agent_harness.host's loop with a scripted client.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent import goal as goal_module
+from agent_harness import goal as goal_module
 
 
 # -- Fixtures --

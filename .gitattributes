@@ -1,0 +1,11 @@
+* text=auto eol=lf
+
+# Generated single-file teaching artifact
+flat/agent_full.py linguist-generated=true
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

@@ -1,9 +1,6 @@
-"""Merged-host runtime tests, adapted from tests/test_agent_teams_runtime.py.
+"""Host runtime tests: tasks, teammates, and worktrees.
 
-The original file is parameterized across several lesson paths and drives
-teammate threads and git worktrees end to end. These cases keep the parts that
-exercise the merged host runtime directly; chapter-path comparisons and
-subprocess lesson runs are dropped.
+These cases exercise the host runtime directly.
 """
 
 from __future__ import annotations

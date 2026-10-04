@@ -9,8 +9,9 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 # Keep imports offline and deterministic even without a local .env.
 os.environ.setdefault("MODEL_ID", "test-model")
@@ -20,7 +21,7 @@ os.environ.setdefault("LLM_API", "responses")
 
 def _reload_host() -> None:
     """Only agent.host is reloaded; goal and workflow keep module identity."""
-    sys.modules.pop("agent.host", None)
+    sys.modules.pop("agent_harness.host", None)
 
 
 @pytest.fixture
@@ -30,7 +31,7 @@ def host_factory(tmp_path, monkeypatch):
     def load():
         monkeypatch.chdir(tmp_path)
         _reload_host()
-        import agent.host as host
+        import agent_harness.host as host
 
         # Memory extraction would call the model; tests drive it explicitly.
         monkeypatch.setattr(host, "remember_after_turn", lambda messages: None)
@@ -41,6 +42,6 @@ def host_factory(tmp_path, monkeypatch):
 
 @pytest.fixture
 def workflow_module():
-    from agent import workflow
+    from agent_harness import workflow
 
     return workflow

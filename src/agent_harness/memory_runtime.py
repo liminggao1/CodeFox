@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-s09_memory.py - Memory
+The memory runtime: selective knowledge across sessions.
 
     +-----------+   selected memories   +------------+
     | .memory/  | --------------------> | Agent Loop |
@@ -16,15 +16,8 @@ import subprocess
 from pathlib import Path
 
 import yaml
-import sys
 
-# Make the shared client shim importable no matter which directory this
-# chapter is launched from. Chapter scripts run with sys.path[0] set to
-# their own folder, so the repository root is not on the path by default.
-_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
-from llm_client import Anthropic
+from .llm_client import Anthropic
 from dotenv import load_dotenv
 
 try:
@@ -771,14 +764,14 @@ def agent_loop(messages: list):
         messages.append({"role": "user", "content": results})
 
 if __name__ == "__main__":
-    print("s09: Memory - selective knowledge across sessions")
+    print("Memory - selective knowledge across sessions")
     print("Enter a question, press Enter to send. Type q to quit.\n")
 
     history = []
     while True:
         try:
             # \001/\002 tell Readline the ANSI escapes have zero display width.
-            query = input("\001\033[36m\002s09 >> \001\033[0m\002")
+            query = input("\001\033[36m\002memory >> \001\033[0m\002")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):

@@ -15,3 +15,20 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Local scratch files
+tmp/
+
+# Editors and OS
+.idea/
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
