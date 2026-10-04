@@ -1,0 +1,17 @@
+# Local config and secrets
+.env
+
+# Runtime state (follows the launch directory)
+.tasks/
+.memory/
+.mailboxes/
+.worktrees/
+.runtime/
+.transcripts/
+.task_outputs/
+.scheduled_tasks.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
