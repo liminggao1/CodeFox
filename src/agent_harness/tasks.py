@@ -1,7 +1,7 @@
-"""Durable task board: file-backed records with ownership and dependencies.
+"""持久化任务板：记录归属和依赖关系的文件存储。
 
-Tasks are tiny JSON records under .tasks/ in the launch directory. Worktrees
-and teammates build on this same store; approval state belongs to teams.py.
+任务是启动目录 .tasks/ 下的小型 JSON 记录。worktree 和队友复用该存储；
+审批状态由 teams.py 管理。
 """
 
 from __future__ import annotations
@@ -20,10 +20,9 @@ from . import worktrees
 
 fcntl = core.fcntl
 
-# -- Task System --
+# -- 任务系统 --
 
-# Tasks are tiny durable records. Later systems add ownership, dependencies,
-# worktrees, and teammates on top of this same file-backed state.
+# 任务是小型持久化记录；归属、依赖、worktree 和队友都建立在同一份文件状态上。
 def _tasks_dir() -> Path:
     return core.WORKDIR / ".tasks"
 
@@ -36,22 +35,22 @@ task_lock = threading.RLock()
 _task_store_state = threading.local()
 CURRENT_TODOS: list[dict] = []
 
-# owner -> {"task_id": str, "cwd": Path}. A teammate gets one assignment at
-# a time, and every filesystem tool resolves its cwd through this registry.
+# owner -> {"task_id": str, "cwd": Path}。每个队友一次只领取一个任务，
+# 文件系统工具都通过该映射确定 cwd。
 teammate_assignments: dict[str, dict[str, object]] = {}
 assignment_versions: dict[str, int] = {}
 
 
 @contextmanager
 def task_store_lock():
-    """Serialize task mutations across threads and host processes."""
+    """让跨线程、跨 host 进程的任务修改串行执行。"""
     with task_lock:
         depth = getattr(_task_store_state, "depth", 0)
         if depth == 0:
             _tasks_dir().mkdir(parents=True, exist_ok=True)
             handle = (_tasks_dir() / ".lock").open("a+", encoding="utf-8")
-            # fcntl.flock gives cross-process locking on POSIX. Windows has no
-            # fcntl, so it falls back to the in-process threading lock only.
+            # POSIX 上用 fcntl.flock 跨进程加锁；Windows 没有 fcntl，
+            # 因此只使用进程内的线程锁。
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             _task_store_state.handle = handle
@@ -118,7 +117,7 @@ def create_task(subject: str, description: str = "") -> Task:
 
 
 def _task_depends_on(task_id: str, target_id: str) -> bool:
-    """Return whether task_id transitively depends on target_id."""
+    """判断 task_id 是否传递依赖 target_id。"""
     pending = [task_id]
     visited = set()
     while pending:
@@ -133,7 +132,7 @@ def _task_depends_on(task_id: str, target_id: str) -> bool:
 
 
 def update_task(task_id: str, addBlockedBy: list[str]) -> Task:
-    """Add dependency edges after create_task has returned real task IDs."""
+    """create_task 返回实际任务 ID 后再添加依赖关系。"""
     if not isinstance(addBlockedBy, list):
         raise ValueError("addBlockedBy must be a list of task IDs")
 
@@ -207,8 +206,7 @@ def get_task_json(task_id: str) -> str:
 
 
 def can_start(task_id: str) -> bool:
-    # Dependencies are intentionally simple: every blocker must exist and be
-    # completed before the task can be claimed.
+    # 依赖规则保持简单：阻塞任务必须存在且已完成，当前任务才能被领取。
     task = load_task(task_id)
     for dep_id in task.blockedBy:
         try:
@@ -241,7 +239,7 @@ def _incomplete_dependencies(task: Task) -> list[str]:
 
 
 def claim_task(task_id: str, owner: str = "agent") -> str:
-    """Atomically claim one task and bind the owner's filesystem cwd."""
+    """原子地领取任务，并绑定所有者的文件系统 cwd。"""
     with task_store_lock():
         task = load_task(task_id)
         if task.status != "pending":
@@ -271,7 +269,7 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
 
 
 def complete_task(task_id: str, owner: str = "agent") -> str:
-    """Complete an assignment only when the caller owns it."""
+    """仅允许任务所有者完成分配。"""
     with task_store_lock():
         task = load_task(task_id)
         if task.status != "in_progress":

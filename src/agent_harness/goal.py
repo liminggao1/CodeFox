@@ -1,7 +1,7 @@
-"""The goal layer: a session-scoped goal plus an independent, tool-free evaluator.
+"""目标层：会话级目标与独立、无工具权限的评估器。
 
-The host calls GoalController.evaluate_after_turn() when the model stops
-requesting tools and continues the same loop while the goal reports "block".
+模型停止请求工具时，host 调用 GoalController.evaluate_after_turn()；
+若目标判定为 "block"，则继续当前循环。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ CLEAR_ALIASES = {"clear", "stop", "off", "reset", "none", "cancel"}
 
 
 class GoalError(Exception):
-    """The goal command or evaluator could not be used safely."""
+    """目标命令或评估器无法安全使用。"""
 
 
 @dataclass
@@ -97,7 +97,7 @@ def _plain_content(content: Any) -> str:
 def transcript_text(
     messages: list[dict[str, Any]], max_characters: int = 24000
 ) -> str:
-    """Keep recent complete messages, trimming only an oversized newest one."""
+    """保留最近的完整消息，仅裁剪过大的最新消息。"""
 
     rendered = [
         f"{message.get('role', 'unknown').upper()}:\n"
@@ -159,7 +159,7 @@ def _parse_json_object(text: str) -> dict[str, Any]:
 
 
 class PromptGoalEvaluator:
-    """A separate, tool-free model that judges the transcript."""
+    """使用独立且无工具权限的模型判断对话记录。"""
 
     def __init__(
         self,
@@ -216,7 +216,7 @@ Return only JSON:
 
 
 class GoalController:
-    """Session-scoped goal state plus the Stop hook decision."""
+    """管理会话级目标状态和 Stop hook 的判定。"""
 
     def __init__(
         self,

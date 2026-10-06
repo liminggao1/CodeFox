@@ -1,4 +1,4 @@
-"""Permission boundary tests: deny list, paths, threads, and MCP policy."""
+"""权限边界测试：拒绝列表、路径、线程和 MCP 策略。"""
 
 from __future__ import annotations
 

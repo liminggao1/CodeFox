@@ -1,9 +1,9 @@
 """
-Tool Templates - Copy and customize these for your agent.
+工具模板：复制后按 agent 的需要调整。
 
-Each tool needs:
-1. Definition (JSON schema for the model)
-2. Implementation (Python function)
+每个工具需要：
+1. 定义（提供给模型的 JSON schema）
+2. 实现（Python 函数）
 """
 
 from pathlib import Path
@@ -13,7 +13,7 @@ WORKDIR = Path.cwd()
 
 
 # =============================================================================
-# TOOL DEFINITIONS (for TOOLS list)
+# 工具定义（用于 TOOLS 列表）
 # =============================================================================
 
 BASH_TOOL = {
@@ -117,7 +117,7 @@ TODO_WRITE_TOOL = {
 }
 
 TASK_TOOL_TEMPLATE = """
-# Generate dynamically with agent types
+# 根据 agent 类型动态生成
 TASK_TOOL = {
     "name": "Task",
     "description": f"Spawn a subagent for a focused subtask.\\n\\nAgent types:\\n{get_agent_descriptions()}",
@@ -135,13 +135,12 @@ TASK_TOOL = {
 
 
 # =============================================================================
-# TOOL IMPLEMENTATIONS
+# 工具实现
 # =============================================================================
 
 def safe_path(p: str) -> Path:
     """
-    Security: Ensure path stays within workspace.
-    Prevents ../../../etc/passwd attacks.
+    确保路径留在工作区内，防止通过 ../../../etc/passwd 等路径逃逸。
     """
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
@@ -151,12 +150,12 @@ def safe_path(p: str) -> Path:
 
 def run_bash(command: str) -> str:
     """
-    Execute shell command with safety checks.
+    执行 shell 命令并进行安全检查。
 
-    Safety features:
-    - Blocks obviously dangerous commands
-    - 60 second timeout
-    - Output truncated to 50KB
+    检查内容：
+    - 拦截明显危险的命令
+    - 60 秒超时
+    - 输出最多保留 50KB
     """
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
@@ -182,12 +181,12 @@ def run_bash(command: str) -> str:
 
 def run_read_file(path: str, limit: int = None) -> str:
     """
-    Read file contents with optional line limit.
+    读取文件，可选行数限制。
 
-    Features:
-    - Safe path resolution
-    - Optional line limit for large files
-    - Output truncated to 50KB
+    功能：
+    - 安全解析路径
+    - 大文件可限制读取行数
+    - 输出最多保留 50KB
     """
     try:
         text = safe_path(path).read_text(encoding="utf-8")
@@ -205,12 +204,12 @@ def run_read_file(path: str, limit: int = None) -> str:
 
 def run_write_file(path: str, content: str) -> str:
     """
-    Write content to file, creating parent directories if needed.
+    写入文件，必要时创建父目录。
 
-    Features:
-    - Safe path resolution
-    - Auto-creates parent directories
-    - Returns byte count for confirmation
+    功能：
+    - 安全解析路径
+    - 自动创建父目录
+    - 返回写入的字节数以便确认
     """
     try:
         fp = safe_path(path)
@@ -224,12 +223,12 @@ def run_write_file(path: str, content: str) -> str:
 
 def run_edit_file(path: str, old_text: str, new_text: str) -> str:
     """
-    Replace exact text in a file (surgical edit).
+    精确替换文件中的文本。
 
-    Features:
-    - Exact string matching (not regex)
-    - Only replaces first occurrence (safety)
-    - Clear error if text not found
+    功能：
+    - 精确匹配字符串，不使用正则表达式
+    - 只替换首次出现的内容
+    - 找不到文本时给出明确错误
     """
     try:
         fp = safe_path(path)
@@ -247,17 +246,17 @@ def run_edit_file(path: str, old_text: str, new_text: str) -> str:
 
 
 # =============================================================================
-# DISPATCHER PATTERN
+# 分发模式
 # =============================================================================
 
 def execute_tool(name: str, args: dict) -> str:
     """
-    Dispatch tool call to implementation.
+    将工具调用分发给对应实现。
 
-    This pattern makes it easy to add new tools:
-    1. Add definition to TOOLS list
-    2. Add implementation function
-    3. Add case to this dispatcher
+    添加新工具的步骤：
+    1. 在 TOOLS 列表中添加定义
+    2. 添加实现函数
+    3. 在此分发器中添加分支
     """
     if name == "bash":
         return run_bash(args["command"])
@@ -267,5 +266,5 @@ def execute_tool(name: str, args: dict) -> str:
         return run_write_file(args["path"], args["content"])
     if name == "edit_file":
         return run_edit_file(args["path"], args["old_text"], args["new_text"])
-    # Add more tools here...
+    # 在这里继续添加工具
     return f"Unknown tool: {name}"

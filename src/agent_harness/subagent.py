@@ -1,7 +1,7 @@
-"""The subagent tool: one isolated, non-recursive agent run.
+"""子 agent 工具：执行一次隔离且不可递归的 agent 任务。
 
-The subagent gets its own message list and a restricted tool pool; it cannot
-spawn more agents. extract_text and has_tool_use are shared with the main loop.
+子 agent 使用独立消息列表和受限工具池，不能继续创建 agent。
+extract_text 和 has_tool_use 与主循环共用。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from . import prompts
 from . import file_tools
 from . import hooks
 
-# -- Subagent Tool --
+# -- 子 agent 工具 --
 
 def sub_system() -> str:
     return (
@@ -68,8 +68,7 @@ def extract_text(content) -> str:
 
 
 def has_tool_use(content) -> bool:
-    # Do not rely on stop_reason alone; the concrete tool_use block is the
-    # continuation signal used by the loop.
+    # 不只依赖 stop_reason；主循环以实际的 tool_use 块判断是否继续。
     return any(getattr(block, "type", None) == "tool_use"
                for block in content)
 

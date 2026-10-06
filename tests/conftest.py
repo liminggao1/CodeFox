@@ -1,4 +1,4 @@
-"""Shared test setup: project import path, safe env defaults, host factory."""
+"""测试共用配置：项目导入路径、离线环境默认值和 host 工厂。"""
 
 from __future__ import annotations
 
@@ -13,29 +13,28 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-# Keep imports offline and deterministic even without a local .env.
+# 即使没有本地 .env，也保证导入过程离线且确定。
 os.environ.setdefault("MODEL_ID", "test-model")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("LLM_API", "responses")
 
 
 def _reload_host() -> None:
-    """Only agent.host is reloaded; goal and workflow keep module identity."""
+    """只重新加载 agent.host；goal 和 workflow 保持原模块实例。"""
     sys.modules.pop("agent_harness.host", None)
 
 
 @pytest.fixture
 def host_factory(tmp_path, monkeypatch):
-    """Reload agent.host inside tmp_path so all state dirs follow the test."""
+    """在 tmp_path 下重新加载 agent.host，使状态目录跟随测试目录。"""
 
     def load():
         monkeypatch.chdir(tmp_path)
         _reload_host()
         import agent_harness.host as host
 
-        # Paths and runtime state are module-global; a fresh session must not
-        # inherit the previous test's launch directory, teammates, plan gates,
-        # assignments, or MCP clients.
+        # 路径和运行时状态位于模块全局变量中；新会话不能继承上个测试的
+        # 启动目录、队友、计划审批、任务分配或 MCP 客户端。
         host.core.WORKDIR = tmp_path
         host.teams.active_teammates.clear()
         host.teams.plan_gates.clear()
@@ -50,7 +49,7 @@ def host_factory(tmp_path, monkeypatch):
         host.scheduler.cron_queue.clear()
         host.scheduler.background_tasks.clear()
         host.scheduler.background_results.clear()
-        # Memory extraction would call the model; tests drive it explicitly.
+        # 记忆提取会调用模型，测试中由用例显式控制。
         monkeypatch.setattr(host, "remember_after_turn", lambda messages: None)
         return host
 

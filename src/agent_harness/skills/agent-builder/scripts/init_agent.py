@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-Agent Scaffold Script - Create a new agent project with best practices.
+Agent 脚手架脚本：创建新的 agent 项目。
 
-Usage:
+用法：
     python init_agent.py <agent-name> [--level 0-4] [--path <output-dir>]
 
-Examples:
-    python init_agent.py my-agent                 # Level 1 (4 tools)
-    python init_agent.py my-agent --level 0      # Minimal (bash only)
-    python init_agent.py my-agent --level 2      # With TodoWrite
-    python init_agent.py my-agent --path ./bots  # Custom output directory
+示例：
+    python init_agent.py my-agent                 # 第 1 级（4 个工具）
+    python init_agent.py my-agent --level 0      # 最小版（只有 bash）
+    python init_agent.py my-agent --level 2      # 包含 TodoWrite
+    python init_agent.py my-agent --path ./bots  # 自定义输出目录
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-# Agent templates for each level
+# 各级 agent 模板
 TEMPLATES = {
     0: '''#!/usr/bin/env python3
 """
-Level 0 Agent - Bash is All You Need (~50 lines)
+第 0 级 agent：仅用 Bash（约 50 行）
 
-Core insight: One tool (bash) can do everything.
-Subagents via self-recursion: python {name}.py "subtask"
+核心思路：一个 bash 工具即可完成所有操作。
+通过自身递归创建子 agent：python {name}.py "subtask"
 """
 
 from anthropic import Anthropic
@@ -79,10 +79,10 @@ if __name__ == "__main__":
 
     1: '''#!/usr/bin/env python3
 """
-Level 1 Agent - Model as Agent (~200 lines)
+第 1 级 agent：模型即 agent（约 200 行）
 
-Core insight: 4 tools cover 90% of coding tasks.
-The model IS the agent. Code just runs the loop.
+核心思路：4 个工具覆盖大多数编码任务。
+模型负责决策，代码只运行循环。
 """
 
 from anthropic import Anthropic
@@ -120,14 +120,14 @@ TOOLS = [
 ]
 
 def safe_path(p: str) -> Path:
-    """Prevent path escape attacks."""
+    """防止路径逃逸。"""
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
         raise ValueError(f"Path escapes workspace: {{p}}")
     return path
 
 def execute(name: str, args: dict) -> str:
-    """Execute a tool and return result."""
+    """执行工具并返回结果。"""
     if name == "bash":
         dangerous = ["rm -rf /", "sudo", "shutdown", "> /dev/"]
         if any(d in args["command"] for d in dangerous):
@@ -172,7 +172,7 @@ def execute(name: str, args: dict) -> str:
     return f"Unknown tool: {{name}}"
 
 def agent(prompt: str, history: list = None) -> str:
-    """Run the agent loop."""
+    """运行 agent 主循环。"""
     if history is None:
         history = []
     history.append({{"role": "user", "content": prompt}})
@@ -210,7 +210,7 @@ if __name__ == "__main__":
 ''',
 }
 
-ENV_TEMPLATE = '''# API Configuration
+ENV_TEMPLATE = '''# API 配置
 ANTHROPIC_API_KEY=sk-xxx
 ANTHROPIC_BASE_URL=https://api.anthropic.com
 MODEL_NAME=claude-sonnet-4-20250514
@@ -218,30 +218,30 @@ MODEL_NAME=claude-sonnet-4-20250514
 
 
 def create_agent(name: str, level: int, output_dir: Path):
-    """Create a new agent project."""
-    # Validate level
+    """创建新的 agent 项目。"""
+    # 校验级别
     if level not in TEMPLATES and level not in (2, 3, 4):
         print(f"Error: Level {level} not yet implemented in scaffold.")
         print("Available levels: 0 (minimal), 1 (4 tools)")
         print("For levels 2-4, copy from mini-claude-code repository.")
         sys.exit(1)
 
-    # Create output directory
+    # 创建输出目录
     agent_dir = output_dir / name
     agent_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write agent file
+    # 写入 agent 文件
     agent_file = agent_dir / f"{name}.py"
     template = TEMPLATES.get(level, TEMPLATES[1])
     agent_file.write_text(template.format(name=name), encoding="utf-8")
     print(f"Created: {agent_file}")
 
-    # Write .env.example
+    # 写入 .env.example
     env_file = agent_dir / ".env.example"
     env_file.write_text(ENV_TEMPLATE, encoding="utf-8")
     print(f"Created: {env_file}")
 
-    # Write .gitignore
+    # 写入 .gitignore
     gitignore = agent_dir / ".gitignore"
     gitignore.write_text(".env\n__pycache__/\n*.pyc\n", encoding="utf-8")
     print(f"Created: {gitignore}")

@@ -1,4 +1,4 @@
-"""Entry point for ``python -m agent_harness``."""
+"""``python -m agent_harness`` 的入口。"""
 
 from .cli import main
 

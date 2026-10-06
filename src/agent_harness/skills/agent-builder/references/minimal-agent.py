@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Minimal Agent Template - Copy and customize this.
+最小 agent 模板：复制后按需调整。
 
-This is the simplest possible working agent (~80 lines).
-It has everything you need: 3 tools + loop.
+这是最简单的可运行 agent（约 80 行），包含 3 个工具和主循环。
 
-Usage:
-    1. Set ANTHROPIC_API_KEY environment variable
+用法：
+    1. 设置 ANTHROPIC_API_KEY 环境变量
     2. python minimal-agent.py
-    3. Type commands, 'q' to quit
+    3. 输入命令，按 'q' 退出
 """
 
 from anthropic import Anthropic
@@ -16,12 +15,12 @@ from pathlib import Path
 import subprocess
 import os
 
-# Configuration
+# 配置
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 MODEL = os.getenv("MODEL_NAME", "claude-sonnet-4-20250514")
 WORKDIR = Path.cwd()
 
-# System prompt - keep it simple
+# 系统提示词保持简洁
 SYSTEM = f"""You are a coding agent at {WORKDIR}.
 
 Rules:
@@ -29,7 +28,7 @@ Rules:
 - Prefer action over explanation
 - Summarize what you did when done"""
 
-# Minimal tool set - add more as needed
+# 最小工具集，可按需扩展
 TOOLS = [
     {
         "name": "bash",
@@ -65,7 +64,7 @@ TOOLS = [
 
 
 def execute_tool(name: str, args: dict) -> str:
-    """Execute a tool and return result."""
+    """执行工具并返回结果。"""
     if name == "bash":
         try:
             r = subprocess.run(
@@ -95,7 +94,7 @@ def execute_tool(name: str, args: dict) -> str:
 
 
 def agent(prompt: str, history: list = None) -> str:
-    """Run the agent loop."""
+    """运行 agent 主循环。"""
     if history is None:
         history = []
 
@@ -110,14 +109,14 @@ def agent(prompt: str, history: list = None) -> str:
             max_tokens=8000,
         )
 
-        # Build assistant message
+        # 构造 assistant 消息
         history.append({"role": "assistant", "content": response.content})
 
-        # If no tool calls, return text
+        # 没有工具调用时返回文本
         if response.stop_reason != "tool_use":
             return "".join(b.text for b in response.content if hasattr(b, "text"))
 
-        # Execute tools
+        # 执行工具
         results = []
         for block in response.content:
             if block.type == "tool_use":

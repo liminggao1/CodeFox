@@ -1,4 +1,4 @@
-"""Bind durable tasks to Git worktrees and remove completed bindings."""
+"""将持久化任务绑定到 Git worktree，并移除已完成的绑定。"""
 
 from __future__ import annotations
 

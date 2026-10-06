@@ -1,8 +1,7 @@
-"""Tool schemas and handler tables.
+"""工具 schema 与处理器映射表。
 
-This is the single place that maps a tool name to its Python implementation.
-Imports stay at module scope for everything except mcp_tools, which imports
-this module back; that one edge is resolved lazily inside assemble_tool_pool.
+工具名称与 Python 实现统一在这里映射。除反向依赖本模块的 mcp_tools 外，
+其余导入都保持在模块级；这一处循环依赖在 assemble_tool_pool 中延迟处理。
 """
 
 from __future__ import annotations
@@ -16,12 +15,12 @@ from . import file_tools
 from . import scheduler
 from . import mcp_tools
 
-# -- Lead Worktree Tools --
+# -- Lead 的 worktree 工具 --
 
 def run_create_worktree(name: str, task_id: str) -> str:
     return task_worktrees.create_worktree(name, task_id)
 
-# -- Basic Tool Handlers --
+# -- 基础工具处理器 --
 
 def run_create_task(subject: str, description: str = "") -> str:
     task = tasks.create_task(subject, description)
@@ -101,10 +100,9 @@ def run_connect_mcp(name: str) -> str:
     return mcp_tools.connect_mcp(name)
 
 
-# -- Tool Definitions --
+# -- 工具定义 --
 
-# The model sees tool schemas; Python executes handlers. The harness keeps both tables
-# explicit so every added capability is visible in one place.
+# 模型看到工具 schema，Python 执行处理器。两张表明确列出新增的每项能力。
 BUILTIN_TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object",

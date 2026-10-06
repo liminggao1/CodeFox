@@ -1,8 +1,7 @@
-"""Hooks and permission checks.
+"""Hooks 与权限检查。
 
-Hooks sit outside tool handlers so permission, logging, and Stop behavior can
-change without touching each tool. mcp_tool_policies is filled by mcp_tools
-when servers connect; until then every MCP call is confirm-gated.
+Hooks 位于工具处理器之外，因此权限、日志和 Stop 行为可独立调整。
+服务器连接后由 mcp_tools 填充 mcp_tool_policies；在此之前每次 MCP 调用都需确认。
 """
 
 from __future__ import annotations
@@ -11,10 +10,9 @@ import threading
 
 from . import core
 
-# -- Hooks and Permission Checks --
+# -- Hooks 与权限检查 --
 
-# Hooks are intentionally outside tool handlers. The loop can add permission,
-# logging, and stop behavior without changing each individual tool.
+# Hooks 放在工具处理器之外，主循环可增加权限、日志和停止逻辑而不修改各个工具。
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [],
          "PostToolUse": [], "Stop": []}
 
@@ -33,8 +31,7 @@ def trigger_hooks(event: str, *args):
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
 def permission_hook(block):
-    # The permission layer sees the raw tool_use before dispatch. It can deny,
-    # ask the user, or allow execution to continue.
+    # 权限层在分发前检查原始 tool_use，可拒绝、询问用户或放行。
     if block.name == "bash":
         command = block.input.get("command", "")
         if not isinstance(command, str):

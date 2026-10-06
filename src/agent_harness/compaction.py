@@ -1,8 +1,7 @@
-"""Layered context compaction.
+"""分层压缩上下文。
 
-First shrink oversized tool results, then trim old message ranges, and only
-call the model for a summary when the context is still too large or the model
-explicitly asks for compact.
+先缩减过大的工具结果，再裁剪旧消息；只有上下文仍过大，或模型明确要求压缩时，
+才调用模型生成摘要。
 """
 
 from __future__ import annotations
@@ -15,11 +14,9 @@ from pathlib import Path
 from . import core
 from . import subagent
 
-# -- Context Compaction --
+# -- 上下文压缩 --
 
-# Compaction is layered: first shrink oversized tool results, then trim old
-# message ranges, and only call the model for a summary when the context is
-# still too large or the model explicitly asks for compact.
+# 压缩分层进行：先缩减过大的工具结果，再裁剪旧消息；必要时才调用模型生成摘要。
 def estimate_size(messages: list) -> int:
     return len(json.dumps(messages, default=str))
 
@@ -59,7 +56,7 @@ def collect_tool_results(messages: list):
 
 
 def unseen_tool_result_positions(messages: list) -> set[tuple[int, int]]:
-    """Return results added since the model's most recent response."""
+    """返回模型最近一次响应后新增的工具结果。"""
     last_assistant = next(
         (index for index in range(len(messages) - 1, -1, -1)
          if messages[index].get("role") == "assistant"),

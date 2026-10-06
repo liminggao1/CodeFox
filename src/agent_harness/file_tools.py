@@ -1,8 +1,7 @@
-"""Basic file and shell tools.
+"""基础文件与 shell 工具。
 
-Every tool resolves paths through safe_path against a cwd, so a task-bound
-worktree changes where reads and writes land. run_agent_* wrap the same tools
-with the current task assignment's cwd.
+所有工具都通过 safe_path 相对 cwd 解析路径，因此绑定任务的 worktree 会改变
+读写位置。run_agent_* 则用当前任务分配的 cwd 包装同一组工具。
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from pathlib import Path
 from . import core
 from . import tasks
 
-# -- Basic Tools --
+# -- 基础工具 --
 
 
 def safe_path(path: str, cwd: Path | None = None) -> Path:
@@ -37,11 +36,11 @@ _shell_process_lock = threading.RLock()
 
 
 def _stop_process_group(process: subprocess.Popen):
-    """Stop a shell process and its children (cross-platform).
+    """跨平台终止 shell 进程及其子进程。
 
-    POSIX uses process-group signals (SIGTERM then SIGKILL). Windows has
-    neither ``os.killpg`` nor ``signal.SIGKILL``, so it falls back to
-    ``Popen.terminate()`` / ``Popen.kill()``.
+    POSIX 使用进程组信号（先 SIGTERM，后 SIGKILL）。Windows 没有
+    ``os.killpg`` 和 ``signal.SIGKILL``，因此改用
+    ``Popen.terminate()`` / ``Popen.kill()``。
     """
     if os.name == "nt":
         for stop in (process.terminate, process.kill):
@@ -85,7 +84,7 @@ signal.signal(signal.SIGTERM, _handle_termination_signal)
 def _run_bash_process(command: str, cwd: Path | None = None) -> tuple[str, int | None]:
     process = None
     try:
-        # start_new_session (setsid) exists only on POSIX; skip it on Windows.
+        # start_new_session（setsid）仅在 POSIX 上可用，Windows 不使用。
         popen_kwargs = {} if os.name == "nt" else {"start_new_session": True}
         process = subprocess.Popen(
             command, shell=True, cwd=cwd or core.WORKDIR,
@@ -123,7 +122,7 @@ def _format_bash_result(output: str, exit_code: int | None) -> str:
 
 def run_bash(command: str, cwd: Path | None = None,
              run_in_background: bool = False) -> str:
-    # run_in_background is consumed by the dispatcher; direct execution ignores it.
+    # run_in_background 由分发器处理；直接执行时忽略它。
     return _format_bash_result(*_run_bash_process(command, cwd))
 
 

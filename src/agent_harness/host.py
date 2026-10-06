@@ -1,9 +1,9 @@
-"""The integrated harness: agent loop, workflows, and the goal Stop boundary.
+"""集成入口：agent 主循环、工作流和目标的 Stop 边界。
 
-This module only wires the feature modules together. Everything the model can
-do lives in its own module: core (config), tasks, worktrees, task_worktrees,
-skills, prompts, file_tools, teams, hooks, subagent, compaction, recovery,
-scheduler, mcp_tools, and registrations. Launch through cli.py.
+本模块负责连接各功能模块。模型可用的能力分别位于 core（配置）、tasks、
+worktrees、task_worktrees、skills、prompts、file_tools、teams、hooks、
+subagent、compaction、recovery、scheduler、mcp_tools 和 registrations。
+从 cli.py 启动。
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from . import memory_runtime
 from . import goal as goal_module
 from . import workflow
 
-# Re-export the names cli.py and the flat build rely on.
+# 重新导出 cli.py 和 flat 构建依赖的名称。
 from .core import (  # noqa: F401
     CONSOLE, PROMPT, READLINE_PROMPT,
     terminal_print,
@@ -109,7 +109,7 @@ GOAL = None
 
 
 def configure_goal(evaluator_model: str | None = None):
-    """Build the session goal controller the Stop boundary consults."""
+    """创建 Stop 边界使用的会话目标控制器。"""
     global GOAL
     import os
     model = (evaluator_model
@@ -132,7 +132,7 @@ def spawn_teammate(name: str, role: str, prompt: str,
     return teams.spawn_teammate_thread(name, role, prompt, task_id, require_plan)
 
 
-# -- Context --
+# -- 上下文 --
 
 
 def update_context(context: dict, messages: list) -> dict:
@@ -149,14 +149,14 @@ def remember_after_turn(messages: list) -> None:
         memory_runtime.consolidate_memories()
 
 
-# -- Agent Loop --
+# -- Agent 主循环 --
 
 rounds_since_todo = 0
 agent_lock = threading.Lock()
 
 
 def prepare_context(messages: list, active_request: str) -> list:
-    # Every LLM turn enters through the same context budget pipeline.
+    # 每次 LLM 调用都经过同一套上下文预算处理。
     messages[:] = compaction.tool_result_budget(messages)
     messages[:] = compaction.snip_compact(messages)
     if compaction.estimate_size(messages) > core.CONTEXT_LIMIT:
@@ -170,8 +170,7 @@ def prepare_context(messages: list, active_request: str) -> list:
 
 
 def build_user_content(results: list[dict]) -> list[dict]:
-    # Tool results and completed background notifications are both returned to
-    # the model as user-side content, matching the tool_result feedback loop.
+    # 工具结果和已完成的后台通知都作为 user 侧内容返回模型，沿用 tool_result 反馈流程。
     content = list(results)
     for note in scheduler.collect_background_results():
         content.append({"type": "text", "text": note})
@@ -199,7 +198,7 @@ def call_llm(messages: list, context: dict, tools: list,
 
 
 def evaluate_goal(messages: list):
-    """Ask the goal evaluator whether this stop should be allowed."""
+    """询问目标评估器是否允许本轮停止。"""
     if GOAL is None or GOAL.active is None:
         return None
     try:
@@ -219,8 +218,7 @@ def agent_loop(messages: list, context: dict, active_request: str):
 
     unacknowledged_cron_jobs: list[scheduler.CronJob] = []
     while True:
-        # One cycle: inject scheduled/background work, prepare context, call
-        # the model, execute tool_use blocks, append tool_results, repeat.
+        # 每轮注入定时/后台任务，准备上下文，调用模型，执行 tool_use，追加 tool_result，再循环。
         fired = scheduler.consume_cron_queue()
         unacknowledged_cron_jobs.extend(fired)
         for job in fired:

@@ -1,4 +1,4 @@
-"""Flat-build tests: the generated single file stays in sync and runs."""
+"""Flat 构建测试：生成的单文件与源码同步且可运行。"""
 
 from __future__ import annotations
 

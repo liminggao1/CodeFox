@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-The memory runtime: selective knowledge across sessions.
+Memory 运行时：跨会话选择性保留知识。
 
-    +-----------+   selected memories   +------------+
-    | .memory/  | --------------------> | Agent Loop |
+    +-----------+   选取的记忆         +------------+
+    | .memory/  | --------------------> | Agent 循环 |
     +-----------+ <-------------------- +------------+
-                   extracted memories
+                   提取的新记忆
 """
 
 import glob
@@ -45,7 +45,7 @@ ENVIRONMENT_PROMPT = (
     else "Unix-like: the bash tool runs the system shell"
 )
 
-# -- Memory store --
+# -- Memory 存储 --
 
 MEMORY_TYPES = ("user", "feedback", "project", "reference")
 TEMPORARY_MEMORY_MARKERS = (
@@ -112,7 +112,7 @@ def _normalized_memory_text(value: str) -> str:
     return " ".join(value.lower().split())
 
 def should_store_memory(candidate: dict, existing: list[dict]) -> bool:
-    """Accept durable records that are not temporary or already stored."""
+    """仅接受非临时且未存储过的持久化记录。"""
     if not isinstance(candidate, dict):
         return False
     if candidate.get("scope") != "persistent":
@@ -224,7 +224,7 @@ def list_memory_files() -> list[dict]:
         })
     return records
 
-# -- Recall --
+# -- 记忆检索 --
 
 def block_text(block) -> str:
     if isinstance(block, dict):
@@ -354,7 +354,7 @@ def build_system(relevant_memories: str = "") -> str:
         sections.append(f"Relevant memory records:\n{relevant_memories}")
     return "\n\n".join(sections)
 
-# -- Extract and consolidate --
+# -- 提取与整合 --
 
 def dialogue_text(messages: list, max_messages: int = 12) -> str:
     lines = []
@@ -542,7 +542,7 @@ def consolidate_memories() -> int:
         print(f"\n\033[33m[Memory consolidation skipped: {error}]\033[0m")
         return 0
 
-# -- Tools --
+# -- 工具 --
 
 def run_bash(command: str) -> str:
     try:
@@ -721,7 +721,7 @@ def execute_tool(block) -> str:
     trigger_hooks("PostToolUse", block, output)
     return str(output)
 
-# -- Agent loop --
+# -- Agent 循环 --
 
 def agent_loop(messages: list):
     relevant_memories = load_memories(messages)
@@ -769,7 +769,7 @@ if __name__ == "__main__":
     history = []
     while True:
         try:
-            # \001/\002 tell Readline the ANSI escapes have zero display width.
+            # \001/\002 告诉 Readline：ANSI 转义序列不占显示宽度。
             query = input("\001\033[36m\002memory >> \001\033[0m\002")
         except (EOFError, KeyboardInterrupt):
             break

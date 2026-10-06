@@ -1,4 +1,4 @@
-"""Context compaction tests: tool-result pairing and layered shrinking."""
+"""上下文压缩测试：工具结果配对与分层缩减。"""
 
 from __future__ import annotations
 
@@ -64,10 +64,10 @@ def test_micro_compact_keeps_unseen_tool_result_batch(host_factory) -> None:
 
     host.compaction.micro_compact(messages, target_chars=1)
 
-    # Results the model has not answered yet stay verbatim.
+    # 模型尚未处理的结果保持原文。
     assert messages[5]["content"][0]["content"] == "b" * 5000
     assert messages[11]["content"][0]["content"] == "e" * 5000
-    # The one consumed result is moved to disk and referenced by path.
+    # 已处理的结果移到磁盘，并通过路径引用。
     assert messages[2]["content"][0]["content"].startswith(
         "[Earlier tool result saved at "
     )
@@ -89,7 +89,7 @@ def test_micro_compact_releases_batch_after_model_consumes_it(
 
     saved = {path.name for path in host.core.tool_results_dir().glob("*.txt")}
     assert {"t0.txt", "t1.txt", "t2.txt"} <= saved
-    # Everything except the most recent results was moved to disk.
+    # 除最新结果外，其余内容都已移到磁盘。
     for result_index in (2, 5):
         assert messages[result_index]["content"][0]["content"].startswith(
             "[Earlier tool result saved at "

@@ -1,6 +1,6 @@
-"""Host runtime tests: tasks, teammates, and worktrees.
+"""Host 运行时测试：任务、队友和 worktree。
 
-These cases exercise the host runtime directly.
+这些用例直接调用 host 运行时。
 """
 
 from __future__ import annotations

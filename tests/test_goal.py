@@ -1,7 +1,7 @@
-"""Goal layer tests: controller decisions plus host-loop integration.
+"""目标层测试：控制器判定与 host 主循环集成。
 
-Controller-level cases cover the decision rules; the session-level cases drive
-agent_harness.host's loop with a scripted client.
+控制器级用例覆盖判定规则；会话级用例用脚本化客户端驱动
+agent_harness.host 主循环。
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import pytest
 from agent_harness import goal as goal_module
 
 
-# -- Fixtures --
+# -- 测试夹具 --
 
 
 class ScriptedEvaluator:
@@ -79,7 +79,7 @@ def run_host_turn(host_factory, responses, evaluations, condition="tests pass"):
     return host, client, evaluator, messages
 
 
-# -- Controller level --
+# -- 控制器级测试 --
 
 
 def controller(**kwargs):
@@ -226,7 +226,7 @@ def test_transcript_trims_the_middle_of_one_oversized_message():
     assert "middle omitted" in text
 
 
-# -- Host loop integration --
+# -- Host 主循环集成测试 --
 
 
 def test_unmet_goal_continues_automatically_until_achieved(host_factory):

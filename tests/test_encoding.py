@@ -1,4 +1,4 @@
-"""Encoding tests: shell output decoding and workspace text IO."""
+"""编码测试：shell 输出解码与工作区文本读写。"""
 
 from __future__ import annotations
 

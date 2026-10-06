@@ -1,8 +1,7 @@
-"""Background tasks and the cron scheduler.
+"""后台任务与 cron 调度器。
 
-Background commands run a tool call on a worker thread and report back as a
-task_notification. Cron jobs persist to .scheduled_tasks.json in the launch
-directory and feed the loop through cron_queue.
+后台命令在工作线程中执行工具调用，并通过 task_notification 返回结果。
+cron 任务持久化到启动目录的 .scheduled_tasks.json，再通过 cron_queue 送入主循环。
 """
 
 from __future__ import annotations
@@ -22,10 +21,9 @@ from . import file_tools
 from . import hooks
 from . import tasks
 
-# -- Background Tasks --
+# -- 后台任务 --
 
-# Slow tools return a placeholder tool_result immediately. Their real output is
-# later injected as a task_notification, so the main loop can keep moving.
+# 慢工具先返回占位 tool_result，实际结果随后作为 task_notification 注入主循环。
 _bg_counter = 0
 background_tasks: dict[str, dict] = {}
 background_results: dict[str, str] = {}
@@ -115,17 +113,16 @@ def collect_background_results() -> list[str]:
 
 
 def has_pending_background() -> bool:
-    """Return whether terminal background work is waiting for delivery."""
+    """判断是否有已结束但尚未送达的后台任务。"""
     with background_lock:
         return any(task["status"] in {"completed", "failed"}
                    for task in background_tasks.values())
 
 
 
-# -- Cron Scheduler --
+# -- Cron 调度器 --
 
-# Cron jobs are stored separately from conversation history. When a job fires,
-# it becomes a scheduled prompt that is injected back into the same agent loop.
+# cron 任务独立于对话历史存储；触发后转成定时提示词，注入同一个 agent 主循环。
 def _durable_path() -> Path:
     return core.WORKDIR / ".scheduled_tasks.json"
 
@@ -296,7 +293,7 @@ def cancel_job(job_id: str) -> str:
 
 
 def _enqueue_due_job(job: CronJob):
-    """Persist a one-shot delivery before exposing it through the queue."""
+    """先持久化一次性投递，再通过队列公开。"""
     if not job.recurring:
         job.pending_delivery = True
         try:
@@ -333,7 +330,7 @@ def consume_cron_queue() -> list[CronJob]:
 
 
 def acknowledge_cron_jobs(jobs: list[CronJob]):
-    """Remove one-shot jobs after a model call accepts their prompts."""
+    """模型调用接收提示词后，删除对应的一次性任务。"""
     durable_changed = False
     with cron_lock:
         previous_jobs = dict(scheduled_jobs)
@@ -353,7 +350,7 @@ def acknowledge_cron_jobs(jobs: list[CronJob]):
 
 
 def restore_cron_jobs(jobs: list[CronJob]):
-    """Put unacknowledged deliveries back after a failed model call."""
+    """模型调用失败后，将未确认的投递重新入队。"""
     with cron_lock:
         queued_ids = {job.id for job in cron_queue}
         for job in jobs:
@@ -392,7 +389,7 @@ _runtime_services_lock = threading.Lock()
 
 
 def start_runtime_services():
-    """Start durable scheduling once when a CLI host becomes active."""
+    """CLI host 启动时只初始化一次持久化调度。"""
     global _runtime_services_started
     with _runtime_services_lock:
         if _runtime_services_started:

@@ -1,6 +1,6 @@
-"""Provider-agnostic LLM client shim.
+"""与模型提供方无关的 LLM 客户端适配层。
 
-Callers build their client like this::
+调用方这样创建客户端::
 
     from llm_client import Anthropic
 
@@ -9,15 +9,12 @@ Callers build their client like this::
                                       messages=messages, tools=TOOLS,
                                       max_tokens=8000)
 
-This module keeps that shape while letting the same code talk to a different
-wire protocol.
+本模块保持该接口形状，同时支持不同的传输协议。
 
-Default behaviour: the real ``anthropic.Anthropic`` client is returned, so
-nothing changes for Anthropic-compatible endpoints.
+默认返回真正的 ``anthropic.Anthropic`` 客户端，兼容 Anthropic 的端点不受影响。
 
-``LLM_API=responses``: an adapter is returned that speaks the OpenAI
-Responses API (``POST /v1/responses``) upstream and translates the request
-and the reply on the fly. Callers never see the difference.
+设置 ``LLM_API=responses`` 时，返回使用 OpenAI Responses API
+（``POST /v1/responses``）的适配器，自动转换请求与响应；调用方无需感知差异。
 """
 
 import json
@@ -32,7 +29,7 @@ USER_AGENT = "learncc-llm-client/1.0"
 
 
 # ---------------------------------------------------------------------------
-# Configuration
+# 配置
 # ---------------------------------------------------------------------------
 
 def _use_responses() -> bool:
@@ -62,19 +59,19 @@ def _api_key() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Errors, named like the SDK's so existing retry heuristics keep working
+# 错误名称与 SDK 保持一致，以便复用现有重试判断
 # ---------------------------------------------------------------------------
 
 class LLMClientError(Exception):
-    """Base class for errors raised by this shim."""
+    """本适配层抛出的错误基类。"""
 
 
 class APIConnectionError(LLMClientError):
-    """The endpoint could not be reached."""
+    """无法连接端点。"""
 
 
 class APIStatusError(LLMClientError):
-    """The endpoint returned a non-2xx response."""
+    """端点返回非 2xx 响应。"""
 
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
@@ -122,15 +119,14 @@ def _error_for(status: int, detail: str) -> APIStatusError:
 
 
 # ---------------------------------------------------------------------------
-# Message-shaped containers
+# 与 Messages 接口一致的数据容器
 # ---------------------------------------------------------------------------
 
 class Block(dict):
-    """A content block that also supports attribute access.
+    """同时支持属性访问的内容块。
 
-    Callers read ``block.type``, ``block.text``, ``block.input`` and
-    ``block.name``; transcripts and tests read blocks as dicts. A dict with
-    attribute fallback satisfies both, so callers need no changes.
+    调用方读取 ``block.type``、``block.text``、``block.input`` 和
+    ``block.name``；转录与测试则按字典读取。字典加属性回退兼容两种用法。
     """
 
     def __getattr__(self, name):
@@ -144,7 +140,7 @@ class Block(dict):
 
 
 class Message:
-    """The Messages-shaped reply returned to callers."""
+    """返回给调用方的 Messages 形式响应。"""
 
     def __init__(self, content, stop_reason, usage=None, model=None, id=None):
         self.content = content
@@ -157,7 +153,7 @@ class Message:
 
 
 # ---------------------------------------------------------------------------
-# Request translation: Messages -> Responses
+# 请求转换：Messages -> Responses
 # ---------------------------------------------------------------------------
 
 def _field(block, name, default=None):
@@ -187,7 +183,7 @@ def _tool_definition(tool) -> dict:
 
 
 def _message_items(role: str, content) -> list:
-    """Translate one Messages message into Responses input items."""
+    """将一条 Messages 消息转换为 Responses 输入项。"""
     text_kind = "input_text" if role == "user" else "output_text"
     if isinstance(content, str):
         return [{
@@ -234,7 +230,7 @@ def _to_responses_request(model, messages, system, tools, max_tokens) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Response translation: Responses -> Messages
+# 响应转换：Responses -> Messages
 # ---------------------------------------------------------------------------
 
 def _parse_arguments(raw):
@@ -288,7 +284,7 @@ def _to_message(response: dict, fallback_model) -> Message:
 
 
 # ---------------------------------------------------------------------------
-# Wire client
+# 网络客户端
 # ---------------------------------------------------------------------------
 
 def _describe(error: urllib.error.HTTPError) -> str:
@@ -307,7 +303,7 @@ def _describe(error: urllib.error.HTTPError) -> str:
 
 
 class _Messages:
-    """Exposes the ``create`` entry point callers use."""
+    """向调用方提供 ``create`` 方法。"""
 
     def __init__(self, client):
         self._client = client
@@ -317,7 +313,7 @@ class _Messages:
 
 
 class ResponsesClient:
-    """A ``messages.create`` client backed by the OpenAI Responses API."""
+    """基于 OpenAI Responses API 的 ``messages.create`` 客户端。"""
 
     def __init__(self, base_url=None, api_key=None, timeout=None, **_ignored):
         self.base_url = (base_url or os.getenv("OPENAI_BASE_URL")
@@ -369,11 +365,11 @@ class ResponsesClient:
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# 公开入口
 # ---------------------------------------------------------------------------
 
 def Anthropic(*args, **kwargs):
-    """Return a client exposing the ``messages.create`` interface."""
+    """返回提供 ``messages.create`` 接口的客户端。"""
     if _use_responses():
         return ResponsesClient(*args, **kwargs)
     from anthropic import Anthropic as _Anthropic

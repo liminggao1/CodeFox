@@ -1,4 +1,4 @@
-"""Git worktree paths, registry validation, and Git command execution."""
+"""Git worktree 路径、注册信息校验和 Git 命令执行。"""
 
 from __future__ import annotations
 

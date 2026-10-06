@@ -1,7 +1,7 @@
-"""System prompt assembly.
+"""系统提示词组装。
 
-The prompt is rebuilt every turn from live context: identity, tool catalog,
-workspace, skills, memory, and connected MCP servers.
+每轮都根据实时上下文重新组装提示词：身份、工具目录、工作区、skills、
+memory 和已连接的 MCP 服务器。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from . import core
 from . import skills
 from . import mcp_tools
 
-# -- Prompt Assembly --
+# -- 提示词组装 --
 
 ENVIRONMENT_PROMPT = (
     "Windows: the bash tool runs through cmd.exe; use cmd.exe syntax, not Unix "
@@ -66,8 +66,7 @@ PROMPT_SECTIONS = {
 
 
 def assemble_system_prompt(context: dict) -> str:
-    # The system prompt is rebuilt each turn from live context. This is where
-    # memory, skill catalog, MCP state, and active teammates become visible.
+    # 每轮根据实时上下文重建系统提示词，让 memory、skills、MCP 状态和队友可见。
     sections = [PROMPT_SECTIONS["identity"],
                 PROMPT_SECTIONS["tools"],
                 PROMPT_SECTIONS["tasks"],

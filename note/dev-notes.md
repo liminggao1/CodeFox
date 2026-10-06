@@ -120,7 +120,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
    **要打开 `/mnt/d/...`，不要开 `D:\...`**；两种窗口外观很像，靠左下角区分。
 2. **确认左下角**显示 `WSL: Ubuntu-22.04`。
 3. **确认解释器**为 `/home/gaogao/miniconda3/envs/learncc/bin/python`
-   （`.vscode/settings.json` 已设为默认，通常自动选中）。
+   （`.vscode/settings.json` 设为默认，`.vscode/launch.json` 的五个调试配置也显式使用该解释器，不会用 base）。
 4. **按 F5**，选「Agent 交互（真实 API）」。断点直接打在 `src/agent_harness/` 的代码行上。
 
 ### 已准备的调试配置
@@ -139,21 +139,21 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 | 想看什么 | 位置 |
 | --- | --- |
-| 一轮对话的完整流程 | [host.py:214](../src/agent_harness/host.py:214) `agent_loop` |
+| 一轮对话的完整流程 | [host.py:213](../src/agent_harness/host.py:213) `agent_loop` |
 | 上下文如何刷新 | [host.py:138](../src/agent_harness/host.py:138) `update_context` |
-| goal 的 Stop 判定 | [host.py:201](../src/agent_harness/host.py:201) `evaluate_goal`、[goal.py:174](../src/agent_harness/goal.py:174) `evaluate` |
+| goal 的 Stop 判定 | [host.py:200](../src/agent_harness/host.py:200) `evaluate_goal`、[goal.py:174](../src/agent_harness/goal.py:174) `evaluate` |
 | 系统提示词怎么拼出来 | [prompts.py:68](../src/agent_harness/prompts.py:68) `assemble_system_prompt` |
-| 工具调用与结果 | [file_tools.py:218](../src/agent_harness/file_tools.py:218) `call_tool_handler` |
-| 工具池装配 | [mcp_tools.py:138](../src/agent_harness/mcp_tools.py:138) `assemble_tool_pool` |
+| 工具调用与结果 | [file_tools.py:217](../src/agent_harness/file_tools.py:217) `call_tool_handler` |
+| 工具池装配 | [mcp_tools.py:137](../src/agent_harness/mcp_tools.py:137) `assemble_tool_pool` |
 | 任务生命周期 | [tasks.py](../src/agent_harness/tasks.py) `create_task` / `claim_task` / `complete_task` |
 | 任务与 worktree 绑定 | [task_worktrees.py:13](../src/agent_harness/task_worktrees.py:13) `create_worktree` / `remove_worktree` |
 | 队友线程与协议 | [teams.py](../src/agent_harness/teams.py) `spawn_teammate_thread`、`apply_plan_response` |
 | 权限与 hooks | [hooks.py](../src/agent_harness/hooks.py) `permission_hook`、`trigger_hooks` |
 | 后台任务 / cron | [scheduler.py](../src/agent_harness/scheduler.py) `start_background_task`、`cron_scheduler_loop` |
-| 工作流单次 agent 调用 | [workflow.py:500](../src/agent_harness/workflow.py:500) `ExecutionState.agent` |
+| 工作流单次 agent 调用 | [workflow.py:520](../src/agent_harness/workflow.py:520) `ExecutionState.agent` |
 | journal 读写与 resume | [workflow.py:349](../src/agent_harness/workflow.py:349) `WorkflowJournal` |
 | memory 选取 / 抽取 | [memory_runtime.py:287](../src/agent_harness/memory_runtime.py:287)、[:393](../src/agent_harness/memory_runtime.py:393) |
-| 启动与 `/goal` 拦截 | [cli.py:44](../src/agent_harness/cli.py:44) `run_cli`、[:23](../src/agent_harness/cli.py:23) `handle_goal_command` |
+| 启动与 `/goal` 拦截 | [cli.py:43](../src/agent_harness/cli.py:43) `run_cli`、[:22](../src/agent_harness/cli.py:22) `handle_goal_command` |
 
 行号会随源码变动，对不上就按函数名搜。拆分后每个机制一个文件，先按文件名定位，再找函数。
 

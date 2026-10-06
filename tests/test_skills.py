@@ -1,4 +1,4 @@
-"""Skill loading tests: manifest parsing and catalog behavior."""
+"""Skill 加载测试：清单解析与目录行为。"""
 
 from __future__ import annotations
 

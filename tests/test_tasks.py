@@ -1,4 +1,4 @@
-"""Task board tests: ownership, dependency graph, and store guards."""
+"""任务板测试：归属、依赖图和存储边界。"""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ def test_dependencies_gate_claim_and_completion_checks_owner(host_factory) -> No
     assert host.claim_task(api.id) == f"Blocked by: ['{schema.id}']"
     assert "Claimed" in host.claim_task(schema.id)
     assert "Unblocked: write API" in host.complete_task(schema.id)
-    # An owner keeps its cwd lease until the turn boundary releases it, so a
-    # second claim is refused until release_completed_assignment runs.
+    # 所有者的 cwd 租约在轮次边界才释放，因此执行 release_completed_assignment 前
+    # 不允许再次领取任务。
     assert "must finish the current work turn" in host.claim_task(api.id)
     assert host.release_completed_assignment("agent") is True
     assert "Claimed" in host.claim_task(api.id)
@@ -138,8 +138,7 @@ def test_task_store_rejects_a_symlink_outside_the_workspace(
     outside.mkdir()
     (tmp_path / ".tasks").symlink_to(outside, target_is_directory=True)
 
-    # The symlinked .tasks dir resolves outside the workspace, so the path
-    # guard rejects every write instead of escaping the launch directory.
+    # 符号链接 .tasks 指向工作区外，路径检查应拒绝写入，避免越过启动目录。
     from agent_harness import tasks
 
     with pytest.raises(ValueError, match="Invalid task ID"):

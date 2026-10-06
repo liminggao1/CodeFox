@@ -1,7 +1,7 @@
-"""MCP as late-bound tools.
+"""把 MCP 接入为运行时动态发现的工具。
 
-Connect a server first; its tools are then merged into the normal tool pool
-under mcp__server__tool names, with per-tool host policy applied.
+先连接服务器，再以 mcp__server__tool 名称将其工具合并到常规工具池，
+并应用 host 为每个工具设置的策略。
 """
 
 from __future__ import annotations
@@ -12,12 +12,11 @@ from . import core
 from . import workflow
 from .task_worktrees import create_worktree
 
-# -- MCP System --
+# -- MCP 系统 --
 
-# MCP is modeled as late-bound tools: connect first, then discovered server
-# tools are merged into the normal tool pool with mcp__server__tool names.
+# MCP 工具在连接服务器后才发现，并以 mcp__server__tool 名称加入常规工具池。
 class MCPClient:
-    """Small in-process stand-in for MCP tools/list and tools/call."""
+    """在进程内模拟 MCP 的 tools/list 和 tools/call。"""
 
     def __init__(self, name: str):
         self.name = name
@@ -50,7 +49,7 @@ class MCPClient:
 mcp_clients: dict[str, MCPClient] = {}
 _DISALLOWED_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 
-# Authorization comes from host configuration, never server descriptions.
+# 授权取决于 host 配置，而不是服务器返回的工具描述。
 mcp_tool_policies: dict[str, str] = {}
 
 MCP_HOST_POLICY = {
@@ -62,7 +61,7 @@ MCP_HOST_POLICY = {
 
 
 def normalize_mcp_name(name: str) -> str:
-    """Replace characters outside the model tool-name alphabet."""
+    """替换不符合模型工具名称规则的字符。"""
     normalized = _DISALLOWED_CHARS.sub("_", name)
     if not normalized:
         raise ValueError("MCP names cannot normalize to an empty string")
@@ -136,7 +135,7 @@ def connect_mcp(name: str) -> str:
 
 
 def assemble_tool_pool() -> tuple[list[dict], dict]:
-    """Merge builtin tools + all MCP tools into one pool."""
+    """将内置工具和所有 MCP 工具合并到同一个工具池。"""
     global mcp_tool_policies
     from . import registrations
     tools = list(registrations.BUILTIN_TOOLS)
@@ -183,7 +182,7 @@ def assemble_tool_pool() -> tuple[list[dict], dict]:
     return tools, handlers
 
 
-# -- Lead Worktree Tools --
+# -- Lead 的 worktree 工具 --
 
 def run_create_worktree(name: str, task_id: str) -> str:
     return create_worktree(name, task_id)

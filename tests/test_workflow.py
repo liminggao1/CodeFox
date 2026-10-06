@@ -1,7 +1,6 @@
-"""Workflow runtime tests.
+"""Workflow 运行时测试。
 
-The Workflow tool is native to the host tool pool, so these cases assert the
-real pool and runner wiring.
+Workflow 工具属于 host 工具池，因此这些用例检查真实工具池及 runner 连接。
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from agent_harness import workflow  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def deterministic_runner(monkeypatch):
-    """Importing agent.host wires the API runner; these tests stay offline."""
+    """导入 agent.host 会连接 API runner；这些测试保持离线。"""
     monkeypatch.setattr(workflow, "RUNNER_FACTORY", workflow.MockAgentRunner)
 
 

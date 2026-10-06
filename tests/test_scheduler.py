@@ -1,4 +1,4 @@
-"""Background task and cron scheduler tests."""
+"""后台任务与 cron 调度器测试。"""
 
 from __future__ import annotations
 
@@ -241,7 +241,7 @@ def test_corrupt_durable_store_is_ignored(host_factory) -> None:
 
     host.scheduler.load_durable_jobs()
 
-    # An unreadable store must not resurrect phantom jobs.
+    # 存储文件不可读时，不能恢复出不存在的任务。
     assert host.scheduler.scheduled_jobs == {}
 
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Offline end-to-end debug pass for agent_harness.
+"""agent_harness 的离线端到端调试自检。
 
-Exercises the real host loop, tool guards, goal Stop boundary, task lifecycle,
-workflow resume, git worktrees, and the flat build - all without network.
+覆盖真实 host 主循环、工具检查、目标 Stop 边界、任务生命周期、
+工作流恢复、Git worktree 和 flat 构建，全程不联网。
 
   PYTHONPATH=src python scripts/debug_pass.py
 
-Everything runs inside a fresh temp directory, so the repo and its runtime state
-are untouched. Exit code is the number of failed checks.
+所有检查都在新建临时目录中运行，不影响仓库及其运行时状态。
+退出码等于失败检查的数量。
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ os.environ.setdefault("MODEL_ID", "debug-model")
 os.environ.setdefault("ANTHROPIC_API_KEY", "debug-key")
 os.environ.setdefault("LLM_API", "responses")
 
-# `compact` is declared as a tool but handled inline by agent_loop, so it has no
-# entry in the handler table. Every other schema must have a handler.
+# `compact` 声明为工具，但由 agent_loop 内部处理，处理器表中没有对应项。
+# 其他 schema 都必须有处理器。
 INLINE_ONLY_TOOLS = {"compact"}
 
 RESULTS: list[tuple[str, str, str]] = []
@@ -41,7 +41,7 @@ def check(name: str, fn) -> None:
     try:
         detail = fn()
         RESULTS.append(("PASS", name, f"{time.time() - started:.2f}s  {detail or ''}".rstrip()))
-    except Exception as exc:  # a failing check must not stop the pass
+    except Exception as exc:  # 单项失败不应中断后续检查
         RESULTS.append(("FAIL", name, f"{type(exc).__name__}: {exc}"))
 
 
@@ -84,7 +84,7 @@ def run_git(*args: str, cwd: Path):
 
 
 def worktree_child() -> int:
-    """Drive the worktree flow in its own process, where cwd == the git repo."""
+    """在独立进程中执行 worktree 流程，此时 cwd 是 Git 仓库。"""
     import agent_harness.host as host
 
     repo = Path.cwd()
@@ -97,7 +97,7 @@ def worktree_child() -> int:
     (bound / "b.txt").write_text("work done\n", encoding="utf-8")
     run_git("add", "-A", cwd=bound)
     run_git("commit", "-qm", "work in worktree", cwd=bound)
-    # Removal is refused while the task is still active; complete it first.
+    # 任务仍在进行时不允许移除 worktree，必须先完成任务。
     assert "Error" in host.remove_worktree("dbg", discard_changes=True)
     assert "Completed" in host.complete_task(task.id, owner="agent")
     assert host.release_completed_assignment("agent") is True
@@ -119,7 +119,7 @@ def main() -> int:
     import agent_harness.host as host
     from agent_harness import goal as goal_module
 
-    host.remember_after_turn = lambda messages: None  # keep memory offline
+    host.remember_after_turn = lambda messages: None  # 保持记忆功能离线
     context = host.update_context({}, [])
 
     def t_tool_pool():

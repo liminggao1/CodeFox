@@ -1,7 +1,6 @@
-"""Retry and error recovery for model calls.
+"""模型调用的重试与错误恢复。
 
-Tracks the current model, retry budget, and consecutive-overload count across
-one agent turn so the loop can fall back without duplicating state.
+记录当前模型、重试额度和连续过载次数，让主循环在本轮中复用状态完成回退。
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ from dataclasses import dataclass
 
 from . import core
 
-# -- Error Recovery --
+# -- 错误恢复 --
 
 class RecoveryState:
     def __init__(self):

@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-agent.workflow - the workflow runtime.
+agent.workflow：工作流运行时。
 
-A saved orchestration runs through one Workflow tool call. The host appends
-this tool to its pool; state lives under the launch directory in .runtime/.
+已保存的编排通过一次 Workflow 工具调用执行。host 将该工具加入工具池；
+状态保存在启动目录的 .runtime/ 下。
 
     +-------------+       +--------------------------------+
-    | Agent loop  | ----> | Workflow(name, args, run_id)  |
+    | Agent 主循环 | ----> | Workflow(name, args, run_id)  |
     +-------------+       +---------------+----------------+
                                           |
                            +--------------+--------------+
                            | agent | parallel | pipeline  |
                            +--------------+--------------+
                                           |
-                                   journal + result
+                                   journal + 结果
 """
 
 import asyncio
@@ -31,7 +31,7 @@ from . import core
 
 try:
     import fcntl
-except ImportError:  # Windows has no fcntl module.
+except ImportError:  # Windows 没有 fcntl 模块。
     fcntl = None
 
 WORKFLOW_AGENT_ENVIRONMENT = (
@@ -42,10 +42,10 @@ WORKFLOW_AGENT_ENVIRONMENT = (
          "step; it has no direct shell or file tools."
 )
 
-# -- Runtime Guards --
-AGENT_CAP = 1000                       # hard cap on agent() calls per run
-CONCURRENCY = 8                        # parallelism cap (semaphore)
-MISS = object()                        # journal cache miss sentinel
+# -- 运行时限制 --
+AGENT_CAP = 1000                       # 每次运行最多调用 agent() 的次数
+CONCURRENCY = 8                        # 并发上限（信号量）
+MISS = object()                        # journal 缓存未命中标记
 WORKFLOW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RUN_ID_RE = re.compile(r"^wf_[A-Za-z0-9][A-Za-z0-9._-]{0,63}_[0-9a-f]{16}$")
 
@@ -55,8 +55,8 @@ def store_dir() -> Path:
 
 
 def _stable_hash(s: str) -> int:
-    """Process-stable hash (Python's hash() is salted per process, which would
-    break resume keys across `run` and `resume`)."""
+    """返回跨进程稳定的哈希值；Python 的 hash() 每个进程都不同，
+    会导致 `run` 与 `resume` 使用不同的恢复键。"""
     return int(hashlib.sha256(s.encode()).hexdigest(), 16)
 
 
@@ -65,7 +65,7 @@ def create_run_id(meta) -> str:
 
 
 def reserve_run_id(meta) -> str:
-    """Reserve a fresh run identity before any journal can be truncated."""
+    """在截断任何 journal 之前先预留新的运行标识。"""
     store_dir().mkdir(parents=True, exist_ok=True)
     for _ in range(32):
         run_id = validate_run_id(create_run_id(meta))
@@ -89,9 +89,9 @@ def validate_run_id(run_id):
     return run_id
 
 
-# -- Errors --
+# -- 错误类型 --
 class WorkflowInputError(Exception):
-    """Bad workflow, metadata, or schema input."""
+    """工作流、元数据或 schema 输入无效。"""
 
 
 _run_locks_guard = threading.Lock()
@@ -99,7 +99,7 @@ _run_locks: dict[str, threading.Lock] = {}
 _fcntl_warned = False
 
 def _warn_missing_fcntl():
-    """Say once that cross-process locking degraded to in-process only."""
+    """跨进程锁降级为进程内锁时只提示一次。"""
     global _fcntl_warned
     if not _fcntl_warned:
         _fcntl_warned = True
@@ -109,7 +109,7 @@ def _warn_missing_fcntl():
 
 @contextmanager
 def workflow_run_lock(run_id: str):
-    """Hold one run across threads and host processes for its full lifecycle."""
+    """在整个生命周期中为同一次运行跨线程、跨 host 进程加锁。"""
     with _run_locks_guard:
         local_lock = _run_locks.setdefault(run_id, threading.Lock())
     if not local_lock.acquire(blocking=False):
@@ -144,9 +144,9 @@ def workflow_run_lock(run_id: str):
                 _run_locks.pop(run_id, None)
 
 
-# -- Metadata Validation --
+# -- 元数据校验 --
 def validate_meta(meta):
-    """Validate name, description, and optional phases before launch."""
+    """启动前校验名称、描述和可选阶段。"""
     if not isinstance(meta, dict):
         raise WorkflowInputError("meta must be an object literal")
     if not meta.get("name") or not meta.get("description"):
@@ -166,17 +166,17 @@ def validate_meta(meta):
 
 
 def check_permission(meta, settings=None):
-    """Apply the allow/deny permission gate before launching a workflow."""
+    """启动工作流前执行允许/拒绝权限检查。"""
     settings = settings or {}
     if meta["name"] in settings.get("deny", []):
         raise WorkflowInputError(f"workflow '{meta['name']}' denied by settings")
     return "allow"
 
 
-# -- Minimal JSON Schema --
+# -- 最小化 JSON Schema 校验 --
 class SimpleJsonSchema:
-    """Tiny validator backing agent({schema}):
-    object/array/string/boolean/number + required keys."""
+    """校验 agent({schema}) 的基本类型和必填字段：
+    object/array/string/boolean/number 与 required。"""
 
     def __init__(self, schema):
         self.schema = schema
@@ -219,7 +219,7 @@ class SimpleJsonSchema:
 
 
 def _fill_schema(schema, seed):
-    """Deterministic generic filler used for schemas the mock doesn't special-case."""
+    """为模拟器未特殊处理的 schema 生成确定性的通用填充值。"""
     t = schema.get("type")
     if t == "object":
         keys = schema.get("required") or list(schema.get("properties", {}))
@@ -233,7 +233,7 @@ def _fill_schema(schema, seed):
     return seed.rsplit("/", 1)[-1]
 
 
-# -- Agent Runners --
+# -- Agent 执行器 --
 
 
 @dataclass(frozen=True)
@@ -243,7 +243,7 @@ class RunnerOutput:
 
 
 class MockAgentRunner:
-    """Deterministic runner used by demo mode and unit tests."""
+    """供 demo 和单元测试使用的确定性执行器。"""
 
     def run(self, prompt, schema=None, label=None):
         if schema is None:
@@ -303,7 +303,7 @@ def _parse_runner_json(text: str) -> object:
 
 
 class AnthropicAgentRunner:
-    """Run workflow agents through the same API client as the host."""
+    """工作流 agent 复用 host 的 API 客户端。"""
 
     def __init__(self, client, model):
         self.client = client
@@ -333,7 +333,7 @@ class AnthropicAgentRunner:
             try:
                 value = _parse_runner_json(text)
             except WorkflowInputError:
-                # Let ExecutionState's schema check trigger its single retry.
+                # 由 ExecutionState 的 schema 校验触发唯一一次重试。
                 value = text
         usage = getattr(response, "usage", None)
         tokens = int(getattr(usage, "input_tokens", 0) or 0) + int(
@@ -345,10 +345,10 @@ class AnthropicAgentRunner:
 RUNNER_FACTORY = MockAgentRunner
 
 
-# -- Journal --
+# -- Journal 日志 --
 class WorkflowJournal:
-    """Append-only <runId>.journal.jsonl. On resume, agent() calls whose
-    semantic key is already present are replayed from cache instead of re-run."""
+    """只追加写入 <runId>.journal.jsonl；恢复时，已有语义键的 agent() 调用
+    直接从缓存重放，不再次执行。"""
 
     def __init__(self, run_id, resume, store=None):
         store = store_dir() if store is None else store
@@ -407,11 +407,10 @@ class WorkflowJournal:
                     )
             self._f = self.path.open("a", encoding="utf-8")
         else:
-            self._f = self.path.open("w", encoding="utf-8")             # fresh run truncates
+            self._f = self.path.open("w", encoding="utf-8")             # 新运行从空文件开始
 
     def key(self, kind, label, prompt, schema):
-        # Deterministic semantic key, independent of concurrency order, so a
-        # parallel/pipeline call gets the same key on resume.
+        # 语义键不依赖并发顺序，parallel/pipeline 调用在恢复时仍能得到相同的键。
         basis = f"{kind}|{label}|{prompt}|{json.dumps(schema, sort_keys=True)}"
         return f"{kind}-{_stable_hash(basis) % 10**10:010d}"
 
@@ -433,10 +432,10 @@ class WorkflowJournal:
         self._f.close()
 
 
-# -- Token Budget --
+# -- Token 预算 --
 class Budget:
-    """budget.total / spent() / remaining(). Once spent reaches total, agent()
-    calls raise instead of silently overspending."""
+    """提供 budget.total、spent() 和 remaining()；用量达到上限后，
+    agent() 调用抛错，不会静默超支。"""
 
     def __init__(self, total=None, spent=0):
         self.total = total
@@ -456,9 +455,9 @@ class Budget:
         return float("inf") if self.total is None else max(0, self.total - self._spent)
 
 
-# -- Workflow Task Lifecycle --
+# -- 工作流任务生命周期 --
 class LocalWorkflowTask:
-    """Hold workflow status, usage, and progress events."""
+    """保存工作流状态、用量和进度事件。"""
 
     def __init__(self, task_id, run_id, meta):
         self.task_id = task_id
@@ -479,9 +478,9 @@ class LocalWorkflowTask:
         print(f"  progress   {ptype:<16} {line}")
 
 
-# -- Workflow Primitives --
+# -- 工作流原语 --
 class ExecutionLimits:
-    """Shared run-wide limits, including nested workflows."""
+    """本次运行共享的限制，也适用于嵌套工作流。"""
 
     def __init__(self):
         self.agents = 0
@@ -494,7 +493,7 @@ class ExecutionLimits:
 
 
 class ExecutionState:
-    """Injected into the workflow script with the orchestration primitives."""
+    """注入工作流脚本的编排原语容器。"""
 
     def __init__(self, task, journal, runner, budget, args, depth=0, limits=None):
         self.task = task
@@ -508,20 +507,19 @@ class ExecutionState:
         self._limits = limits or ExecutionLimits()
 
     def phase(self, title):
-        """Start a phase; subsequent agent()s group under it. Upsert: emitting the
-        same phase again (e.g. from each pipeline item) does not re-announce it."""
+        """开启阶段，后续 agent() 归入该阶段；重复声明同一阶段时不再次播报。"""
         self._phase = title
         if title not in self._phases_seen:
             self._phases_seen.add(title)
             self.task.progress_event("workflow_phase", title=title)
 
     def log(self, message):
-        """Emit a workflow_log progress line."""
+        """发出一条 workflow_log 进度记录。"""
         self.task.progress_event("workflow_log", message=message)
 
     async def agent(self, prompt, schema=None, label=None, phase=None):
-        """Spawn one subagent. With a schema, force StructuredOutput + validate
-        (retry once). On resume, a cached key short-circuits the run."""
+        """启动一个子 agent；提供 schema 时要求结构化输出并校验，最多重试一次。
+        恢复时若命中缓存键，直接返回缓存结果。"""
         label = label or (prompt[:24] + "...")
         self._limits.claim_agent()
         key = self.journal.key("agent", label, prompt, schema)
@@ -577,13 +575,12 @@ class ExecutionState:
         return result
 
     async def parallel(self, thunks):
-        """BARRIER: run all thunks concurrently and fail if any thunk fails."""
+        """同步点：并发执行所有任务，任一任务失败则整体失败。"""
         return await asyncio.gather(*[thunk() for thunk in thunks])
 
     async def pipeline(self, items, *stages):
-        """Per-item staged flow, NO barrier between stages: item A can be in
-        stage 3 while item B is still in stage 1. Each stage gets
-        (prev_result, original_item, index). A throwing stage fails the workflow."""
+        """逐项执行分阶段流程，阶段间没有同步点：A 可进入第三阶段，B 仍在第一阶段。
+        每个阶段接收（上阶段结果，原始项，索引）；任一阶段抛错则工作流失败。"""
         async def run_item(item, idx):
             value = item
             for stage in stages:
@@ -592,8 +589,8 @@ class ExecutionState:
         return await asyncio.gather(*[run_item(it, i) for i, it in enumerate(items)])
 
     async def workflow(self, name, args=None):
-        """Run a saved workflow inline as a child (one level), sharing this run's
-        journal + budget + agent counter."""
+        """以内联子流程运行已保存的工作流（只允许一层），
+        共享本次运行的 journal、预算和 agent 计数器。"""
         if self._depth >= 1:
             raise WorkflowInputError("workflow() nesting is one level only")
         if name not in WORKFLOWS:
@@ -605,12 +602,11 @@ class ExecutionState:
         return await fn(child, args or {})
 
 
-# -- Workflow Tool --
+# -- Workflow 工具 --
 class WorkflowTool:
-    """The Workflow tool. .call() validates meta, runs the permission check,
-    creates runId/taskId, registers a LocalWorkflowTask, and emits lifecycle
-    events while executing the script. It returns the result and task state and
-    supports resume."""
+    """Workflow 工具：.call() 校验 meta 和权限，创建 runId/taskId，
+    注册 LocalWorkflowTask，在执行脚本时发出生命周期事件；返回结果和任务状态，
+    并支持 resume。"""
 
     async def call(self, meta, script_fn, args=None, resume_from_run_id=None):
         validate_meta(meta)
@@ -647,7 +643,7 @@ class WorkflowTool:
                 "agents": journal.historical_agents,
                 "tokens": journal.historical_tokens,
             }
-        # Record the launch envelope before workflow execution starts.
+        # 工作流执行前先记录启动事件。
         launched = {"status": "async_launched", "taskId": task_id,
                     "taskType": "local_workflow", "runId": run_id,
                     "workflowName": meta["name"]}
@@ -669,7 +665,7 @@ class WorkflowTool:
             )
             result = await script_fn(ctx, args)
             task.status = "completed"
-        except Exception as e:                          # failed / stopped close the loop too
+        except Exception as e:                          # 失败或停止也要结束循环
             task.status = "failed"
             result = {"error": str(e)}
         finally:
@@ -718,7 +714,7 @@ def _read_last_run():
     return p.read_text(encoding="utf-8").strip() if p.exists() else None
 
 
-# -- Sample Workflow --
+# -- 示例工作流 --
 FINDINGS_SCHEMA = {
     "type": "object", "required": ["findings"],
     "properties": {"findings": {"type": "array", "items": {
@@ -750,8 +746,8 @@ DEMO_CHANGES = (
 
 
 async def sample_workflow(ctx, args):
-    """pipeline over review dimensions (audit -> verify-each), then keep only the
-    findings a verifier confirms. The plan is code, not a chat turn."""
+    """按审查维度执行 pipeline（审计后逐项验证），只保留验证者确认的问题。
+    计划由代码表达，不占用一轮对话。"""
     ctx.phase("Review")
     changes = args.get("changes", "")
     if not isinstance(changes, str):
@@ -768,7 +764,7 @@ async def sample_workflow(ctx, args):
 
     async def verify(audited, dimension, _idx):
         ctx.phase("Verify")
-        # Each finding is verified by its own adversarial subagent, concurrently.
+        # 每个发现由独立的对抗式子 agent 并发验证。
         verdicts = await ctx.parallel([
             (lambda f=f: ctx.agent(
                 f"Adversarially verify this {dimension} finding against the "
@@ -789,7 +785,7 @@ async def sample_workflow(ctx, args):
     return {"confirmed": confirmed}
 
 
-# Saved workflow registry
+# 已保存的工作流注册表
 WORKFLOWS = {SAMPLE_META["name"]: (SAMPLE_META, sample_workflow)}
 
 WORKFLOW_TOOL = {
@@ -822,7 +818,7 @@ def serialize_task(task):
 
 
 async def run_workflow(name, args=None, resume_from_run_id=None):
-    """Model-facing adapter: resolve trusted code from the host registry."""
+    """面向模型的适配器：从 host 注册表定位可信代码。"""
     if not isinstance(name, str):
         raise WorkflowInputError("workflow name must be a string")
     if name not in WORKFLOWS:
@@ -847,7 +843,7 @@ WORKFLOW_HANDLERS = {"Workflow": run_workflow}
 
 
 def run_workflow_sync(**tool_input):
-    """Bridge the synchronous host dispatcher to the async workflow runtime."""
+    """连接同步 host 分发器与异步工作流运行时。"""
     try:
         return json.dumps(asyncio.run(run_workflow(**tool_input)), default=str)
     except WorkflowInputError as exc:

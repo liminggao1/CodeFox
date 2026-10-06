@@ -1,8 +1,7 @@
-"""Persistent teams: mailboxes, protocols, and teammate threads.
+"""持久化团队：信箱、协议和队友线程。
 
-A teammate is a daemon thread with its own agent loop. Lead and teammates
-coordinate through file-backed mailboxes; plan and shutdown approvals are
-matched by request id so stale replies cannot leak into a later assignment.
+每个队友都是运行独立 agent 循环的守护线程。Lead 与队友通过文件信箱协作；
+计划和关闭审批按 request id 匹配，避免旧回复影响后续任务。
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from . import tasks
 from . import file_tools
 from . import hooks
 
-# -- MessageBus and Team Protocols --
+# -- 消息总线与团队协议 --
 
 def _mailbox_dir() -> Path:
     return core.WORKDIR / ".mailboxes"
@@ -103,7 +102,7 @@ plan_gate_versions: dict[str, int] = {}
 team_lock = threading.RLock()
 
 
-# -- Protocol State --
+# -- 协议状态 --
 
 @dataclass
 class ProtocolState:
@@ -181,13 +180,13 @@ def format_team_events(msgs: list[dict]) -> str:
 
 
 
-# -- Team Task Assignment --
+# -- 团队任务分配 --
 
 IDLE_SCAN_INTERVAL = 2.0
 
 
 def scan_unclaimed_tasks() -> list[tasks.Task]:
-    """Return ready tasks whose optional worktree binding is usable."""
+    """返回可领取且 worktree 绑定可用的任务。"""
     with tasks.task_lock:
         ready = []
         for task in tasks.list_tasks():
@@ -201,7 +200,7 @@ def scan_unclaimed_tasks() -> list[tasks.Task]:
 
 
 def claim_next_task(name: str) -> tasks.Task | None:
-    """Claim the first still-available task, never a second assignment."""
+    """领取第一个仍可用的任务，不重复分配。"""
     with tasks.task_lock:
         if tasks.teammate_assignments.get(name) or tasks._owner_in_progress(name):
             return None
@@ -251,7 +250,7 @@ def _run_teammate_tool(name: str, block, handlers: dict) -> str:
 
 
 def apply_plan_response(name: str, msg: dict) -> tuple[bool, str]:
-    """Apply only the Lead response for this teammate's current plan."""
+    """只接受 Lead 对该队友当前计划的回复。"""
     metadata = msg.get("metadata", {})
     request_id = metadata.get("request_id", "")
     with tasks.task_lock:
@@ -284,7 +283,7 @@ def apply_plan_response(name: str, msg: dict) -> tuple[bool, str]:
 
 
 def apply_shutdown_request(name: str, msg: dict) -> tuple[bool, str]:
-    """Accept only a pending shutdown request sent by Lead to this teammate."""
+    """只接受 Lead 发给该队友且仍待处理的关闭请求。"""
     request_id = msg.get("metadata", {}).get("request_id", "")
     with team_lock:
         state = pending_requests.get(request_id)
@@ -313,7 +312,7 @@ def _teammate_send_message(from_name: str, to: str, content: str) -> str:
 
 
 
-# -- Teammate Thread --
+# -- 队友线程 --
 
 def spawn_teammate_thread(name: str, role: str, prompt: str,
                           task_id: str | None = None,
@@ -661,7 +660,7 @@ def _teammate_submit_plan(from_name: str, plan: str) -> str:
 
 
 
-# -- Lead Team Tools --
+# -- Lead 团队工具 --
 
 def run_request_shutdown(teammate: str) -> str:
     if teammate not in active_teammates:

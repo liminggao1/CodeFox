@@ -1,7 +1,7 @@
-"""Skill loading: read SKILL.md manifests shipped inside the package.
+"""加载随包分发的 SKILL.md 清单。
 
-The catalog is scanned once at import; the system prompt lists it and the
-model calls load_skill(name) to pull one skill's full text into context.
+导入时扫描一次目录；系统提示词列出结果，模型通过 load_skill(name)
+把指定 skill 的全文加载到上下文。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import yaml
 
 from . import core
 
-# -- Skill Loading --
+# -- Skill 加载 --
 
 SKILL_REGISTRY: dict[str, dict] = {}
 
