@@ -20,7 +20,6 @@ from pathlib import Path
 
 from . import core
 from . import tasks
-from . import worktrees
 
 # -- Basic Tools --
 
@@ -185,7 +184,7 @@ def run_glob(pattern: str, cwd: Path | None = None) -> str:
 
 def _agent_cwd() -> tuple[Path | None, str | None]:
     try:
-        return worktrees.assignment_cwd("agent"), None
+        return tasks.assignment_cwd("agent"), None
     except (FileNotFoundError, ValueError) as exc:
         return None, f"Error: Invalid task assignment: {exc}"
 

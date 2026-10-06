@@ -21,7 +21,7 @@ agent-harness
 agent-harness workflow demo
 agent-harness workflow resume
 
-# 单文件版，等价入口，可独立运行
+# 单文件入口（在本仓库内运行，仍依赖 src/）
 python flat/agent_full.py workflow demo
 ```
 
@@ -42,7 +42,8 @@ python -m agent_harness
 | `src/agent_harness/host.py` | 集成宿主：agent 主循环 + 上下文刷新 + 把各模块接线起来；状态路径由各模块按 `core.WORKDIR` 实时解析，换 cwd 无需重新绑定 |
 | `src/agent_harness/core.py` | 共享配置：启动目录、API client、模型 id、常量、ConsoleBroker |
 | `src/agent_harness/tasks.py` | 任务板：文件持久化的任务、依赖、认领/完成、assignment 注册表 |
-| `src/agent_harness/worktrees.py` | 任务绑定的 Git worktree：创建/移除，始终保留分支 |
+| `src/agent_harness/worktrees.py` | Git worktree 的路径、注册表校验和 Git 调用 |
+| `src/agent_harness/task_worktrees.py` | 任务与 worktree 绑定、移除的跨模块操作；移除时保留分支 |
 | `src/agent_harness/skills.py` | 技能加载：扫描包内 `SKILL.md`，按名取用 |
 | `src/agent_harness/prompts.py` | 系统提示词拼装：身份、工具目录、工作目录、技能、memory、MCP |
 | `src/agent_harness/file_tools.py` | 基础工具：bash / 读写改文件 / glob / todo，含路径逃逸防护 |
@@ -60,8 +61,8 @@ python -m agent_harness
 | `src/agent_harness/skills/` | 技能资产（随包分发） |
 | `scripts/build_flat.py` | 拼接生成 `flat/agent_full.py` |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
-| `flat/agent_full.py` | 生成物：全部机制在一个文件里 |
-| `tests/` | 108 个离线测试，按模块拆分（任务、压缩、调度、权限、编码、技能等） |
+| `flat/agent_full.py` | 生成物：仓库内单文件入口，仍从 `src/` 导入客户端 shim |
+| `tests/` | 123 个离线测试，按模块拆分（任务、压缩、调度、权限、编码、技能等） |
 | `docs/` | 项目级设计与执行记录，入口见 `docs/README.md` |
 | `note/` | `env-setup.md` 安装说明；`dev-notes.md` 本机运行与调试笔记 |
 | `tmp/` | 本地临时文件，不入库（需要时手动 `mkdir tmp`） |
@@ -77,6 +78,11 @@ python -m agent_harness
 - **goal 接在 Stop 边界**：模型不再请求工具时先问目标控制器，返回 `block` 就补一条
   `[Goal still active]` 消息，继续同一条循环。
 - **goal 状态只在内存**：重启后需要重新 `/goal`。
+- **workflow resume**：相同调用键回放 journal，不再次调用模型；预算包含该 run 的历史 token，
+  返回的 `usage` 是本次新增用量，`cumulativeUsage` 是整个 run 的累计用量。旧格式 journal
+  缺少 `tokens` 时会报错；重新运行 `workflow demo` 可生成新格式记录。
+- **定时任务**：持久化的一次性任务在模型接受后确认，确认前中断可能重投；循环 cron 仅在
+  当前进程内按分钟去重，重启后同一分钟可能再次触发。
 - **跨平台**：`fcntl` 用 try/except 包裹，无 fcntl 时退化为进程内锁并打印一次提示。
 - **`.env` 与启动目录无关**：`load_dotenv()` 从包文件位置逐级向上查找，因此在任何目录
   启动都能读到项目根的 `.env`。
@@ -90,7 +96,7 @@ python -m pytest -q
 全部离线，不消耗 API：
 
 - `tests/test_goal.py`：控制器用例，以及用脚本化 client 驱动 `agent_loop` 的会话级用例。
-- `tests/test_workflow.py`：17 个用例，断言真实的工具池与 runner 接线。
+- `tests/test_workflow.py`：19 个用例，覆盖 journal 回放、预算与 runner 接线。
 - `tests/test_agent_teams.py`：合并宿主的运行时用例。
 - `tests/test_flat_build.py`：拼接输出确定、与生成物一致、可编译、可运行。
 

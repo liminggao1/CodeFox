@@ -8,7 +8,7 @@ this module back; that one edge is resolved lazily inside assemble_tool_pool.
 from __future__ import annotations
 
 from . import tasks
-from . import worktrees
+from . import task_worktrees
 from . import teams
 from . import skills
 from . import subagent
@@ -19,7 +19,7 @@ from . import mcp_tools
 # -- Lead Worktree Tools --
 
 def run_create_worktree(name: str, task_id: str) -> str:
-    return worktrees.create_worktree(name, task_id)
+    return task_worktrees.create_worktree(name, task_id)
 
 # -- Basic Tool Handlers --
 

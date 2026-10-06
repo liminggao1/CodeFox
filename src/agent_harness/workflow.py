@@ -27,6 +27,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import core
+
 try:
     import fcntl
 except ImportError:  # Windows has no fcntl module.
@@ -43,11 +45,13 @@ WORKFLOW_AGENT_ENVIRONMENT = (
 # -- Runtime Guards --
 AGENT_CAP = 1000                       # hard cap on agent() calls per run
 CONCURRENCY = 8                        # parallelism cap (semaphore)
-WORKDIR = Path.cwd()
-STORE = WORKDIR / ".runtime"           # snapshots + journals live here
 MISS = object()                        # journal cache miss sentinel
 WORKFLOW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RUN_ID_RE = re.compile(r"^wf_[A-Za-z0-9][A-Za-z0-9._-]{0,63}_[0-9a-f]{16}$")
+
+
+def store_dir() -> Path:
+    return core.WORKDIR / ".runtime"
 
 
 def _stable_hash(s: str) -> int:
@@ -62,10 +66,10 @@ def create_run_id(meta) -> str:
 
 def reserve_run_id(meta) -> str:
     """Reserve a fresh run identity before any journal can be truncated."""
-    STORE.mkdir(parents=True, exist_ok=True)
+    store_dir().mkdir(parents=True, exist_ok=True)
     for _ in range(32):
         run_id = validate_run_id(create_run_id(meta))
-        snapshot_path = STORE / f"{run_id}.json"
+        snapshot_path = store_dir() / f"{run_id}.json"
         try:
             fd = os.open(snapshot_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -113,8 +117,8 @@ def workflow_run_lock(run_id: str):
 
     handle = None
     try:
-        STORE.mkdir(parents=True, exist_ok=True)
-        handle = (STORE / f"{run_id}.lock").open("a+", encoding="utf-8")
+        store_dir().mkdir(parents=True, exist_ok=True)
+        handle = (store_dir() / f"{run_id}.lock").open("a+", encoding="utf-8")
         if fcntl is not None:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -347,11 +351,14 @@ class WorkflowJournal:
     semantic key is already present are replayed from cache instead of re-run."""
 
     def __init__(self, run_id, resume, store=None):
-        store = STORE if store is None else store
+        store = store_dir() if store is None else store
         store.mkdir(parents=True, exist_ok=True)
         self.path = store / f"{run_id}.journal.jsonl"
         self.resume = resume
         self.cache = {}
+        self.key_locks = {}
+        self.historical_tokens = 0
+        self.historical_agents = 0
         if resume:
             if not self.path.exists():
                 raise WorkflowInputError(f"resume journal not found for {run_id}")
@@ -368,7 +375,36 @@ class WorkflowJournal:
                     raise WorkflowInputError(
                         f"invalid resume journal record at line {line_number}"
                     ) from exc
+                tokens = rec.get("tokens")
+                if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0:
+                    raise WorkflowInputError(
+                        f"invalid resume journal record at line {line_number}"
+                    )
                 self.cache[rec["key"]] = rec["value"]
+                self.historical_tokens += tokens
+                self.historical_agents += 1
+                cumulative_tokens = rec.get("cumulative_tokens")
+                cumulative_agents = rec.get("cumulative_agents")
+                if cumulative_tokens is not None:
+                    if (not isinstance(cumulative_tokens, int)
+                            or isinstance(cumulative_tokens, bool)
+                            or cumulative_tokens < 0):
+                        raise WorkflowInputError(
+                            f"invalid resume journal record at line {line_number}"
+                        )
+                    self.historical_tokens = max(
+                        self.historical_tokens, cumulative_tokens
+                    )
+                if cumulative_agents is not None:
+                    if (not isinstance(cumulative_agents, int)
+                            or isinstance(cumulative_agents, bool)
+                            or cumulative_agents < 0):
+                        raise WorkflowInputError(
+                            f"invalid resume journal record at line {line_number}"
+                        )
+                    self.historical_agents = max(
+                        self.historical_agents, cumulative_agents
+                    )
             self._f = self.path.open("a", encoding="utf-8")
         else:
             self._f = self.path.open("w", encoding="utf-8")             # fresh run truncates
@@ -382,10 +418,16 @@ class WorkflowJournal:
     def cached(self, key):
         return self.cache.get(key, MISS)
 
-    def record(self, key, value):
-        self._f.write(json.dumps({"key": key, "value": value}) + "\n")
+    def record(self, key, value, tokens, cumulative_usage):
+        self._f.write(json.dumps({
+            "key": key, "value": value, "tokens": tokens,
+            "cumulative_tokens": cumulative_usage["tokens"],
+            "cumulative_agents": cumulative_usage["agents"],
+        }) + "\n")
         self._f.flush()
         self.cache[key] = value
+        self.historical_tokens = cumulative_usage["tokens"]
+        self.historical_agents = cumulative_usage["agents"]
 
     def close(self):
         self._f.close()
@@ -396,9 +438,9 @@ class Budget:
     """budget.total / spent() / remaining(). Once spent reaches total, agent()
     calls raise instead of silently overspending."""
 
-    def __init__(self, total=None):
+    def __init__(self, total=None, spent=0):
         self.total = total
-        self._spent = 0
+        self._spent = spent
 
     def add(self, n):
         if self.total is not None and self._spent + n > self.total:
@@ -424,6 +466,7 @@ class LocalWorkflowTask:
         self.meta = meta
         self.status = "running"
         self.usage = {"agents": 0, "tokens": 0}
+        self.cumulative_usage = {"agents": 0, "tokens": 0}
         self.progress = []
 
     def event(self, name, **data):
@@ -481,10 +524,11 @@ class ExecutionState:
         (retry once). On resume, a cached key short-circuits the run."""
         label = label or (prompt[:24] + "...")
         self._limits.claim_agent()
-        if self.budget.remaining() <= 0:
-            raise WorkflowInputError("token budget exceeded")
-
         key = self.journal.key("agent", label, prompt, schema)
+        async with self.journal.key_locks.setdefault(key, asyncio.Lock()):
+            return await self._run_agent(prompt, schema, label, phase, key)
+
+    async def _run_agent(self, prompt, schema, label, phase, key):
         cached = self.journal.cached(key)
         if cached is not MISS:
             if schema is not None:
@@ -496,6 +540,9 @@ class ExecutionState:
             self.task.progress_event("workflow_agent", label=label,
                                      phase=phase or self._phase, status="cached")
             return cached
+
+        if self.budget.remaining() <= 0:
+            raise WorkflowInputError("token budget exceeded")
 
         async with self._limits.semaphore:
             run = await asyncio.to_thread(
@@ -522,7 +569,9 @@ class ExecutionState:
         self.budget.add(tokens)
         self.task.usage["agents"] += 1
         self.task.usage["tokens"] += tokens
-        self.journal.record(key, result)
+        self.task.cumulative_usage["agents"] += 1
+        self.task.cumulative_usage["tokens"] += tokens
+        self.journal.record(key, result, tokens, self.task.cumulative_usage)
         self.task.progress_event("workflow_agent", label=label,
                                  phase=phase or self._phase, status="done")
         return result
@@ -593,6 +642,11 @@ class WorkflowTool:
         task_id = create_task_id(run_id)
 
         task = LocalWorkflowTask(task_id, run_id, meta)
+        if resuming:
+            task.cumulative_usage = {
+                "agents": journal.historical_agents,
+                "tokens": journal.historical_tokens,
+            }
         # Record the launch envelope before workflow execution starts.
         launched = {"status": "async_launched", "taskId": task_id,
                     "taskType": "local_workflow", "runId": run_id,
@@ -601,7 +655,7 @@ class WorkflowTool:
         task.event("task_started", workflow=meta["name"],
                    phases=",".join(meta.get("phases", [])) or "-",
                    resume=resuming)
-        _write_json(STORE / f"{run_id}.json", {
+        _write_json(store_dir() / f"{run_id}.json", {
             "runId": run_id,
             "workflowName": meta["name"],
             "args": args,
@@ -610,7 +664,8 @@ class WorkflowTool:
 
         try:
             ctx = ExecutionState(
-                task, journal, RUNNER_FACTORY(), Budget(args.get("budget")), args
+                task, journal, RUNNER_FACTORY(),
+                Budget(args.get("budget"), task.cumulative_usage["tokens"]), args
             )
             result = await script_fn(ctx, args)
             task.status = "completed"
@@ -620,8 +675,8 @@ class WorkflowTool:
         finally:
             journal.close()
 
-        _write_json(STORE / f"{run_id}.output.json", result)
-        _write_json(STORE / f"{run_id}.json", {
+        _write_json(store_dir() / f"{run_id}.output.json", result)
+        _write_json(store_dir() / f"{run_id}.json", {
             "runId": run_id,
             "workflowName": meta["name"],
             "args": args,
@@ -642,7 +697,7 @@ def _write_json(path, value):
 
 
 def _read_snapshot(run_id):
-    path = STORE / f"{run_id}.json"
+    path = store_dir() / f"{run_id}.json"
     if not path.exists():
         raise WorkflowInputError(f"resume snapshot not found for {run_id}")
     try:
@@ -655,11 +710,11 @@ def _read_snapshot(run_id):
 
 
 def _save_last_run(run_id):
-    (STORE / "last_run.txt").write_text(run_id, encoding="utf-8")
+    (store_dir() / "last_run.txt").write_text(run_id, encoding="utf-8")
 
 
 def _read_last_run():
-    p = STORE / "last_run.txt"
+    p = store_dir() / "last_run.txt"
     return p.read_text(encoding="utf-8").strip() if p.exists() else None
 
 
@@ -761,6 +816,7 @@ def serialize_task(task):
         "workflowName": task.meta["name"],
         "status": task.status,
         "usage": dict(task.usage),
+        "cumulativeUsage": dict(task.cumulative_usage),
         "progress": list(task.progress),
     }
 

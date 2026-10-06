@@ -10,7 +10,7 @@ import re
 
 from . import core
 from . import workflow
-from .worktrees import create_worktree
+from .task_worktrees import create_worktree
 
 # -- MCP System --
 

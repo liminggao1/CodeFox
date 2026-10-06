@@ -87,7 +87,7 @@ def test_micro_compact_releases_batch_after_model_consumes_it(
 
     host.compaction.micro_compact(messages, target_chars=1)
 
-    saved = {path.name for path in host.core.TOOL_RESULTS_DIR.glob("*.txt")}
+    saved = {path.name for path in host.core.tool_results_dir().glob("*.txt")}
     assert {"t0.txt", "t1.txt", "t2.txt"} <= saved
     # Everything except the most recent results was moved to disk.
     for result_index in (2, 5):
@@ -123,10 +123,10 @@ def test_snip_compact_archives_the_complete_history(host_factory) -> None:
         messages.append(tool_use(f"t{index}"))
         messages.append(tool_result(f"t{index}", f"r{index}"))
 
-    before = set(host.core.TRANSCRIPT_DIR.glob("transcript_*.jsonl"))
+    before = set(host.core.transcript_dir().glob("transcript_*.jsonl"))
     compacted = host.compaction.snip_compact(messages, max_messages=20)
 
-    written = set(host.core.TRANSCRIPT_DIR.glob("transcript_*.jsonl")) - before
+    written = set(host.core.transcript_dir().glob("transcript_*.jsonl")) - before
     assert len(written) == 1
     lines = written.pop().read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 61
@@ -156,8 +156,8 @@ def test_reactive_compact_summarizes_only_old_history(host_factory) -> None:
         from types import SimpleNamespace
         return SimpleNamespace(content=[SimpleNamespace(type="text", text="summary")])
 
-    host.set_client(SimpleNamespace(
-        messages=SimpleNamespace(create=respond)))
+    host.core.client = SimpleNamespace(
+        messages=SimpleNamespace(create=respond))
     messages = [{"role": "user", "content": "old"}]
     for index in range(8):
         messages.append(tool_use(f"t{index}"))

@@ -17,8 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from .llm_client import Anthropic
-from dotenv import load_dotenv
+from . import core
 
 try:
     import readline
@@ -30,15 +29,15 @@ try:
 except ImportError:
     pass
 
-load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+MEMORY_INDEX_NAME = "MEMORY.md"
 
-WORKDIR = Path.cwd()
-MEMORY_DIR = WORKDIR / ".memory"
-MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+
+def memory_dir() -> Path:
+    return core.WORKDIR / ".memory"
+
+
+def memory_index() -> Path:
+    return memory_dir() / MEMORY_INDEX_NAME
 ENVIRONMENT_PROMPT = (
     "Windows: the bash tool runs through cmd.exe; use cmd.exe syntax, not Unix "
     "Bash or PowerShell syntax, and prefer dedicated file tools for file operations"
@@ -95,11 +94,11 @@ def memory_slug(name: str) -> str:
 def memory_path(filename: str, allow_index: bool = False) -> Path:
     if Path(filename).name != filename:
         raise ValueError(f"Invalid memory filename: {filename}")
-    if filename == MEMORY_INDEX.name and not allow_index:
+    if filename == MEMORY_INDEX_NAME and not allow_index:
         raise ValueError("The memory index is not a memory record")
 
-    root = MEMORY_DIR.resolve()
-    if not root.is_relative_to(WORKDIR.resolve()):
+    root = memory_dir().resolve()
+    if not root.is_relative_to(core.WORKDIR.resolve()):
         raise ValueError("Memory directory escapes the workspace")
     path = (root / filename).resolve()
     if not path.is_relative_to(root):
@@ -161,7 +160,7 @@ def write_memory_file(name: str, mem_type: str, description: str, body: str) -> 
     if not description.strip() or not body.strip():
         raise ValueError("Memory description and body cannot be empty")
 
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    memory_dir().mkdir(parents=True, exist_ok=True)
     path = memory_path(f"{memory_slug(name)}.md")
     path.write_text(
         memory_document(name, mem_type, description, body), encoding="utf-8"
@@ -170,10 +169,10 @@ def write_memory_file(name: str, mem_type: str, description: str, body: str) -> 
     return path
 
 def rebuild_memory_index() -> None:
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    memory_dir().mkdir(parents=True, exist_ok=True)
     lines = []
-    for path in sorted(MEMORY_DIR.glob("*.md")):
-        if path.name == MEMORY_INDEX.name:
+    for path in sorted(memory_dir().glob("*.md")):
+        if path.name == MEMORY_INDEX_NAME:
             continue
         try:
             path = memory_path(path.name)
@@ -186,13 +185,13 @@ def rebuild_memory_index() -> None:
             str(metadata.get("description") or first_line).split()
         )
         lines.append(f"- [{name}]({path.name}) - {description}")
-    memory_path(MEMORY_INDEX.name, allow_index=True).write_text(
+    memory_path(MEMORY_INDEX_NAME, allow_index=True).write_text(
         "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
     )
 
 def read_memory_index() -> str:
     try:
-        path = memory_path(MEMORY_INDEX.name, allow_index=True)
+        path = memory_path(MEMORY_INDEX_NAME, allow_index=True)
     except ValueError:
         return ""
     return path.read_text(encoding="utf-8").strip() if path.exists() else ""
@@ -206,10 +205,10 @@ def read_memory_file(filename: str) -> str | None:
 
 def list_memory_files() -> list[dict]:
     records = []
-    if not MEMORY_DIR.exists():
+    if not memory_dir().exists():
         return records
-    for path in sorted(MEMORY_DIR.glob("*.md")):
-        if path.name == MEMORY_INDEX.name:
+    for path in sorted(memory_dir().glob("*.md")):
+        if path.name == MEMORY_INDEX_NAME:
             continue
         try:
             path = memory_path(path.name)
@@ -303,8 +302,8 @@ def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
     )
 
     try:
-        response = client.messages.create(
-            model=MODEL,
+        response = core.client.messages.create(
+            model=core.MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
         )
@@ -339,7 +338,7 @@ def build_system(relevant_memories: str = "") -> str:
     index = read_memory_index()
     sections = [
         (
-            f"You are a coding agent at {WORKDIR}. Environment: {ENVIRONMENT_PROMPT}. "
+            f"You are a coding agent at {core.WORKDIR}. Environment: {ENVIRONMENT_PROMPT}. "
             "Use tools to solve tasks. Act, don't explain."
         ),
         (
@@ -417,8 +416,8 @@ def extract_memories(messages: list) -> int:
     )
 
     try:
-        response = client.messages.create(
-            model=MODEL,
+        response = core.client.messages.create(
+            model=core.MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1000,
         )
@@ -479,8 +478,8 @@ def consolidate_memories() -> int:
             raise ValueError(
                 "memory store is too large for one consolidation pass"
             )
-        response = client.messages.create(
-            model=MODEL,
+        response = core.client.messages.create(
+            model=core.MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=3000,
         )
@@ -504,8 +503,8 @@ def consolidate_memories() -> int:
             for record in records
         }
         try:
-            for path in MEMORY_DIR.glob("*.md"):
-                if path.name != MEMORY_INDEX.name:
+            for path in memory_dir().glob("*.md"):
+                if path.name != MEMORY_INDEX_NAME:
                     try:
                         memory_path(path.name).unlink()
                     except ValueError:
@@ -523,8 +522,8 @@ def consolidate_memories() -> int:
                 )
             rebuild_memory_index()
         except Exception:
-            for path in MEMORY_DIR.glob("*.md"):
-                if path.name != MEMORY_INDEX.name:
+            for path in memory_dir().glob("*.md"):
+                if path.name != MEMORY_INDEX_NAME:
                     try:
                         memory_path(path.name).unlink()
                     except ValueError:
@@ -550,7 +549,7 @@ def run_bash(command: str) -> str:
         result = subprocess.run(
             command,
             shell=True,
-            cwd=WORKDIR,
+            cwd=core.WORKDIR,
             capture_output=True,
             text=True, errors="replace",
             timeout=120,
@@ -562,7 +561,7 @@ def run_bash(command: str) -> str:
 
 def run_read(path: str, limit: int | None = None) -> str:
     try:
-        lines = (WORKDIR / path).resolve().read_text(encoding="utf-8").splitlines()
+        lines = (core.WORKDIR / path).resolve().read_text(encoding="utf-8").splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [
                 f"... ({len(lines) - limit} more lines)"
@@ -573,7 +572,7 @@ def run_read(path: str, limit: int | None = None) -> str:
 
 def run_write(path: str, content: str) -> str:
     try:
-        file_path = (WORKDIR / path).resolve()
+        file_path = (core.WORKDIR / path).resolve()
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding="utf-8")
         return f"Wrote {len(content)} bytes to {path}"
@@ -582,7 +581,7 @@ def run_write(path: str, content: str) -> str:
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
     try:
-        file_path = (WORKDIR / path).resolve()
+        file_path = (core.WORKDIR / path).resolve()
         text = file_path.read_text(encoding="utf-8")
         if old_text not in text:
             return f"Error: text not found in {path}"
@@ -595,8 +594,8 @@ def run_glob(pattern: str) -> str:
     try:
         matches = sorted({
             match
-            for match in glob.glob(pattern, root_dir=WORKDIR, recursive=True)
-            if (WORKDIR / match).resolve().is_relative_to(WORKDIR)
+            for match in glob.glob(pattern, root_dir=core.WORKDIR, recursive=True)
+            if (core.WORKDIR / match).resolve().is_relative_to(core.WORKDIR)
         })
         shown = matches[:200]
         if len(matches) > 200:
@@ -667,7 +666,7 @@ def permission_hook(block):
 
     if block.name in ("read_file", "write_file", "edit_file"):
         path = block.input.get("path", "")
-        if not (WORKDIR / path).resolve().is_relative_to(WORKDIR):
+        if not (core.WORKDIR / path).resolve().is_relative_to(core.WORKDIR):
             print("\n\033[33m[permission] Access outside workspace\033[0m")
             print(f"   Tool: {block.name}({block.input})")
             if input("   Allow? [y/N] ").strip().lower() not in ("y", "yes"):
@@ -685,7 +684,7 @@ def large_output_hook(block, output):
     return None
 
 def context_inject_hook(query: str):
-    print(f"\033[90m[HOOK] UserPromptSubmit: working in {WORKDIR}\033[0m")
+    print(f"\033[90m[HOOK] UserPromptSubmit: working in {core.WORKDIR}\033[0m")
     return None
 
 def summary_hook(messages: list):
@@ -729,8 +728,8 @@ def agent_loop(messages: list):
     system = build_system(relevant_memories)
 
     while True:
-        response = client.messages.create(
-            model=MODEL,
+        response = core.client.messages.create(
+            model=core.MODEL,
             system=system,
             messages=messages,
             tools=TOOLS,

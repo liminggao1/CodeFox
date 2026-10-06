@@ -1,9 +1,4 @@
-"""Task-bound Git worktrees.
-
-A worktree changes a task's default cwd so parallel edits do not collide; it
-is not a sandbox. Creation and removal always retain the branch. Git calls go
-through run_git so no shell interpolation can occur.
-"""
+"""Git worktree paths, registry validation, and Git command execution."""
 
 from __future__ import annotations
 
@@ -12,15 +7,15 @@ import subprocess
 from pathlib import Path
 
 from . import core
-from . import tasks
 
-# -- Task-bound Worktrees --
 
 def _worktrees_dir() -> Path:
     return core.WORKDIR / ".worktrees"
 
+
 def _worktrees_root() -> Path:
     return _worktrees_dir().resolve()
+
 
 VALID_WORKTREE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -47,12 +42,10 @@ def _worktree_branch(name: str) -> str:
     return f"wt/{name}"
 
 
-# Tests may swap this for a fake; run_git and the registry read it at call time.
 run_git_impl = None
 
 
 def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
-    """Run Git without shell interpolation and return (ok, combined output)."""
     if run_git_impl is not None:
         return run_git_impl(args, cwd)
     try:
@@ -67,7 +60,6 @@ def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
 
 
 def run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
-    """Run Git and bound only the text returned to the model."""
     ok, output = _run_git(args, cwd)
     return ok, output[:5000]
 
@@ -107,209 +99,3 @@ def _registered_worktree(name: str) -> tuple[Path | None, str | None]:
         return None, (f"worktree '{name}' is not registered on expected "
                       f"branch '{_worktree_branch(name)}'")
     return path, None
-
-
-def task_worktree_cwd(task: tasks.Task) -> tuple[Path, str | None]:
-    """Resolve a task cwd, failing closed for broken worktree bindings."""
-    if not task.worktree:
-        return core.WORKDIR, None
-    path, error = _registered_worktree(task.worktree)
-    return (path or core.WORKDIR), error
-
-
-def assignment_cwd(owner: str) -> Path:
-    with tasks.task_lock:
-        assignment = tasks.teammate_assignments.get(owner)
-        task = tasks._owner_in_progress(owner)
-        if task and (not assignment or assignment.get("task_id") != task.id):
-            cwd, error = tasks.task_worktree_cwd(task)
-            if error:
-                raise ValueError(error)
-            assignment = {"task_id": task.id, "cwd": cwd}
-            tasks.teammate_assignments[owner] = assignment
-        elif not assignment:
-            return core.WORKDIR
-        task = tasks.load_task(str(assignment["task_id"]))
-        if task.status not in {"in_progress", "completed"} or task.owner != owner:
-            raise ValueError(f"Assignment for {owner} is no longer active")
-        cwd, error = tasks.task_worktree_cwd(task)
-        if error:
-            raise ValueError(error)
-        if cwd.resolve() != Path(assignment["cwd"]).resolve():
-            raise ValueError(f"Assignment cwd changed for task {task.id}")
-        return cwd
-
-
-def release_completed_assignment(owner: str) -> bool:
-    """Release a completed cwd lease only at a model turn boundary."""
-    with tasks.task_lock:
-        assignment = tasks.teammate_assignments.get(owner)
-        if not assignment:
-            return False
-        task = tasks.load_task(str(assignment["task_id"]))
-        if task.status != "completed" or task.owner != owner:
-            return False
-        tasks.teammate_assignments.pop(owner, None)
-        tasks.advance_assignment_version(owner)
-        from . import teams
-        if owner in teams.plan_gates:
-            teams.plan_gates[owner] = "not_required"
-        return True
-
-
-def release_teammate_assignment(owner: str):
-    """Return abandoned teammate work to the task board on thread exit."""
-    with tasks.task_lock:
-        try:
-            task = tasks._owner_in_progress(owner)
-            if task:
-                task.status = "pending"
-                task.owner = None
-                tasks.save_task(task)
-        finally:
-            tasks.teammate_assignments.pop(owner, None)
-            tasks.advance_assignment_version(owner)
-            from . import teams
-            if owner in teams.plan_gates:
-                teams.plan_gates[owner] = "not_required"
-
-
-def create_worktree(name: str, task_id: str) -> str:
-    """Create and bind a dedicated worktree after all inputs validate."""
-    error = validate_worktree_name(name)
-    if error:
-        return f"Error: {error}"
-    try:
-        path = _worktree_path(name)
-        task_path = tasks._task_path(task_id)
-    except ValueError as exc:
-        return f"Error: {exc}"
-    branch = _worktree_branch(name)
-
-    with tasks.task_lock:
-        if not task_path.exists():
-            return f"Error: Task {task_id} not found"
-        task = tasks.load_task(task_id)
-        if task.status != "pending" or task.owner is not None:
-            return f"Error: Task {task_id} must be pending and unowned"
-        if task.worktree:
-            return f"Error: Task {task_id} already uses worktree '{task.worktree}'"
-        if any(t.worktree == name for t in tasks.list_tasks() if t.id != task_id):
-            return f"Error: Worktree '{name}' is already bound to another task"
-        if path.exists():
-            return f"Error: Worktree path already exists: {path}"
-
-        ok, root = run_git(["rev-parse", "--show-toplevel"])
-        if not ok or Path(root).resolve() != core.WORKDIR.resolve():
-            return "Error: Working directory must be the root of a Git repository"
-        ok, branch_check = run_git(["check-ref-format", "--branch", branch])
-        if not ok:
-            return f"Error: Invalid worktree branch '{branch}': {branch_check}"
-        exists, _ = run_git(["show-ref", "--verify", "--quiet",
-                             f"refs/heads/{branch}"])
-        if exists:
-            return f"Error: Branch '{branch}' already exists"
-        entries, registry_error = _registered_worktrees()
-        if registry_error:
-            return f"Error: {registry_error}"
-        if path in entries:
-            return f"Error: Worktree path is already registered: {path}"
-
-        _worktrees_dir().mkdir(parents=True, exist_ok=True)
-        ok, result = run_git(["worktree", "add", "-b", branch,
-                              str(path), "HEAD"])
-        if not ok:
-            entries, registry_error = _registered_worktrees()
-            branch_exists, _ = run_git(
-                ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]
-            )
-            artifacts = []
-            if path.exists():
-                artifacts.append(f"checkout path '{path}'")
-            if registry_error is None and path in entries:
-                artifacts.append("registered Git worktree")
-            if branch_exists:
-                artifacts.append(f"branch '{branch}'")
-            if artifacts:
-                return (
-                    "Partial operation: git worktree add reported an error "
-                    f"after leaving {', '.join(artifacts)}. Task {task_id} "
-                    "remains unbound and no Git data was deleted. Run "
-                    f"`git worktree list`, inspect '{path}' and '{branch}', "
-                    "then keep or remove those artifacts manually after "
-                    f"preserving any work. Git error: {result}"
-                )
-            return f"Git error: {result}"
-
-        try:
-            task.worktree = name
-            tasks.save_task(task)
-        except Exception as exc:
-            return (f"Partial success: Worktree '{name}' was created at "
-                    f"{path} on branch '{branch}', but task binding failed: "
-                    f"{exc}. Git data was retained for manual recovery.")
-
-    print(f"  \033[33m[worktree] created: {name} at {path}\033[0m")
-    return f"Worktree '{name}' created at {path} for task {task_id}"
-
-
-def remove_worktree(name: str, discard_changes: bool = False) -> str:
-    """Remove a registered checkout while always retaining its branch."""
-    error = validate_worktree_name(name)
-    if error:
-        return f"Error: {error}"
-    with tasks.task_lock:
-        path, error = _registered_worktree(name)
-        if error:
-            return f"Error: {error}"
-        bound = [task for task in tasks.list_tasks() if task.worktree == name]
-        if not bound:
-            return f"Error: Worktree '{name}' is not bound to a task"
-        active = [task for task in bound if task.status != "completed"]
-        if active:
-            return (f"Error: Worktree '{name}' is bound to active task "
-                    f"{active[0].id}; complete it before removal")
-        leased = [owner for owner, assignment in tasks.teammate_assignments.items()
-                  if Path(assignment["cwd"]).resolve() == path.resolve()]
-        if leased:
-            return (f"Error: Worktree '{name}' is still in use by "
-                    f"{', '.join(sorted(leased))}; wait for the turn to end")
-        from . import scheduler
-        with scheduler.background_lock:
-            running = [task for task in scheduler.background_tasks.values()
-                       if task.get("status") == "running"
-                       and task.get("cwd")
-                       and Path(task["cwd"]).resolve() == path.resolve()]
-        if running:
-            return (f"Error: Worktree '{name}' has a running background command; "
-                    "wait for it to finish")
-
-        ok, status = run_git(
-            ["status", "--porcelain", "--ignored"], cwd=path
-        )
-        if not ok:
-            return f"Error: Cannot verify worktree '{name}' status: {status}"
-        if status != "(no output)" and not discard_changes:
-            changed = len([line for line in status.splitlines() if line.strip()])
-            return (f"Error: Worktree '{name}' has {changed} uncommitted "
-                    "change(s); preserve or discard them manually")
-
-        args = ["worktree", "remove"]
-        if discard_changes:
-            args.append("--force")
-        args.append(str(path))
-        ok, result = run_git(args)
-        if not ok:
-            return f"Git error: {result}"
-
-        try:
-            for task in bound:
-                task.worktree = None
-                tasks.save_task(task)
-        except Exception as exc:
-            return (f"Partial success: Worktree '{name}' was removed and "
-                    f"branch '{_worktree_branch(name)}' retained, but task "
-                    f"unbinding failed: {exc}. Manual recovery is required.")
-
-    print(f"  \033[33m[worktree] removed: {name}; branch retained\033[0m")
-    return f"Worktree '{name}' removed; branch '{_worktree_branch(name)}' retained"

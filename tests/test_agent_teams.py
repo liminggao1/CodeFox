@@ -5,7 +5,12 @@ These cases exercise the host runtime directly.
 
 from __future__ import annotations
 
+import asyncio
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +24,82 @@ def test_task_lifecycle_and_assignment_release(host_factory) -> None:
     assert "alice" in host.teammate_assignments
     assert host.release_completed_assignment("alice") is True
     assert "alice" not in host.teammate_assignments
+
+
+def test_assignment_cwd_recovers_plain_and_bound_tasks(
+    host_factory, tmp_path, monkeypatch
+) -> None:
+    host = host_factory()
+    plain = host.create_task("Plain assignment")
+    assert "Claimed" in host.claim_task(plain.id, owner="alice")
+    host.teammate_assignments.pop("alice")
+    assert host.assignment_cwd("alice") == tmp_path
+    assert "Completed" in host.complete_task(plain.id, owner="alice")
+    assert host.assignment_cwd("alice") == tmp_path
+    assert host.release_completed_assignment("alice") is True
+
+    bound = host.create_task("Bound assignment")
+    bound.worktree = "feature"
+    host.save_task(bound)
+    checkout = tmp_path / ".worktrees" / "feature"
+    checkout.mkdir(parents=True)
+    monkeypatch.setattr(host.worktrees, "_registered_worktree",
+                        lambda name: (checkout, None))
+    assert "Claimed" in host.claim_task(bound.id, owner="alice")
+    host.teammate_assignments.pop("alice")
+    assert host.assignment_cwd("alice") == checkout
+    monkeypatch.setattr(host.worktrees, "_registered_worktree",
+                        lambda name: (None, "missing Git registration"))
+    with pytest.raises(ValueError, match="missing Git registration"):
+        host.assignment_cwd("alice")
+
+
+def test_cross_process_claim_waits_for_worktree_binding(
+    host_factory, tmp_path
+) -> None:
+    host = host_factory()
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run([
+        "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "commit", "--allow-empty", "-qm", "initial",
+    ], cwd=tmp_path, check=True)
+    task = host.create_task("Concurrent binding")
+    child_code = (
+        "from agent_harness import tasks; "
+        "print('ready', flush=True); "
+        f"print(tasks.claim_task({task.id!r}, owner='alice'), flush=True)"
+    )
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+
+    child = None
+    try:
+        with host.tasks.task_store_lock():
+            child = subprocess.Popen(
+                [sys.executable, "-c", child_code], cwd=tmp_path, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            assert child.stdout.readline().strip() == "ready"
+            assert host.create_worktree("concurrent", task.id).startswith("Worktree")
+    finally:
+        if child is not None:
+            stdout, stderr = child.communicate(timeout=10)
+
+    assert child.returncode == 0, stderr
+    assert "Claimed" in stdout
+    claimed = host.load_task(task.id)
+    assert claimed.status == "in_progress"
+    assert claimed.worktree == "concurrent"
+    assert "Completed" in host.complete_task(task.id, owner="alice")
+    assert "still in use" in host.remove_worktree("concurrent")
+    assert host.release_completed_assignment("alice") is True
+    host.scheduler.background_tasks["bg_test"] = {
+        "status": "running", "cwd": str(tmp_path / ".worktrees" / "concurrent"),
+    }
+    assert "running background" in host.remove_worktree("concurrent")
+    host.scheduler.background_tasks.clear()
+    assert host.remove_worktree("concurrent", discard_changes=True).startswith(
+        "Worktree"
+    )
 
 
 def test_task_dependencies_are_second_phase_and_lead_only(host_factory) -> None:
@@ -42,6 +123,28 @@ def test_state_dirs_follow_the_launch_directory(host_factory, tmp_path) -> None:
     assert (tmp_path / ".tasks").is_dir()
     assert (tmp_path / ".tasks").resolve() == host.tasks._tasks_root()
     assert not (tmp_path / ".mailboxes").exists()
+
+
+def test_runtime_state_moves_with_workdir(host_factory, tmp_path, monkeypatch) -> None:
+    host = host_factory()
+    next_dir = tmp_path / "next"
+    next_dir.mkdir()
+    monkeypatch.setattr(host.core, "WORKDIR", next_dir)
+    monkeypatch.setattr(host.workflow, "RUNNER_FACTORY", host.workflow.MockAgentRunner)
+
+    host.create_task("Moved task")
+    host.compaction.save_output("tool-1", "output")
+    host.compaction.write_transcript([{"role": "user", "content": "hello"}])
+    host.memory_runtime.write_memory_file("note", "project", "Test", "body")
+    host.schedule_job("* * * * *", "reminder")
+    asyncio.run(host.workflow.run_workflow("review-changes", {"budget": None}))
+    assert f"Working directory: {next_dir}" in host.prompts.assemble_system_prompt({})
+    assert f"coding subagent at {next_dir}" in host.subagent.sub_system()
+
+    for name in (".tasks", ".task_outputs", ".transcripts", ".memory", ".runtime"):
+        assert (next_dir / name).exists(), name
+        assert not (tmp_path / name).exists(), name
+    assert (next_dir / ".scheduled_tasks.json").exists()
 
 
 def test_mcp_permission_uses_host_policy(host_factory, monkeypatch) -> None:
@@ -142,6 +245,23 @@ def test_plan_gate_blocks_mutating_teammate_tools(host_factory) -> None:
         assert len(calls) == 1
 
 
+def test_plan_gate_blocks_teammate_completion_but_not_lead(host_factory) -> None:
+    host = host_factory()
+    teammate_task = host.create_task("Teammate task")
+    assert "Claimed" in host.claim_task(teammate_task.id, owner="alice")
+    host.plan_gates["alice"] = "pending"
+    block = SimpleNamespace(name="complete_task", input={"task_id": teammate_task.id})
+    handlers = {"complete_task": lambda task_id: host.complete_task(task_id, owner="alice")}
+
+    assert "Blocked" in host._run_teammate_tool("alice", block, handlers)
+    assert host.load_task(teammate_task.id).status == "in_progress"
+
+    lead_task = host.create_task("Lead task")
+    assert "Claimed" in host.claim_task(lead_task.id)
+    host.plan_gates["agent"] = "pending"
+    assert "Completed" in host.complete_task(lead_task.id)
+
+
 def test_plan_rejection_requires_a_new_submission(host_factory) -> None:
     host = host_factory()
     host.active_teammates["alice"] = "idle"
@@ -191,6 +311,27 @@ def test_mismatched_plan_response_cannot_release_gate(host_factory) -> None:
     assert "Ignored" in notice
     assert host.plan_gates["alice"] == "pending"
     assert host.plan_request_ids["alice"] == request_id
+
+
+def test_old_approval_cannot_unlock_a_new_assignment(host_factory) -> None:
+    host = host_factory()
+    host.active_teammates["alice"] = "working"
+    task = host.create_task("Review first")
+    assert "Claimed" in host.claim_task(task.id, owner="alice")
+    submission = host._teammate_submit_plan("alice", "1. Inspect\n2. Test")
+    request_id = submission.split("(")[1].split(")")[0]
+    assert "approved" in host.run_review_plan(request_id, True)
+    response = host.BUS.read_inbox("alice")[-1]
+
+    host.tasks.advance_assignment_version("alice")
+    accepted, notice = host.apply_plan_response("alice", response)
+
+    assert accepted is False
+    assert "Ignored" in notice
+    block = SimpleNamespace(name="complete_task", input={"task_id": task.id})
+    handlers = {"complete_task": lambda task_id: host.complete_task(task_id, "alice")}
+    assert "Blocked" in host._run_teammate_tool("alice", block, handlers)
+    assert host.load_task(task.id).status == "in_progress"
 
 
 def test_shutdown_response_must_come_from_requested_teammate(host_factory) -> None:

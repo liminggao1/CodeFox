@@ -17,7 +17,7 @@ import sys
 import threading
 
 from . import goal as goal_module
-from . import host, workflow
+from . import core, host, workflow
 
 
 def handle_goal_command(query: str) -> tuple[bool, str]:
@@ -42,7 +42,7 @@ def handle_goal_command(query: str) -> tuple[bool, str]:
 
 
 def run_cli() -> None:
-    host.CLI_ACTIVE = True
+    core.CLI_ACTIVE = True
     host.start_runtime_services()
     print("agent-harness: agent loop + tools + workflow + goal")
     print("Enter a question, press Enter to send. Type q to quit.")

@@ -37,11 +37,9 @@ def host_factory(tmp_path, monkeypatch):
         # inherit the previous test's launch directory, teammates, plan gates,
         # assignments, or MCP clients.
         host.core.WORKDIR = tmp_path
-        host.memory_runtime.WORKDIR = tmp_path
-        host.workflow.WORKDIR = tmp_path
-        host.workflow.STORE = tmp_path / ".runtime"
         host.teams.active_teammates.clear()
         host.teams.plan_gates.clear()
+        host.teams.plan_gate_versions.clear()
         host.teams.plan_request_ids.clear()
         host.teams.pending_requests.clear()
         host.tasks.teammate_assignments.clear()

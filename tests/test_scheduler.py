@@ -20,6 +20,10 @@ def wait_until(predicate, timeout: float = 5.0) -> bool:
     return False
 
 
+def fail_replace(*_args):
+    raise OSError("disk unavailable")
+
+
 def bash_block(command: str, tool_id: str = "tool-1", background: bool = True):
     return SimpleNamespace(
         id=tool_id, name="bash", type="tool_use",
@@ -51,8 +55,8 @@ def test_background_permission_is_checked_before_dispatch(
         SimpleNamespace(stop_reason="end_turn", content=[
             SimpleNamespace(type="text", text="Denied.")]),
     ]
-    host.set_client(SimpleNamespace(
-        messages=SimpleNamespace(create=lambda **_: responses.pop(0))))
+    host.core.client = SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **_: responses.pop(0)))
 
     host.agent_loop(history, host.update_context({}, history), "delete")
 
@@ -130,6 +134,105 @@ def test_durable_jobs_round_trip_through_the_store(host_factory) -> None:
 
     assert [item["id"] for item in payload] == [job_id]
     assert payload[0]["prompt"] == "persist me"
+
+
+def test_pending_one_shot_is_requeued_after_restart(host_factory) -> None:
+    host = host_factory()
+    job = host.schedule_job("0 9 * * *", "persist me", recurring=False)
+    host.scheduler._enqueue_due_job(job)
+    host.scheduler.scheduled_jobs.clear()
+    host.scheduler.cron_queue.clear()
+
+    host.scheduler.load_durable_jobs()
+
+    assert [queued.id for queued in host.scheduler.cron_queue] == [job.id]
+    host.acknowledge_cron_jobs(host.consume_cron_queue())
+    host.scheduler.scheduled_jobs.clear()
+    host.scheduler.load_durable_jobs()
+    assert host.scheduler.scheduled_jobs == {}
+
+
+def test_schedule_write_failure_does_not_register_job(host_factory, monkeypatch) -> None:
+    host = host_factory()
+
+    monkeypatch.setattr(host.scheduler.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="disk unavailable"):
+        host.schedule_job("0 9 * * *", "persist me")
+
+    assert host.scheduler.scheduled_jobs == {}
+    assert not host.scheduler._durable_path().exists()
+
+
+def test_cancel_write_failure_keeps_job_and_queue(host_factory, monkeypatch) -> None:
+    host = host_factory()
+    job = host.schedule_job("0 9 * * *", "persist me", recurring=False)
+    host.scheduler._enqueue_due_job(job)
+    disk_before = host.scheduler._durable_path().read_text(encoding="utf-8")
+
+    monkeypatch.setattr(host.scheduler.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="disk unavailable"):
+        host.cancel_job(job.id)
+
+    assert host.scheduler.scheduled_jobs[job.id] is job
+    assert host.scheduler.cron_queue == [job]
+    assert host.scheduler._durable_path().read_text(encoding="utf-8") == disk_before
+
+
+def test_enqueue_write_failure_keeps_job_due(host_factory, monkeypatch) -> None:
+    host = host_factory()
+    job = host.schedule_job("0 9 * * *", "persist me", recurring=False)
+
+    monkeypatch.setattr(host.scheduler.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="disk unavailable"):
+        host.scheduler._enqueue_due_job(job)
+
+    assert job.pending_delivery is False
+    assert host.scheduler.cron_queue == []
+    assert json.loads(host.scheduler._durable_path().read_text())[0][
+        "pending_delivery"] is False
+
+
+def test_acknowledge_write_failure_retains_pending_delivery(
+    host_factory, monkeypatch
+) -> None:
+    host = host_factory()
+    job = host.schedule_job("0 9 * * *", "persist me", recurring=False)
+    host.scheduler._enqueue_due_job(job)
+    delivered = host.consume_cron_queue()
+
+    monkeypatch.setattr(host.scheduler.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="disk unavailable"):
+        host.acknowledge_cron_jobs(delivered)
+
+    assert host.scheduler.scheduled_jobs[job.id] is job
+    assert job.pending_delivery is True
+    assert host.consume_cron_queue() == [job]
+    assert json.loads(host.scheduler._durable_path().read_text())[0][
+        "pending_delivery"] is True
+
+
+def test_acknowledge_failure_keeps_the_model_response(
+    host_factory, monkeypatch, capsys
+) -> None:
+    host = host_factory()
+    job = host.schedule_job("0 9 * * *", "persist me", recurring=False)
+    host.scheduler._enqueue_due_job(job)
+    response = SimpleNamespace(
+        stop_reason="end_turn",
+        content=[SimpleNamespace(type="text", text="Done")],
+    )
+    host.core.client = SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **_kwargs: response)
+    )
+    monkeypatch.setattr(host.scheduler.os, "replace", fail_replace)
+    history = [{"role": "user", "content": "Continue"}]
+
+    host.agent_loop(history, host.update_context({}, history), "Continue")
+
+    assert history[-1]["role"] == "assistant"
+    assert history[-1]["content"] == response.content
+    assert host.consume_cron_queue() == [job]
+    assert "Delivery confirmation failed" in capsys.readouterr().out
 
 
 def test_corrupt_durable_store_is_ignored(host_factory) -> None:

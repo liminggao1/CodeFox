@@ -39,8 +39,14 @@ FALLBACK_MODEL = os.getenv("FALLBACK_MODEL_ID")
 
 # Runtime state follows the launch directory; assets ship inside the package.
 SKILLS_DIR = PACKAGE_DIR / "skills"
-TRANSCRIPT_DIR = WORKDIR / ".transcripts"
-TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
+
+
+def transcript_dir() -> Path:
+    return WORKDIR / ".transcripts"
+
+
+def tool_results_dir() -> Path:
+    return WORKDIR / ".task_outputs" / "tool-results"
 
 DEFAULT_MAX_TOKENS = 8000
 ESCALATED_MAX_TOKENS = 16000

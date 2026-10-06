@@ -68,7 +68,7 @@ def tool_response(name: str, arguments: dict, tool_use_id: str = "tool-1"):
 def run_host_turn(host_factory, responses, evaluations, condition="tests pass"):
     host = host_factory()
     client = FakeClient(responses)
-    host.set_client(client)
+    host.core.client = client
     evaluator = ScriptedEvaluator(evaluations)
     host.GOAL = goal_module.GoalController(evaluator=evaluator)
     host.GOAL.set_goal(condition)
@@ -270,7 +270,7 @@ def test_worker_tool_result_reaches_the_goal_evaluator(host_factory):
 def test_goal_is_not_consulted_without_an_active_condition(host_factory):
     host = host_factory()
     client = FakeClient([text_response("done")])
-    host.set_client(client)
+    host.core.client = client
     evaluator = ScriptedEvaluator([])
     host.GOAL = goal_module.GoalController(evaluator=evaluator)
 

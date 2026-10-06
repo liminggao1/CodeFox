@@ -20,6 +20,7 @@ from pathlib import Path
 from . import core
 from . import file_tools
 from . import hooks
+from . import tasks
 
 # -- Background Tasks --
 
@@ -41,7 +42,6 @@ def should_run_background(tool_name: str, tool_input: dict) -> bool:
 def start_background_task(block, handlers: dict) -> str:
     global _bg_counter
     command = block.input.get("command", block.name)
-    cwd, cwd_error = file_tools._agent_cwd()
 
     def worker():
         try:
@@ -69,15 +69,17 @@ def start_background_task(block, handlers: dict) -> str:
             task["status"] = status
             background_results[bg_id] = str(result)
 
-    with background_lock:
-        _bg_counter += 1
-        bg_id = f"bg_{_bg_counter:04d}"
-        background_tasks[bg_id] = {
-            "tool_use_id": block.id,
-            "command": command,
-            "status": "running",
-            "cwd": str(cwd) if cwd else None,
-        }
+    with tasks.task_lock:
+        cwd, cwd_error = file_tools._agent_cwd()
+        with background_lock:
+            _bg_counter += 1
+            bg_id = f"bg_{_bg_counter:04d}"
+            background_tasks[bg_id] = {
+                "tool_use_id": block.id,
+                "command": command,
+                "status": "running",
+                "cwd": str(cwd) if cwd else None,
+            }
     thread = threading.Thread(target=worker, daemon=True)
     try:
         thread.start()
@@ -231,8 +233,11 @@ def save_durable_jobs():
         durable = [asdict(job) for job in scheduled_jobs.values() if job.durable]
         durable_path = _durable_path()
         temporary = durable_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(durable, indent=2), encoding="utf-8")
-        os.replace(temporary, durable_path)
+        try:
+            temporary.write_text(json.dumps(durable, indent=2), encoding="utf-8")
+            os.replace(temporary, durable_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def load_durable_jobs():
@@ -259,18 +264,32 @@ def schedule_job(cron: str, prompt: str,
         cron=cron, prompt=prompt,
         recurring=recurring, durable=durable)
     with cron_lock:
+        previous = scheduled_jobs.get(job.id)
         scheduled_jobs[job.id] = job
         if durable:
-            save_durable_jobs()
+            try:
+                save_durable_jobs()
+            except Exception:
+                if previous is None:
+                    scheduled_jobs.pop(job.id, None)
+                else:
+                    scheduled_jobs[job.id] = previous
+                raise
     return job
 
 
 def cancel_job(job_id: str) -> str:
     with cron_lock:
+        previous_queue = list(cron_queue)
         job = scheduled_jobs.pop(job_id, None)
         cron_queue[:] = [queued for queued in cron_queue if queued.id != job_id]
         if job and job.durable:
-            save_durable_jobs()
+            try:
+                save_durable_jobs()
+            except Exception:
+                scheduled_jobs[job_id] = job
+                cron_queue[:] = previous_queue
+                raise
     if not job:
         return f"Job {job_id} not found"
     return f"Cancelled {job_id}"
@@ -317,13 +336,20 @@ def acknowledge_cron_jobs(jobs: list[CronJob]):
     """Remove one-shot jobs after a model call accepts their prompts."""
     durable_changed = False
     with cron_lock:
+        previous_jobs = dict(scheduled_jobs)
         for job in jobs:
             current = scheduled_jobs.get(job.id)
             if current and not current.recurring and current.pending_delivery:
                 scheduled_jobs.pop(job.id, None)
                 durable_changed = durable_changed or current.durable
         if durable_changed:
-            save_durable_jobs()
+            try:
+                save_durable_jobs()
+            except Exception:
+                scheduled_jobs.clear()
+                scheduled_jobs.update(previous_jobs)
+                restore_cron_jobs(jobs)
+                raise
 
 
 def restore_cron_jobs(jobs: list[CronJob]):

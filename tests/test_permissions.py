@@ -124,3 +124,31 @@ def test_large_output_hook_reports_only_oversized_payloads(
 
     output = capsys.readouterr().out
     assert output.count("large output from") == 1
+
+
+def test_subagent_uses_restricted_tools_and_permission_hook(
+    host_factory, tmp_path
+) -> None:
+    host = host_factory()
+    calls = []
+    responses = iter([
+        SimpleNamespace(content=[SimpleNamespace(
+            type="tool_use", id="tool-1", name="write_file",
+            input={"path": "../escape.md", "content": "blocked"},
+        )]),
+        SimpleNamespace(content=[SimpleNamespace(type="text", text="Done")]),
+    ])
+
+    def create(**kwargs):
+        calls.append({**kwargs, "messages": list(kwargs["messages"])})
+        return next(responses)
+
+    host.core.client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    assert host.spawn_subagent("Inspect only") == "Done"
+
+    assert {tool["name"] for tool in calls[0]["tools"]} == {
+        "bash", "read_file", "write_file", "edit_file", "glob",
+    }
+    assert "outside the workspace" in calls[1]["messages"][-1]["content"][0][
+        "content"]
+    assert not (tmp_path.parent / "escape.md").exists()

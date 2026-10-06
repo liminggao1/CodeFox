@@ -6,8 +6,8 @@
 - **workflow runtime**：`workflow.py`，可 resume 的多 agent 工作流；每次 `agent()` 调用进 journal。
 - **goal**：`goal.py`，接在 agent 循环的 Stop 边界；模型不再请求工具时决定放行还是继续。
 - **runner**：工作流里执行单次 agent 调用的执行器；`AnthropicAgentRunner` 走真实 API，`MockAgentRunner` 离线。
-- **journal**：workflow 每次调用的输入/输出记录，resume 时命中缓存；损坏或参数不符会报错。
-- **flat build**：`scripts/build_flat.py` 把四个模块拼成单文件 `flat/agent_full.py`，供独立阅读运行。
+- **journal**：workflow 按调用键记录结果与 token 用量；resume 命中缓存时不重复计费。
+- **flat build**：`scripts/build_flat.py` 拼接源码模块成 `flat/agent_full.py`，作为仓库内的单文件入口。
 - **WORKDIR**：运行时状态目录的基准，取启动时的 `Path.cwd()`；与随包的 `skills/` 相对。
 
 ## Scope
@@ -20,7 +20,7 @@
 
 - 结构：`src/agent_harness/`（源码 + 包内 `skills/`）、`scripts/`、`flat/`、`tests/`、`docs/`、`note/`。
 - 运行：本地以源码方式运行，环境约定见 `AGENTS.md`；通用安装步骤见 `note/env-setup.md`。
-- 验证：108 个离线测试全绿；workflow `demo` / `resume` 离线通过；离线自检 9 项通过。
+- 验证：123 个离线测试；workflow `demo` / `resume` 离线运行；离线自检 9 项。
 - 未实测：真实 API 交互问答、队友线程端到端、memory 抽取。
 - 不做打包发布，不引入 linter/formatter。
 
@@ -31,7 +31,8 @@
 | `src/agent_harness/host.py` | 集成宿主：agent 主循环、上下文刷新、模块接线 |
 | `src/agent_harness/core.py` | 共享配置：启动目录、client、模型 id、常量 |
 | `src/agent_harness/tasks.py` | 任务板：任务、依赖、认领/完成、assignment 注册表 |
-| `src/agent_harness/worktrees.py` | 任务绑定的 Git worktree |
+| `src/agent_harness/worktrees.py` | Git worktree 路径、注册表和 Git 调用 |
+| `src/agent_harness/task_worktrees.py` | 任务与 Git worktree 的绑定和移除 |
 | `src/agent_harness/skills.py` | 技能加载 |
 | `src/agent_harness/prompts.py` | 系统提示词拼装 |
 | `src/agent_harness/file_tools.py` | 基础工具：bash / 文件 / glob / todo |

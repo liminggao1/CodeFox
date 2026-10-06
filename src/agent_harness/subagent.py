@@ -13,11 +13,13 @@ from . import hooks
 
 # -- Subagent Tool --
 
-SUB_SYSTEM = (
-    f"You are a coding subagent at {core.WORKDIR}. Environment: {prompts.ENVIRONMENT_PROMPT}. "
-    "Complete the task, then return a concise final summary. "
-    "Do not spawn more agents."
-)
+def sub_system() -> str:
+    return (
+        f"You are a coding subagent at {core.WORKDIR}. "
+        f"Environment: {prompts.ENVIRONMENT_PROMPT}. "
+        "Complete the task, then return a concise final summary. "
+        "Do not spawn more agents."
+    )
 
 
 SUB_TOOLS = [
@@ -76,7 +78,7 @@ def spawn_subagent(description: str) -> str:
     messages = [{"role": "user", "content": description}]
     for _ in range(30):
         response = core.client.messages.create(
-            model=core.MODEL, system=SUB_SYSTEM, messages=messages,
+            model=core.MODEL, system=sub_system(), messages=messages,
             tools=SUB_TOOLS, max_tokens=8000)
         messages.append({"role": "assistant", "content": response.content})
         if not has_tool_use(response.content):

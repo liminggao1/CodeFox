@@ -18,7 +18,6 @@ from pathlib import Path
 
 from . import core
 from . import tasks
-from . import worktrees
 from . import file_tools
 from . import hooks
 
@@ -100,6 +99,7 @@ BUS = MessageBus()
 active_teammates: dict[str, str] = {}
 plan_gates: dict[str, str] = {}
 plan_request_ids: dict[str, str] = {}
+plan_gate_versions: dict[str, int] = {}
 team_lock = threading.RLock()
 
 
@@ -194,7 +194,7 @@ def scan_unclaimed_tasks() -> list[tasks.Task]:
             if (task.status != "pending" or task.owner is not None
                     or not tasks.can_start(task.id)):
                 continue
-            _, error = worktrees.task_worktree_cwd(task)
+            _, error = tasks.task_worktree_cwd(task)
             if not error:
                 ready.append(task)
         return ready
@@ -229,8 +229,16 @@ def current_work_identity(owner: str) -> tuple[int, str | None]:
 
 
 def _run_teammate_tool(name: str, block, handlers: dict) -> str:
+    with tasks.task_lock:
+        version = tasks.assignment_versions.get(name, 0)
+        with team_lock:
+            if plan_gate_versions.get(name, version) != version:
+                if plan_gates.get(name) != "not_required":
+                    plan_gates[name] = "required"
+                plan_request_ids.pop(name, None)
+            plan_gate_versions[name] = version
     gate = plan_gates.get(name, "not_required")
-    if (block.name in {"bash", "write_file", "edit_file"}
+    if (block.name in {"bash", "write_file", "edit_file", "complete_task"}
             and gate not in {"not_required", "approved"}):
         return f"Blocked: plan status is {gate}."
     blocked = hooks.trigger_hooks("PreToolUse", block)
@@ -246,30 +254,32 @@ def apply_plan_response(name: str, msg: dict) -> tuple[bool, str]:
     """Apply only the Lead response for this teammate's current plan."""
     metadata = msg.get("metadata", {})
     request_id = metadata.get("request_id", "")
-    work_version, task_id = current_work_identity(name)
-    with team_lock:
-        state = pending_requests.get(request_id)
-        expected_id = plan_request_ids.get(name)
-        valid = (
-            msg.get("from") == "lead"
-            and msg.get("to") == name
-            and request_id == expected_id
-            and state is not None
-            and state.type == "plan_approval"
-            and state.sender == name
-            and state.target == "lead"
-            and state.work_version == work_version
-            and state.task_id == task_id
-            and state.status in {"approved", "rejected"}
-            and metadata.get("approve", False)
-            == (state.status == "approved")
-        )
-        if not valid:
-            return False, "[Ignored plan response: request mismatch]"
-        plan_gates[name] = state.status
-        active_teammates[name] = "working"
-        plan_request_ids.pop(name, None)
-        outcome = state.status
+    with tasks.task_lock:
+        work_version, task_id = current_work_identity(name)
+        with team_lock:
+            state = pending_requests.get(request_id)
+            expected_id = plan_request_ids.get(name)
+            valid = (
+                msg.get("from") == "lead"
+                and msg.get("to") == name
+                and request_id == expected_id
+                and state is not None
+                and state.type == "plan_approval"
+                and state.sender == name
+                and state.target == "lead"
+                and state.work_version == work_version
+                and state.task_id == task_id
+                and state.status in {"approved", "rejected"}
+                and metadata.get("approve", False)
+                == (state.status == "approved")
+            )
+            if not valid:
+                return False, "[Ignored plan response: request mismatch]"
+            plan_gates[name] = state.status
+            plan_gate_versions[name] = work_version
+            active_teammates[name] = "working"
+            plan_request_ids.pop(name, None)
+            outcome = state.status
     return True, f"[Plan {outcome}] {msg['content']}"
 
 
@@ -313,13 +323,15 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
                 "underscores, or dashes")
     if name.lower() in RESERVED_TEAMMATE_NAMES:
         return f"Invalid teammate name: '{name}' is reserved by the runtime"
-    with team_lock:
-        if any(existing.casefold() == name.casefold()
-               for existing in active_teammates):
-            return f"Teammate '{name}' already exists"
-        active_teammates[name] = "working"
-        plan_gates[name] = "required" if require_plan else "not_required"
-        tasks.assignment_versions[name] = 0
+    with tasks.task_lock:
+        with team_lock:
+            if any(existing.casefold() == name.casefold()
+                   for existing in active_teammates):
+                return f"Teammate '{name}' already exists"
+            active_teammates[name] = "working"
+            plan_gates[name] = "required" if require_plan else "not_required"
+            tasks.assignment_versions[name] = 0
+            plan_gate_versions[name] = 0
 
     if task_id:
         try:
@@ -327,10 +339,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
         except (FileNotFoundError, ValueError) as exc:
             claimed = f"Error: {exc}"
         if not claimed.startswith("Claimed "):
-            with team_lock:
-                active_teammates.pop(name, None)
-                plan_gates.pop(name, None)
-                tasks.assignment_versions.pop(name, None)
+            with tasks.task_lock:
+                with team_lock:
+                    active_teammates.pop(name, None)
+                    plan_gates.pop(name, None)
+                    plan_gate_versions.pop(name, None)
+                    tasks.assignment_versions.pop(name, None)
             return f"Cannot spawn teammate '{name}': {claimed}"
 
     system = (f"You are '{name}', a {role}. "
@@ -379,7 +393,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
             if name not in tasks.teammate_assignments:
                 return None, "Error: Claim a Task before using workspace tools."
             try:
-                return worktrees.assignment_cwd(name), None
+                return tasks.assignment_cwd(name), None
             except (FileNotFoundError, ValueError) as exc:
                 return None, f"Error: Invalid task assignment: {exc}"
 
@@ -434,7 +448,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
             task = tasks.load_task(task_id)
             initial_prompt += (
                 f"\n\n[Assigned task {task.id}] {task.subject}\n"
-                f"{task.description}\nWork directory: {worktrees.assignment_cwd(name)}"
+                f"{task.description}\nWork directory: {tasks.assignment_cwd(name)}"
             )
         if require_plan:
             initial_prompt += ("\n\n[Plan required] Submit a plan and wait for "
@@ -548,7 +562,10 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
                 with team_lock:
                     active_teammates[name] = "waiting_approval"
             else:
-                worktrees.release_completed_assignment(name)
+                if tasks.release_completed_assignment(name):
+                    plan_gates[name] = "not_required"
+                    plan_request_ids.pop(name, None)
+                    plan_gate_versions[name] = tasks.assignment_versions[name]
                 with team_lock:
                     active_teammates[name] = "idle"
                 BUS.send(name, "lead", "Waiting for more work.",
@@ -569,7 +586,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
                 if not task:
                     continue
                 try:
-                    workdir = str(worktrees.assignment_cwd(name))
+                    workdir = str(tasks.assignment_cwd(name))
                 except (FileNotFoundError, ValueError) as exc:
                     workdir = f"unavailable ({exc})"
                 messages.append({
@@ -594,7 +611,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
                 pass
         finally:
             try:
-                worktrees.release_teammate_assignment(name)
+                tasks.release_teammate_assignment(name)
             except Exception as exc:
                 try:
                     BUS.send(
@@ -607,6 +624,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
             with team_lock:
                 active_teammates.pop(name, None)
                 plan_gates.pop(name, None)
+                plan_gate_versions.pop(name, None)
                 plan_request_ids.pop(name, None)
             print(f"  \033[32m[teammate] {name} finished\033[0m")
 
@@ -676,20 +694,21 @@ def run_review_plan(request_id: str, approve: bool,
     state = pending_requests.get(request_id)
     if not state:
         return f"Request {request_id} not found"
-    work_version, task_id = current_work_identity(state.sender)
-    with team_lock:
-        state = pending_requests.get(request_id)
-        if not state:
-            return f"Request {request_id} not found"
-        if state.type != "plan_approval":
-            return f"Request {request_id} is not a plan"
-        if state.status != "pending":
-            return f"Request {request_id} already {state.status}"
-        if state.work_version != work_version or state.task_id != task_id:
-            return f"Request {request_id} belongs to an earlier assignment"
-        if plan_request_ids.get(state.sender) != request_id:
-            return f"Request {request_id} is not the current plan"
-        state.status = "approved" if approve else "rejected"
+    with tasks.task_lock:
+        work_version, task_id = current_work_identity(state.sender)
+        with team_lock:
+            state = pending_requests.get(request_id)
+            if not state:
+                return f"Request {request_id} not found"
+            if state.type != "plan_approval":
+                return f"Request {request_id} is not a plan"
+            if state.status != "pending":
+                return f"Request {request_id} already {state.status}"
+            if state.work_version != work_version or state.task_id != task_id:
+                return f"Request {request_id} belongs to an earlier assignment"
+            if plan_request_ids.get(state.sender) != request_id:
+                return f"Request {request_id} is not the current plan"
+            state.status = "approved" if approve else "rejected"
     content = feedback or ("Plan approved." if approve
                            else "Revise the plan and submit it again.")
     BUS.send("lead", state.sender, content,

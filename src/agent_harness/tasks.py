@@ -1,8 +1,7 @@
 """Durable task board: file-backed records with ownership and dependencies.
 
 Tasks are tiny JSON records under .tasks/ in the launch directory. Worktrees
-and teammates build on this same store. The plan gate lives in teams.py; the
-lookups below stay lazy so importing this module never imports teams.
+and teammates build on this same store; approval state belongs to teams.py.
 """
 
 from __future__ import annotations
@@ -70,23 +69,8 @@ def task_store_lock():
 
 
 def advance_assignment_version(owner: str):
-    """Invalidate old approvals without clearing an explicit plan requirement."""
     with task_lock:
         assignment_versions[owner] = assignment_versions.get(owner, 0) + 1
-        gates = _plan_gates()
-        request_ids = _plan_request_ids()
-        team = _team_lock()
-        if team is not None:
-            team.acquire()
-        try:
-            if (isinstance(gates, dict) and owner in gates
-                    and gates[owner] != "not_required"):
-                gates[owner] = "required"
-            if isinstance(request_ids, dict):
-                request_ids.pop(owner, None)
-        finally:
-            if team is not None:
-                team.release()
 
 
 @dataclass
@@ -274,7 +258,7 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
                     "claiming another task")
         if not can_start(task_id):
             return f"Blocked by: {_incomplete_dependencies(task)}"
-        cwd, error = worktrees.task_worktree_cwd(task)
+        cwd, error = task_worktree_cwd(task)
         if error:
             return f"Cannot claim {task_id}: {error}"
         task.owner = owner
@@ -295,12 +279,9 @@ def complete_task(task_id: str, owner: str = "agent") -> str:
         if task.owner != owner:
             return (f"Task {task_id} is owned by {task.owner}, "
                     f"not {owner}; cannot complete")
-        gate = _plan_gates().get(owner, "not_required")
-        if gate in {"required", "pending", "rejected"}:
-            return f"Task {task_id} cannot complete while plan status is {gate}"
         assignment = teammate_assignments.get(owner)
         if not assignment or assignment.get("task_id") != task.id:
-            cwd, error = worktrees.task_worktree_cwd(task)
+            cwd, error = task_worktree_cwd(task)
             if error:
                 return f"Task {task_id} cannot complete: {error}"
             teammate_assignments[owner] = {"task_id": task.id, "cwd": cwd}
@@ -316,17 +297,57 @@ def complete_task(task_id: str, owner: str = "agent") -> str:
     return msg
 
 
-def _plan_gates() -> dict:
-    """Plan gate state lives in teams.py; look it up only when needed."""
-    from . import teams
-    return getattr(teams, "plan_gates", {})
+def task_worktree_cwd(task: Task) -> tuple[Path, str | None]:
+    if not task.worktree:
+        return core.WORKDIR, None
+    path, error = worktrees._registered_worktree(task.worktree)
+    return (path or core.WORKDIR), error
 
 
-def _plan_request_ids() -> dict:
-    from . import teams
-    return getattr(teams, "plan_request_ids", {})
+def assignment_cwd(owner: str) -> Path:
+    with task_lock:
+        assignment = teammate_assignments.get(owner)
+        task = _owner_in_progress(owner)
+        if task and (not assignment or assignment.get("task_id") != task.id):
+            cwd, error = task_worktree_cwd(task)
+            if error:
+                raise ValueError(error)
+            assignment = {"task_id": task.id, "cwd": cwd}
+            teammate_assignments[owner] = assignment
+        elif not assignment:
+            return core.WORKDIR
+        task = load_task(str(assignment["task_id"]))
+        if task.status not in {"in_progress", "completed"} or task.owner != owner:
+            raise ValueError(f"Assignment for {owner} is no longer active")
+        cwd, error = task_worktree_cwd(task)
+        if error:
+            raise ValueError(error)
+        if cwd.resolve() != Path(assignment["cwd"]).resolve():
+            raise ValueError(f"Assignment cwd changed for task {task.id}")
+        return cwd
 
 
-def _team_lock():
-    from . import teams
-    return getattr(teams, "team_lock", None)
+def release_completed_assignment(owner: str) -> bool:
+    with task_lock:
+        assignment = teammate_assignments.get(owner)
+        if not assignment:
+            return False
+        task = load_task(str(assignment["task_id"]))
+        if task.status != "completed" or task.owner != owner:
+            return False
+        teammate_assignments.pop(owner, None)
+        advance_assignment_version(owner)
+        return True
+
+
+def release_teammate_assignment(owner: str):
+    with task_store_lock():
+        try:
+            task = _owner_in_progress(owner)
+            if task:
+                task.status = "pending"
+                task.owner = None
+                save_task(task)
+        finally:
+            teammate_assignments.pop(owner, None)
+            advance_assignment_version(owner)

@@ -89,16 +89,16 @@ def persisted_output_path(output: str) -> str | None:
     if not candidate:
         return None
     path = Path(candidate)
-    if (not path.resolve().is_relative_to(core.TOOL_RESULTS_DIR.resolve())
+    if (not path.resolve().is_relative_to(core.tool_results_dir().resolve())
             or not path.is_file()):
         return None
     return str(path)
 
 
 def save_output(tool_use_id: str, output: str) -> Path:
-    core.TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    core.tool_results_dir().mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(tool_use_id))[:120] or "unknown"
-    path = core.TOOL_RESULTS_DIR / f"{safe_id}.txt"
+    path = core.tool_results_dir() / f"{safe_id}.txt"
     path.write_text(output, encoding="utf-8")
     return path
 
@@ -157,7 +157,7 @@ def is_archive_marker(message: dict) -> bool:
     if not match:
         return False
     path = Path(match.group(1))
-    return (path.resolve().is_relative_to(core.TRANSCRIPT_DIR.resolve())
+    return (path.resolve().is_relative_to(core.transcript_dir().resolve())
             and path.is_file())
 
 
@@ -221,8 +221,8 @@ def fit_tool_results(messages: list, target_chars: int) -> list:
 
 
 def write_transcript(messages: list) -> Path:
-    core.TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-    path = core.TRANSCRIPT_DIR / f"transcript_{time.time_ns()}.jsonl"
+    core.transcript_dir().mkdir(parents=True, exist_ok=True)
+    path = core.transcript_dir() / f"transcript_{time.time_ns()}.jsonl"
     with path.open("x", encoding="utf-8") as f:
         for msg in messages:
             f.write(json.dumps(msg, default=str) + "\n")

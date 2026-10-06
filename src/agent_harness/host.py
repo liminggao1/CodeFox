@@ -1,9 +1,9 @@
 """The integrated harness: agent loop, workflows, and the goal Stop boundary.
 
 This module only wires the feature modules together. Everything the model can
-do lives in its own module: core (config), tasks, worktrees, skills, prompts,
-file_tools, teams, hooks, subagent, compaction, recovery, scheduler, mcp_tools,
-and registrations. Launch through cli.py.
+do lives in its own module: core (config), tasks, worktrees, task_worktrees,
+skills, prompts, file_tools, teams, hooks, subagent, compaction, recovery,
+scheduler, mcp_tools, and registrations. Launch through cli.py.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from pathlib import Path
 from . import core
 from . import tasks
 from . import worktrees
+from . import task_worktrees
 from . import skills
 from . import prompts
 from . import file_tools
@@ -35,38 +36,19 @@ from . import workflow
 
 # Re-export the names cli.py and the flat build rely on.
 from .core import (  # noqa: F401
-    CONSOLE, CLI_ACTIVE, MODEL, PROMPT, READLINE_PROMPT, WORKDIR,
+    CONSOLE, PROMPT, READLINE_PROMPT,
     terminal_print,
 )
-
-# The client is swappable at runtime (tests and the goal boundary replace it),
-# so host.client is a live view of core.client rather than a copy.
-client = core.client
-
-
-def __getattr__(name):
-    if name == "client":
-        return core.client
-    raise AttributeError(name)
-
-
-def set_client(new_client):
-    """Point every module that talks to the model at one client instance."""
-    global client
-    client = new_client
-    core.client = new_client
-    memory_runtime.client = new_client
-    return new_client
 from .tasks import (  # noqa: F401
-    CURRENT_TODOS, Task, claim_task, complete_task, create_task, get_task_json,
-    list_tasks, load_task, save_task, task_lock, teammate_assignments,
-    update_task, assignment_versions,
+    CURRENT_TODOS, Task, assignment_cwd, assignment_versions, claim_task,
+    complete_task, create_task, get_task_json, list_tasks, load_task,
+    release_completed_assignment, release_teammate_assignment, save_task,
+    task_lock, task_worktree_cwd, teammate_assignments, update_task,
 )
 from .worktrees import (  # noqa: F401
-    assignment_cwd, create_worktree, remove_worktree, release_completed_assignment,
-    release_teammate_assignment, task_worktree_cwd, run_git,
-    _registered_worktrees, _registered_worktree,
+    run_git, _registered_worktrees, _registered_worktree,
 )
+from .task_worktrees import create_worktree, remove_worktree  # noqa: F401
 from .skills import list_skills, load_skill, SKILL_REGISTRY  # noqa: F401
 from .prompts import PROMPT_SECTIONS, ENVIRONMENT_PROMPT  # noqa: F401
 from .file_tools import (  # noqa: F401
@@ -112,13 +94,6 @@ from .registrations import (  # noqa: F401
 from .recovery import RecoveryState  # noqa: F401
 from . import workflow as workflow_runtime  # noqa: F401
 
-# Memory lives in its own module; share this host's client, model, workspace.
-memory_runtime.WORKDIR = core.WORKDIR
-memory_runtime.MEMORY_DIR = core.WORKDIR / '.memory'
-memory_runtime.MEMORY_INDEX = memory_runtime.MEMORY_DIR / 'MEMORY.md'
-memory_runtime.client = core.client
-memory_runtime.MODEL = core.MODEL
-
 scheduler.restore_cron_jobs([])
 try:
     from .scheduler import load_durable_jobs
@@ -126,8 +101,6 @@ try:
 except Exception:
     pass
 
-workflow.WORKDIR = core.WORKDIR
-workflow.STORE = core.WORKDIR / '.runtime'
 workflow.RUNNER_FACTORY = (
     lambda: workflow.AnthropicAgentRunner(core.client, core.MODEL)
 )
@@ -216,7 +189,7 @@ def call_llm(messages: list, context: dict, tools: list,
              state: recovery.RecoveryState, max_tokens: int):
     system = prompts.assemble_system_prompt(context)
     return recovery.with_retry(
-        lambda: client.messages.create(
+        lambda: core.client.messages.create(
             model=state.current_model,
             system=system,
             messages=messages,
@@ -280,10 +253,13 @@ def agent_loop(messages: list, context: dict, active_request: str):
             scheduler.restore_cron_jobs(unacknowledged_cron_jobs)
             messages.append({"role": "assistant", "content": [
                 {"type": "text", "text": f"[Error] {type(e).__name__}: {e}"}]})
-            worktrees.release_completed_assignment("agent")
+            tasks.release_completed_assignment("agent")
             return
 
-        scheduler.acknowledge_cron_jobs(unacknowledged_cron_jobs)
+        try:
+            scheduler.acknowledge_cron_jobs(unacknowledged_cron_jobs)
+        except OSError as exc:
+            core.terminal_print(f"[cron error] Delivery confirmation failed: {exc}")
         unacknowledged_cron_jobs.clear()
 
         if response.stop_reason == "max_tokens":
@@ -297,7 +273,7 @@ def agent_loop(messages: list, context: dict, active_request: str):
                 messages.append({"role": "user", "content": core.CONTINUATION_PROMPT})
                 state.recovery_count += 1
                 continue
-            worktrees.release_completed_assignment("agent")
+            tasks.release_completed_assignment("agent")
             return
 
         max_tokens = core.DEFAULT_MAX_TOKENS
@@ -321,7 +297,7 @@ def agent_loop(messages: list, context: dict, active_request: str):
                 print(f"  \033[35m[goal] {decision.action}: "
                       f"{decision.reason}\033[0m")
             remember_after_turn(messages)
-            worktrees.release_completed_assignment("agent")
+            tasks.release_completed_assignment("agent")
             return
 
         results = []

@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,7 +51,7 @@ def run_cli(*args: str, cwd: Path) -> str:
 def acquire_lock_in_child(run_id: str, store: str, results) -> None:
     from agent_harness import workflow as child_workflow
 
-    child_workflow.STORE = Path(store)
+    child_workflow.store_dir = lambda: Path(store)
     try:
         with child_workflow.workflow_run_lock(run_id):
             results.put("acquired")
@@ -66,6 +67,58 @@ def test_workflow_runtime_resumes_from_journal(tmp_path: Path) -> None:
     assert "status=cached" in resumed
     assert "status=completed  agents=0  tokens=0" in resumed
     assert (tmp_path / ".runtime" / "last_run.txt").exists()
+
+
+def test_resume_replays_at_budget_limit_without_spending_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workflow.core, "WORKDIR", tmp_path)
+    calls = []
+
+    class CountingRunner:
+        def run(self, prompt, schema=None, label=None):
+            calls.append(prompt)
+            return workflow.RunnerOutput(prompt, 1)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", CountingRunner)
+    meta = {"name": "budget-replay", "description": "test replay"}
+
+    async def one_call(ctx, _args):
+        return await ctx.agent("first", label="first")
+
+    async def two_calls(ctx, _args):
+        await ctx.agent("first", label="first")
+        return await ctx.agent("second", label="second")
+
+    first = asyncio.run(workflow.WorkflowTool().call(
+        meta, one_call, {"budget": 1}
+    ))
+    run_id = first["task"].run_id
+    replay = asyncio.run(workflow.WorkflowTool().call(
+        meta, one_call, resume_from_run_id=run_id
+    ))
+    blocked = asyncio.run(workflow.WorkflowTool().call(
+        meta, two_calls, resume_from_run_id=run_id
+    ))
+
+    assert calls == ["first"]
+    assert replay["task"].status == "completed"
+    assert replay["task"].usage == {"agents": 0, "tokens": 0}
+    assert replay["task"].cumulative_usage == {"agents": 1, "tokens": 1}
+    assert blocked["task"].status == "failed"
+    assert "token budget exceeded" in blocked["result"]["error"]
+
+
+def test_resume_rejects_journal_without_token_usage(tmp_path: Path) -> None:
+    run_id = "wf_legacy_0001"
+    journal_path = tmp_path / f"{run_id}.journal.jsonl"
+    legacy_record = '{"key": "agent-old", "value": "done"}\n'
+    journal_path.write_text(legacy_record, encoding="utf-8")
+
+    with pytest.raises(workflow.WorkflowInputError, match="line 1"):
+        workflow.WorkflowJournal(run_id, resume=True, store=tmp_path)
+
+    assert journal_path.read_text(encoding="utf-8") == legacy_record
 
 
 def test_workflow_runtime_rejects_unsafe_artifact_names() -> None:
@@ -135,7 +188,7 @@ def test_workflow_runtime_rejects_corrupt_resume_journal(tmp_path: Path) -> None
 def test_workflow_tool_adapter_uses_registry_and_returns_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(workflow, "STORE", tmp_path)
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
 
     result = asyncio.run(
         workflow.WORKFLOW_HANDLERS["Workflow"](
@@ -161,7 +214,7 @@ def test_workflow_tool_adapter_uses_registry_and_returns_json(
 def test_fresh_workflow_runs_have_unique_identity_and_resume_validates_args(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(workflow, "STORE", tmp_path)
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
 
     first = asyncio.run(workflow.run_workflow("review-changes", {"budget": None}))
     second = asyncio.run(workflow.run_workflow("review-changes", {"budget": None}))
@@ -181,7 +234,7 @@ def test_fresh_workflow_runs_have_unique_identity_and_resume_validates_args(
 def test_fresh_workflow_run_refuses_an_existing_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(workflow, "STORE", tmp_path)
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
     fixed_id = "wf_review-changes_0000000000001a7b"
     monkeypatch.setattr(workflow, "create_run_id", lambda _meta: fixed_id)
 
@@ -200,7 +253,7 @@ def test_fresh_workflow_run_refuses_an_existing_identity(
 def test_invalid_resume_does_not_overwrite_completed_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(workflow, "STORE", tmp_path)
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
     result = asyncio.run(workflow.run_workflow("review-changes", {"budget": None}))
     run_id = result["task"]["runId"]
     snapshot_path = tmp_path / f"{run_id}.json"
@@ -222,7 +275,7 @@ def test_invalid_resume_does_not_overwrite_completed_artifacts(
 def test_active_workflow_run_rejects_concurrent_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(workflow, "STORE", tmp_path)
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
     run_id = "wf_slow-test_0000000000001a7b"
     monkeypatch.setattr(workflow, "create_run_id", lambda _meta: run_id)
     started = asyncio.Event()
@@ -257,8 +310,8 @@ def test_active_workflow_run_rejects_concurrent_resume(
 
 
 def test_workflow_run_lock_is_cross_process(tmp_path: Path) -> None:
-    original = workflow.STORE
-    workflow.STORE = tmp_path
+    original = workflow.store_dir
+    workflow.store_dir = lambda: tmp_path
     run_id = "wf_process-lock_0000000000001a7b"
     context = multiprocessing.get_context("spawn")
     results = context.Queue()
@@ -271,7 +324,7 @@ def test_workflow_run_lock_is_cross_process(tmp_path: Path) -> None:
             child.start()
             child.join(10)
     finally:
-        workflow.STORE = original
+        workflow.store_dir = original
 
     assert child.exitcode == 0
     assert "already active" in results.get(timeout=1)
@@ -381,6 +434,39 @@ def test_parallel_agent_calls_do_not_block_the_event_loop(tmp_path: Path) -> Non
     assert task.usage == {"agents": 2, "tokens": 2}
 
 
+def test_parallel_identical_agent_calls_share_one_result(tmp_path: Path) -> None:
+    calls = []
+
+    class SlowRunner:
+        def run(self, prompt, schema=None, label=None):
+            calls.append(prompt)
+            time.sleep(0.05)
+            return workflow.RunnerOutput("shared", 2)
+
+    journal = workflow.WorkflowJournal(
+        "wf_same-key_0001", resume=False, store=tmp_path
+    )
+    task = workflow.LocalWorkflowTask("task", "wf_same-key_0001", {})
+    state = workflow.ExecutionState(
+        task, journal, SlowRunner(), workflow.Budget(2), {}
+    )
+
+    async def run():
+        return await state.parallel([
+            lambda: state.agent("same", label="same"),
+            lambda: state.agent("same", label="same"),
+        ])
+
+    try:
+        result = asyncio.run(run())
+    finally:
+        journal.close()
+
+    assert result == ["shared", "shared"]
+    assert calls == ["same"]
+    assert task.usage == {"agents": 1, "tokens": 2}
+
+
 def test_workflow_tool_adapter_rejects_model_supplied_code() -> None:
     properties = workflow.WORKFLOW_TOOL["input_schema"]["properties"]
 
@@ -411,5 +497,5 @@ def test_host_wires_the_workflow_runner_to_its_own_client(host_factory) -> None:
     runner = host.workflow_runtime.RUNNER_FACTORY()
 
     assert isinstance(runner, workflow.AnthropicAgentRunner)
-    assert runner.client is host.client
-    assert runner.model == host.MODEL
+    assert runner.client is host.core.client
+    assert runner.model == host.core.MODEL

@@ -137,12 +137,12 @@ def main() -> int:
             tool_response("write_file", {"path": "hello.txt", "content": "hi from agent\n"}),
             text_response("Wrote the file."),
         ])
-        host.set_client(client)
+        host.core.client = client
         messages = [{"role": "user", "content": "write hello.txt"}]
         host.agent_loop(messages, dict(context), "write hello.txt")
         assert (workdir / "hello.txt").read_text(encoding="utf-8") == "hi from agent\n"
         assert len(client.calls) == 2, f"expected 2 model calls, got {len(client.calls)}"
-        assert client.calls[0]["model"] == host.MODEL
+        assert client.calls[0]["model"] == host.core.MODEL
         assert messages[-1]["role"] == "assistant"
         return "tool round-trip, 2 model calls"
 
@@ -184,7 +184,7 @@ def main() -> int:
                 return goal_module.GoalEvaluation(True, "tests pass")
 
         client = FakeClient([text_response("Done."), text_response("Verified.")])
-        host.set_client(client)
+        host.core.client = client
         host.GOAL = goal_module.GoalController(evaluator=Evaluator())
         host.GOAL.set_goal("tests pass")
         messages = [{"role": "user", "content": "go"}]

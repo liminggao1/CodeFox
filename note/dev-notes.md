@@ -16,7 +16,7 @@ R=/mnt/d/01dpan/01project/life/learncc/agent-harness
 PY=/home/gaogao/miniconda3/envs/learncc/bin/python
 
 cd $R
-$PY -m pytest -q                          # 108 个测试
+$PY -m pytest -q                          # 123 个测试
 PYTHONPATH=src $PY -m agent_harness workflow demo
 PYTHONPATH=src $PY -m agent_harness workflow resume
 $PY scripts/debug_pass.py                 # 端到端自检，9 项
@@ -31,7 +31,7 @@ $PY scripts/debug_pass.py                 # 端到端自检，9 项
 | 定位 | 单元与契约测试 | 子进程 / 真 Git / flat 集成自检 |
 | 粒度 | 每模块一个测试文件，共 10 个 | 一条命令 9 项 |
 | 覆盖 | 任务、压缩、调度、权限、编码、技能、goal、workflow、teams | 工具池、agent 回环、goal 边界、任务、workflow、worktree、flat |
-| 独有 | 边界条件与错误分支 | 真起子进程跑 CLI、真建 Git 仓库、验证 flat 产物可独立运行 |
+| 独有 | 边界条件与错误分支 | 真起子进程跑 CLI、真建 Git 仓库、验证 flat 产物在仓库内可运行 |
 
 改完 `src/` 后两个都要跑：先 `pytest -q`，再 `debug_pass.py`。重叠的几项（工具池、agent
 回环、edit 守卫、路径逃逸、goal 边界、任务生命周期）是刻意保留的重复：`pytest` 里是隔离
@@ -139,18 +139,19 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 | 想看什么 | 位置 |
 | --- | --- |
-| 一轮对话的完整流程 | [host.py:241](../src/agent_harness/host.py:241) `agent_loop` |
-| 上下文如何刷新 | [host.py:165](../src/agent_harness/host.py:165) `update_context` |
-| goal 的 Stop 判定 | [host.py:228](../src/agent_harness/host.py:228) `evaluate_goal`、[goal.py:174](../src/agent_harness/goal.py:174) `evaluate` |
-| 系统提示词怎么拼出来 | [prompts.py:69](../src/agent_harness/prompts.py:69) `assemble_system_prompt` |
-| 工具调用与结果 | [file_tools.py:219](../src/agent_harness/file_tools.py:219) `call_tool_handler` |
-| 工具池装配 | [mcp_tools.py:137](../src/agent_harness/mcp_tools.py:137) `assemble_tool_pool` |
+| 一轮对话的完整流程 | [host.py:214](../src/agent_harness/host.py:214) `agent_loop` |
+| 上下文如何刷新 | [host.py:138](../src/agent_harness/host.py:138) `update_context` |
+| goal 的 Stop 判定 | [host.py:201](../src/agent_harness/host.py:201) `evaluate_goal`、[goal.py:174](../src/agent_harness/goal.py:174) `evaluate` |
+| 系统提示词怎么拼出来 | [prompts.py:68](../src/agent_harness/prompts.py:68) `assemble_system_prompt` |
+| 工具调用与结果 | [file_tools.py:218](../src/agent_harness/file_tools.py:218) `call_tool_handler` |
+| 工具池装配 | [mcp_tools.py:138](../src/agent_harness/mcp_tools.py:138) `assemble_tool_pool` |
 | 任务生命周期 | [tasks.py](../src/agent_harness/tasks.py) `create_task` / `claim_task` / `complete_task` |
+| 任务与 worktree 绑定 | [task_worktrees.py:13](../src/agent_harness/task_worktrees.py:13) `create_worktree` / `remove_worktree` |
 | 队友线程与协议 | [teams.py](../src/agent_harness/teams.py) `spawn_teammate_thread`、`apply_plan_response` |
 | 权限与 hooks | [hooks.py](../src/agent_harness/hooks.py) `permission_hook`、`trigger_hooks` |
 | 后台任务 / cron | [scheduler.py](../src/agent_harness/scheduler.py) `start_background_task`、`cron_scheduler_loop` |
-| 工作流单次 agent 调用 | [workflow.py:479](../src/agent_harness/workflow.py:479) `ExecutionState.agent` |
-| journal 读写与 resume | [workflow.py:345](../src/agent_harness/workflow.py:345) `WorkflowJournal` |
+| 工作流单次 agent 调用 | [workflow.py:500](../src/agent_harness/workflow.py:500) `ExecutionState.agent` |
+| journal 读写与 resume | [workflow.py:349](../src/agent_harness/workflow.py:349) `WorkflowJournal` |
 | memory 选取 / 抽取 | [memory_runtime.py:287](../src/agent_harness/memory_runtime.py:287)、[:393](../src/agent_harness/memory_runtime.py:393) |
 | 启动与 `/goal` 拦截 | [cli.py:44](../src/agent_harness/cli.py:44) `run_cli`、[:23](../src/agent_harness/cli.py:23) `handle_goal_command` |
 
@@ -179,9 +180,8 @@ Remote-WSL 已让断点自动生效，一般不需要。真要 attach：在 WSL 
 - **worktree 绑定要求任务处于 `pending` 且无 owner**。已认领的任务不能再绑定新 worktree。
 - **移除 worktree 前必须先完成任务**。未完成时 `remove_worktree` 返回错误而不是强删；完成后
   移除会保留分支（`wt/<name>`），只删工作目录。
-- **worktree 相关全局量必须在导入时就一致**。`WORKDIR` / `TASKS_DIR` / `TASKS_ROOT` /
-  `WORKTREES_DIR` 都在导入时由 `Path.cwd()` 固化。事后改 `host.WORKDIR` 而不改 `TASKS_ROOT`，
-  `_task_path` 会抛 `Invalid task ID`；正确做法是**在目标目录里启动进程**。
+- **运行目录以 `core.WORKDIR` 为准**。任务、worktree、memory、workflow、transcript 和工具结果目录
+  都在调用时从它解析；实际使用仍应在目标目录启动进程。调试时不要修改旧的 `host.WORKDIR`。
 - **`.env` 与启动目录无关**。`load_dotenv()` 从包文件位置逐级向上查找，所以在任何目录启动
   都能读到项目根的 `.env`。
 
