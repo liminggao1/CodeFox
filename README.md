@@ -39,7 +39,21 @@ python -m agent_harness
 | `src/agent_harness/cli.py` | 入口：交互循环 + `/goal` 本地处理 + workflow demo |
 | `src/agent_harness/__main__.py` | `python -m agent_harness` 入口 |
 | `src/agent_harness/llm_client.py` | 客户端 shim：Anthropic Messages 或 OpenAI Responses 双协议 |
-| `src/agent_harness/host.py` | agent 主循环：内置工具、团队、cron、MCP、memory、后台、压缩 |
+| `src/agent_harness/host.py` | 集成宿主：agent 主循环 + 上下文刷新 + 把各模块接线起来；状态路径由各模块按 `core.WORKDIR` 实时解析，换 cwd 无需重新绑定 |
+| `src/agent_harness/core.py` | 共享配置：启动目录、API client、模型 id、常量、ConsoleBroker |
+| `src/agent_harness/tasks.py` | 任务板：文件持久化的任务、依赖、认领/完成、assignment 注册表 |
+| `src/agent_harness/worktrees.py` | 任务绑定的 Git worktree：创建/移除，始终保留分支 |
+| `src/agent_harness/skills.py` | 技能加载：扫描包内 `SKILL.md`，按名取用 |
+| `src/agent_harness/prompts.py` | 系统提示词拼装：身份、工具目录、工作目录、技能、memory、MCP |
+| `src/agent_harness/file_tools.py` | 基础工具：bash / 读写改文件 / glob / todo，含路径逃逸防护 |
+| `src/agent_harness/teams.py` | 持久团队：mailbox、协议状态、队友线程、Lead 工具 |
+| `src/agent_harness/hooks.py` | Hooks 与权限检查：UserPromptSubmit / PreToolUse / PostToolUse / Stop |
+| `src/agent_harness/subagent.py` | 子 agent：一次隔离、不可递归的 agent 运行 |
+| `src/agent_harness/compaction.py` | 分层上下文压缩：工具结果瘦身、消息裁剪、摘要 |
+| `src/agent_harness/recovery.py` | 重试与错误恢复：模型回退、重试预算 |
+| `src/agent_harness/scheduler.py` | 后台任务与 cron 调度：`.scheduled_tasks.json` 持久化 |
+| `src/agent_harness/mcp_tools.py` | MCP：连接后把 server 工具并入工具池 |
+| `src/agent_harness/registrations.py` | 工具 schema 与 handler 表：工具名到实现的唯一映射 |
 | `src/agent_harness/memory_runtime.py` | memory 运行时：相关记忆选取与抽取 |
 | `src/agent_harness/workflow.py` | 工作流运行时：journal、预算、resume、并行 agent |
 | `src/agent_harness/goal.py` | 目标层：GoalController / PromptGoalEvaluator |
@@ -47,7 +61,7 @@ python -m agent_harness
 | `scripts/build_flat.py` | 拼接生成 `flat/agent_full.py` |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
 | `flat/agent_full.py` | 生成物：全部机制在一个文件里 |
-| `tests/` | 56 个离线测试 |
+| `tests/` | 108 个离线测试，按模块拆分（任务、压缩、调度、权限、编码、技能等） |
 | `docs/` | 项目级设计与执行记录，入口见 `docs/README.md` |
 | `note/` | `env-setup.md` 安装说明；`dev-notes.md` 本机运行与调试笔记 |
 | `tmp/` | 本地临时文件，不入库（需要时手动 `mkdir tmp`） |

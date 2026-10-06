@@ -16,13 +16,26 @@ R=/mnt/d/01dpan/01project/life/learncc/agent-harness
 PY=/home/gaogao/miniconda3/envs/learncc/bin/python
 
 cd $R
-$PY -m pytest -q                          # 56 个测试
+$PY -m pytest -q                          # 108 个测试
 PYTHONPATH=src $PY -m agent_harness workflow demo
 PYTHONPATH=src $PY -m agent_harness workflow resume
 $PY scripts/debug_pass.py                 # 端到端自检，9 项
 ```
 
 `pytest` 和自检不需要 `PYTHONPATH`（前者由 `tests/conftest.py` 注入 `src`，后者自己插入）。
+
+### 两者的分工
+
+| | `pytest` | `scripts/debug_pass.py` |
+| --- | --- | --- |
+| 定位 | 单元与契约测试 | 子进程 / 真 Git / flat 集成自检 |
+| 粒度 | 每模块一个测试文件，共 10 个 | 一条命令 9 项 |
+| 覆盖 | 任务、压缩、调度、权限、编码、技能、goal、workflow、teams | 工具池、agent 回环、goal 边界、任务、workflow、worktree、flat |
+| 独有 | 边界条件与错误分支 | 真起子进程跑 CLI、真建 Git 仓库、验证 flat 产物可独立运行 |
+
+改完 `src/` 后两个都要跑：先 `pytest -q`，再 `debug_pass.py`。重叠的几项（工具池、agent
+回环、edit 守卫、路径逃逸、goal 边界、任务生命周期）是刻意保留的重复：`pytest` 里是隔离
+单测，自检里是在真实进程边界上再确认一次。
 
 ### 真实 API 交互
 
@@ -126,18 +139,22 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 | 想看什么 | 位置 |
 | --- | --- |
-| 一轮对话的完整流程 | [host.py:3173](../src/agent_harness/host.py:3173) `agent_loop` |
-| 系统提示词怎么拼出来 | [host.py:868](../src/agent_harness/host.py:868) `assemble_system_prompt` |
-| 工具调用与结果 | [host.py:1085](../src/agent_harness/host.py:1085) `call_tool_handler` |
-| 工具池装配 | [host.py:2772](../src/agent_harness/host.py:2772) `assemble_tool_pool` |
-| 上下文如何刷新 | [host.py:3097](../src/agent_harness/host.py:3097) `update_context` |
-| goal 的 Stop 判定 | [host.py:3160](../src/agent_harness/host.py:3160) `evaluate_goal`、[goal.py:174](../src/agent_harness/goal.py:174) `evaluate` |
+| 一轮对话的完整流程 | [host.py:241](../src/agent_harness/host.py:241) `agent_loop` |
+| 上下文如何刷新 | [host.py:165](../src/agent_harness/host.py:165) `update_context` |
+| goal 的 Stop 判定 | [host.py:228](../src/agent_harness/host.py:228) `evaluate_goal`、[goal.py:174](../src/agent_harness/goal.py:174) `evaluate` |
+| 系统提示词怎么拼出来 | [prompts.py:69](../src/agent_harness/prompts.py:69) `assemble_system_prompt` |
+| 工具调用与结果 | [file_tools.py:219](../src/agent_harness/file_tools.py:219) `call_tool_handler` |
+| 工具池装配 | [mcp_tools.py:137](../src/agent_harness/mcp_tools.py:137) `assemble_tool_pool` |
+| 任务生命周期 | [tasks.py](../src/agent_harness/tasks.py) `create_task` / `claim_task` / `complete_task` |
+| 队友线程与协议 | [teams.py](../src/agent_harness/teams.py) `spawn_teammate_thread`、`apply_plan_response` |
+| 权限与 hooks | [hooks.py](../src/agent_harness/hooks.py) `permission_hook`、`trigger_hooks` |
+| 后台任务 / cron | [scheduler.py](../src/agent_harness/scheduler.py) `start_background_task`、`cron_scheduler_loop` |
 | 工作流单次 agent 调用 | [workflow.py:479](../src/agent_harness/workflow.py:479) `ExecutionState.agent` |
 | journal 读写与 resume | [workflow.py:345](../src/agent_harness/workflow.py:345) `WorkflowJournal` |
 | memory 选取 / 抽取 | [memory_runtime.py:287](../src/agent_harness/memory_runtime.py:287)、[:393](../src/agent_harness/memory_runtime.py:393) |
 | 启动与 `/goal` 拦截 | [cli.py:44](../src/agent_harness/cli.py:44) `run_cli`、[:23](../src/agent_harness/cli.py:23) `handle_goal_command` |
 
-行号会随源码变动，对不上就按函数名搜。
+行号会随源码变动，对不上就按函数名搜。拆分后每个机制一个文件，先按文件名定位，再找函数。
 
 ### 用法要点
 

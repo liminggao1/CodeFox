@@ -20,7 +20,7 @@
 
 - 结构：`src/agent_harness/`（源码 + 包内 `skills/`）、`scripts/`、`flat/`、`tests/`、`docs/`、`note/`。
 - 运行：本地以源码方式运行，环境约定见 `AGENTS.md`；通用安装步骤见 `note/env-setup.md`。
-- 验证：56 个离线测试全绿；workflow `demo` / `resume` 离线通过；离线自检 9 项通过。
+- 验证：108 个离线测试全绿；workflow `demo` / `resume` 离线通过；离线自检 9 项通过。
 - 未实测：真实 API 交互问答、队友线程端到端、memory 抽取。
 - 不做打包发布，不引入 linter/formatter。
 
@@ -28,7 +28,21 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/agent_harness/host.py` | 集成宿主：agent 主循环 + 内置工具 + 团队 + cron + MCP + memory + 后台 + 压缩 |
+| `src/agent_harness/host.py` | 集成宿主：agent 主循环、上下文刷新、模块接线 |
+| `src/agent_harness/core.py` | 共享配置：启动目录、client、模型 id、常量 |
+| `src/agent_harness/tasks.py` | 任务板：任务、依赖、认领/完成、assignment 注册表 |
+| `src/agent_harness/worktrees.py` | 任务绑定的 Git worktree |
+| `src/agent_harness/skills.py` | 技能加载 |
+| `src/agent_harness/prompts.py` | 系统提示词拼装 |
+| `src/agent_harness/file_tools.py` | 基础工具：bash / 文件 / glob / todo |
+| `src/agent_harness/teams.py` | 持久团队：mailbox、协议、队友线程 |
+| `src/agent_harness/hooks.py` | Hooks 与权限检查 |
+| `src/agent_harness/subagent.py` | 子 agent 运行 |
+| `src/agent_harness/compaction.py` | 分层上下文压缩 |
+| `src/agent_harness/recovery.py` | 重试与错误恢复 |
+| `src/agent_harness/scheduler.py` | 后台任务与 cron 调度 |
+| `src/agent_harness/mcp_tools.py` | MCP 工具接入 |
+| `src/agent_harness/registrations.py` | 工具 schema 与 handler 表 |
 | `src/agent_harness/workflow.py` | 工作流运行时：定义、journal 缓存、预算、resume、并行 agent |
 | `src/agent_harness/goal.py` | 目标层：GoalController + PromptGoalEvaluator |
 | `src/agent_harness/memory_runtime.py` | memory 运行时：相关记忆选取与抽取 |

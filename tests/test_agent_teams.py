@@ -40,7 +40,7 @@ def test_state_dirs_follow_the_launch_directory(host_factory, tmp_path) -> None:
     host.create_task("Isolate state")
 
     assert (tmp_path / ".tasks").is_dir()
-    assert (tmp_path / ".tasks").resolve() == host.TASKS_ROOT
+    assert (tmp_path / ".tasks").resolve() == host.tasks._tasks_root()
     assert not (tmp_path / ".mailboxes").exists()
 
 
@@ -93,7 +93,7 @@ def test_message_bus_rejects_unregistered_or_unsafe_recipients(
 
     result = host._teammate_send_message("alice", "ghost", "Are you there?")
     assert "not active" in result
-    assert not (host.MAILBOX_DIR / "ghost.jsonl").exists()
+    assert not (host.teams._mailbox_dir() / "ghost.jsonl").exists()
 
 
 def test_reserved_teammate_names_do_not_shadow_runtime_identities(
@@ -250,9 +250,11 @@ def test_worktree_registry_parsing_does_not_use_display_truncation(
         )
     porcelain = "\n".join(entries)
     assert len(porcelain) > 5000
-    host._run_git = lambda args, cwd=None: (True, porcelain)
-
-    registered, error = host._registered_worktrees()
+    host.worktrees.run_git_impl = lambda args, cwd=None: (True, porcelain)
+    try:
+        registered, error = host._registered_worktrees()
+    finally:
+        host.worktrees.run_git_impl = None
 
     assert error is None
     assert len(registered) == 80

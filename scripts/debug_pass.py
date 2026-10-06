@@ -137,7 +137,7 @@ def main() -> int:
             tool_response("write_file", {"path": "hello.txt", "content": "hi from agent\n"}),
             text_response("Wrote the file."),
         ])
-        host.client = client
+        host.set_client(client)
         messages = [{"role": "user", "content": "write hello.txt"}]
         host.agent_loop(messages, dict(context), "write hello.txt")
         assert (workdir / "hello.txt").read_text(encoding="utf-8") == "hi from agent\n"
@@ -184,7 +184,7 @@ def main() -> int:
                 return goal_module.GoalEvaluation(True, "tests pass")
 
         client = FakeClient([text_response("Done."), text_response("Verified.")])
-        host.client = client
+        host.set_client(client)
         host.GOAL = goal_module.GoalController(evaluator=Evaluator())
         host.GOAL.set_goal("tests pass")
         messages = [{"role": "user", "content": "go"}]

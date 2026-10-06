@@ -33,6 +33,25 @@ def host_factory(tmp_path, monkeypatch):
         _reload_host()
         import agent_harness.host as host
 
+        # Paths and runtime state are module-global; a fresh session must not
+        # inherit the previous test's launch directory, teammates, plan gates,
+        # assignments, or MCP clients.
+        host.core.WORKDIR = tmp_path
+        host.memory_runtime.WORKDIR = tmp_path
+        host.workflow.WORKDIR = tmp_path
+        host.workflow.STORE = tmp_path / ".runtime"
+        host.teams.active_teammates.clear()
+        host.teams.plan_gates.clear()
+        host.teams.plan_request_ids.clear()
+        host.teams.pending_requests.clear()
+        host.tasks.teammate_assignments.clear()
+        host.tasks.assignment_versions.clear()
+        host.tasks.CURRENT_TODOS.clear()
+        host.mcp_clients.clear()
+        host.scheduler.scheduled_jobs.clear()
+        host.scheduler.cron_queue.clear()
+        host.scheduler.background_tasks.clear()
+        host.scheduler.background_results.clear()
         # Memory extraction would call the model; tests drive it explicitly.
         monkeypatch.setattr(host, "remember_after_turn", lambda messages: None)
         return host

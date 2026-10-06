@@ -13,16 +13,23 @@ from __future__ import annotations
 
 import ast
 import io
+import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_DIR = PROJECT_ROOT / "src" / "agent_harness"
 OUTPUT = PROJECT_ROOT / "flat" / "agent_full.py"
 
-# Dependency order: memory and goal and workflow define globals the host
-# section configures when it runs last.
-SECTIONS = ["memory_runtime", "goal", "workflow", "host"]
+# Concatenation order follows the package import order. The host section runs
+# last and wires the feature modules together.
+SECTIONS = [
+    "core", "tasks", "worktrees", "skills", "prompts", "file_tools", "teams",
+    "hooks", "subagent", "compaction", "recovery", "scheduler", "mcp_tools",
+    "registrations", "memory_runtime", "goal", "workflow", "host",
+]
 
+# Flat build collapses every module into one namespace, so "from . import X"
+# becomes an alias to this very module.
 RELATIVE_IMPORT_REPLACEMENTS = {
     "from .llm_client import Anthropic": "from agent_harness.llm_client import Anthropic",
     "from . import memory_runtime as MEMORY_RUNTIME": (
@@ -194,10 +201,23 @@ def collect_imports(modules: dict[str, list[str]]) -> list[str]:
     return future + [BOOTSTRAP] + others
 
 
+MODULE_ALIAS = re.compile(r"^from \. import ([A-Za-z_][A-Za-z0-9_]*)(?: as \w+)?$",
+                          re.MULTILINE)
+# Multi-line "from .mod import (a, b, c)" re-exports of the host section: in the
+# flat file those names already exist, so the import line is redundant.
+MODULE_FROM = re.compile(r"^from \.[A-Za-z_][A-Za-z0-9_.]* import \(.*?\)\n",
+                         re.MULTILINE | re.DOTALL)
+MODULE_FROM_ONE = re.compile(r"^from \.[A-Za-z_][A-Za-z0-9_.]* import [^(\n]*\n",
+                             re.MULTILINE)
+
+
 def apply_relative_import_replacements(text: str) -> str:
     for old, new in RELATIVE_IMPORT_REPLACEMENTS.items():
         text = text.replace(old, new)
-    return text
+    text = MODULE_FROM.sub("", text)
+    text = MODULE_FROM_ONE.sub("", text)
+    # Every feature module becomes an alias to the single flat namespace.
+    return MODULE_ALIAS.sub(lambda m: f"{m.group(1)} = sys.modules[__name__]", text)
 
 
 def build() -> str:
