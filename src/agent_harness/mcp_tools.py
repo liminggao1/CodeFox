@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 
 from . import core
-from . import workflow
+from .tool_registry import ToolDefinition
 from .task_worktrees import create_worktree
 
 # -- MCP 系统 --
@@ -50,7 +50,6 @@ mcp_clients: dict[str, MCPClient] = {}
 _DISALLOWED_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 
 # 授权取决于 host 配置，而不是服务器返回的工具描述。
-mcp_tool_policies: dict[str, str] = {}
 
 MCP_HOST_POLICY = {
     ("docs", "search"): "allow",
@@ -134,27 +133,9 @@ def connect_mcp(name: str) -> str:
             f"Discovered {len(mcp_client.tools)} tools: {', '.join(tool_names)}")
 
 
-def assemble_tool_pool() -> tuple[list[dict], dict]:
-    """将内置工具和所有 MCP 工具合并到同一个工具池。
-
-    返回：
-        tools: 工具描述列表（发给模型，含 name/description/input_schema）。
-        handlers: 工具名 → 执行函数的映射（模型要求调用时按名取函数）。
-
-    命名规则：MCP 工具统一命名为 "mcp__<服务器名>__<工具名>"，
-    避免与内置工具撞名；规范化后重名会抛 ValueError 拒绝装配。
-    每个 MCP 工具的权限默认 "confirm"（需用户确认），MCP_HOST_POLICY 可覆盖。
-    """
-    global mcp_tool_policies
-    # 把本次装配的权限策略写回模块级变量，供工具调用流程读取
-    from . import registrations
-    # 拷贝内置注册表，避免后续 append 污染原始数据
-    tools = list(registrations.BUILTIN_TOOLS)
-    handlers = dict(registrations.BUILTIN_HANDLERS)
-    policies: dict[str, str] = {}
-    # 登记每个工具名的来源，用于冲突检测时报错定位
-    origins = {tool["name"]: f"built-in tool {tool['name']!r}"
-               for tool in tools}
+def discover_tools() -> list[ToolDefinition]:
+    """Return normalized MCP definitions; registry handles cross-source collisions."""
+    entries = []
     for server_name, mcp_client in mcp_clients.items():
         safe_server = normalize_mcp_name(server_name)
         for tool_def in mcp_client.tools:
@@ -167,42 +148,29 @@ def assemble_tool_pool() -> tuple[list[dict], dict]:
                     f"MCP tool name is longer than 64 characters: {prefixed}"
                 )
             origin = f"MCP tool {server_name!r}/{raw_name!r}"
-            # 冲突检测：规范化后名字已存在（内置或另一 MCP 工具）则拒绝合并
-            if prefixed in origins:
-                raise ValueError(
-                    "MCP tool name collision after normalization: "
-                    f"{prefixed!r} maps both {origins[prefixed]} and {origin}"
-                )
             schema = tool_def.get("inputSchema", {})
             # schema 必须是 dict 且 type 为 object，否则拒绝注册
             if not isinstance(schema, dict) or schema.get("type", "object") != "object":
                 raise ValueError(f"Invalid input schema for {origin}")
 
-            origins[prefixed] = origin
-            tools.append({
+            schema = {
                 "name": prefixed,
                 "description": tool_def.get("description", ""),
                 "input_schema": schema,
-            })
+            }
             #   闭包陷阱：用默认参数绑定当前循环的 client/tool，
             #   否则所有 lambda 都会共享循环结束时最后一次的值
-            handlers[prefixed] = (
+            handler = (
                 lambda *, client=mcp_client, tool=raw_name, **kwargs:
                 client.call_tool(tool, kwargs)
             )
             # 权限策略：MCP_HOST_POLICY 未配置的默认需用户确认
-            policies[prefixed] = MCP_HOST_POLICY.get(
+            policy = MCP_HOST_POLICY.get(
                 (server_name, raw_name), "confirm"
             )
 
-    mcp_tool_policies = policies
-
-    # 确保 Workflow 工具一定在池中（内置没有就补上）
-    if not any(tool.get("name") == "Workflow" for tool in tools):
-        tools.append(workflow.WORKFLOW_TOOL)
-    handlers["Workflow"] = workflow.run_workflow_sync
-
-    return tools, handlers
+            entries.append(ToolDefinition(schema, handler, origin, policy))
+    return entries
 
 
 

@@ -1,7 +1,7 @@
 """Hooks 与权限检查。
 
 Hooks 位于工具处理器之外，因此权限、日志和 Stop 行为可独立调整。
-服务器连接后由 mcp_tools 填充 mcp_tool_policies；在此之前每次 MCP 调用都需确认。
+工具权限来自已成功装配的 registry 快照；未知 MCP 工具需确认。
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import threading
 
 from . import core
+from . import tool_registry
 
 # -- Hooks 与权限检查 --
 
@@ -53,9 +54,8 @@ def permission_hook(block):
             return "Permission denied: path must be a string"
         if not (core.WORKDIR / path).resolve().is_relative_to(core.WORKDIR):
             return "Permission denied: path is outside the workspace"
-    from . import mcp_tools
     if (block.name.startswith("mcp__")
-            and mcp_tools.mcp_tool_policies.get(block.name, "confirm") != "allow"):
+            and tool_registry.REGISTRY.policy_for(block.name) != "allow"):
         if threading.current_thread() is not threading.main_thread():
             return ("Permission denied: interactive MCP approval is unavailable "
                     "during an asynchronous turn")

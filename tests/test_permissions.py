@@ -98,7 +98,8 @@ def test_mcp_tools_default_to_confirmation(host_factory, monkeypatch) -> None:
     monkeypatch.setattr(host.CONSOLE, "ask", lambda prompt=None: "no")
     assert host.permission_hook(call) == "Permission denied by user"
 
-    host.mcp_tools.mcp_tool_policies["mcp__deploy__status"] = "allow"
+    host.connect_mcp("deploy")
+    host.assemble_tool_pool()
     assert host.permission_hook(call) is None
 
 

@@ -30,6 +30,7 @@ from . import recovery
 from . import scheduler
 from . import mcp_tools
 from . import registrations
+from . import tool_registry
 from . import memory_runtime
 from . import runtime_context
 from . import goal as goal_module
@@ -83,8 +84,8 @@ from .scheduler import (  # noqa: F401
     schedule_job, cancel_job, run_schedule_cron, run_list_crons, run_cancel_cron,
 )
 from .mcp_tools import (  # noqa: F401
-    assemble_tool_pool, connect_mcp, mcp_clients, MCPClient, MOCK_SERVERS,
-    normalize_mcp_name, MCP_HOST_POLICY, mcp_tool_policies,
+    connect_mcp, mcp_clients, MCPClient, MOCK_SERVERS,
+    normalize_mcp_name, MCP_HOST_POLICY,
 )
 from .registrations import (  # noqa: F401
     BUILTIN_TOOLS, BUILTIN_HANDLERS, run_create_task, run_update_task,
@@ -105,6 +106,19 @@ except Exception:
 workflow.RUNNER_FACTORY = (
     lambda: workflow.AnthropicAgentRunner(core.client, core.MODEL)
 )
+
+tool_registry.REGISTRY.configure(
+    registrations.builtin_definitions,
+    mcp_tools.discover_tools,
+    lambda: [tool_registry.ToolDefinition(
+        workflow.WORKFLOW_TOOL, workflow.run_workflow_sync, "Workflow")],
+)
+
+
+def assemble_tool_pool() -> tuple[list[dict], dict]:
+    """Return the model tools and handlers from the single registry snapshot."""
+    snapshot = tool_registry.REGISTRY.snapshot()
+    return list(snapshot.tools), dict(snapshot.handlers)
 
 GOAL = None
 
@@ -280,7 +294,7 @@ def agent_loop(messages: list, active_request: str):
     # TODO 提醒计数在多轮调用之间共享。
     global rounds_since_todo
     # 取得当前工具描述和工具名对应的处理函数。
-    tools, handlers = mcp_tools.assemble_tool_pool()
+    tools, handlers = assemble_tool_pool()
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
     # 首次调用使用默认输出 token 上限。
@@ -326,7 +340,7 @@ def agent_loop(messages: list, active_request: str):
         # 根据最新消息刷新记忆、MCP 和队友上下文。
         context = runtime_context.build_context(messages)
         # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
-        tools, handlers = mcp_tools.assemble_tool_pool()
+        tools, handlers = assemble_tool_pool()
         # 手动压缩完成后不再向模型提供 compact 工具。
         tools = manual_compaction.available_tools(tools)
 

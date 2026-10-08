@@ -57,6 +57,7 @@ python -m agent_harness
 | `src/agent_harness/registrations.py` | 工具 schema 与 handler 表：工具名到实现的唯一映射 |
 | `src/agent_harness/memory_runtime.py` | memory 运行时：相关记忆选取与抽取 |
 | `src/agent_harness/runtime_context.py` | 每次模型调用前构造只读上下文快照 |
+| `src/agent_harness/tool_registry.py` | 统一装配工具 schema、handler 和权限快照 |
 | `src/agent_harness/workflow.py` | 工作流运行时：journal、预算、resume、并行 agent |
 | `src/agent_harness/goal.py` | 目标层：GoalController / PromptGoalEvaluator |
 | `src/agent_harness/skills/` | 技能资产（随包分发） |

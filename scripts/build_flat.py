@@ -21,7 +21,7 @@ OUTPUT = PROJECT_ROOT / "flat" / "agent_full.py"
 
 # 拼接顺序遵循包的导入顺序；host 部分最后连接各功能模块。
 SECTIONS = [
-    "core", "tasks", "worktrees", "skills", "prompts", "file_tools", "teams",
+    "core", "tool_registry", "tasks", "worktrees", "skills", "prompts", "file_tools", "teams",
     "hooks", "subagent", "compaction", "recovery", "scheduler",
     "task_worktrees", "mcp_tools",
     "registrations", "memory_runtime", "runtime_context", "goal", "workflow", "host",

@@ -19,6 +19,8 @@ import threading                     # 控制台锁、线程判断
 from pathlib import Path             # 面向对象的路径操作
 from agent_harness.llm_client import Anthropic    # 从同包 llm_client 导入 Anthropic 客户端类
 from dotenv import load_dotenv       # 读取 .env 文件的库
+from dataclasses import dataclass
+from types import MappingProxyType
 import json
 import re
 import secrets
@@ -42,12 +44,11 @@ import random
 from dataclasses import dataclass, field
 file_tools = sys.modules[__name__]
 hooks = sys.modules[__name__]
+tool_registry = sys.modules[__name__]
 prompts = sys.modules[__name__]
 subagent = sys.modules[__name__]
-from dataclasses import dataclass
 from dataclasses import asdict, dataclass
 scheduler = sys.modules[__name__]
-workflow = sys.modules[__name__]
 task_worktrees = sys.modules[__name__]
 teams = sys.modules[__name__]
 mcp_tools = sys.modules[__name__]
@@ -60,6 +61,7 @@ recovery = sys.modules[__name__]
 registrations = sys.modules[__name__]
 runtime_context = sys.modules[__name__]
 goal_module = sys.modules[__name__]
+workflow = sys.modules[__name__]
 workflow_runtime = sys.modules[__name__]  # noqa: F401
 
 
@@ -177,6 +179,62 @@ def terminal_print(text: str):
     print(f"\r\033[K{text}")                    # \r 回行首 + \033[K 清空本行，再打印新文本
     # 重新打印提示符 + 用户那半行，把输入现场还原（flush 立即刷新）
     print(CONSOLE.display_prompt + line, end="", flush=True)
+
+
+# ==== src/agent_harness/tool_registry.py ====
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    schema: dict
+    handler: object
+    origin: str
+    policy: str = "allow"
+
+
+@dataclass(frozen=True)
+class ToolSnapshot:
+    tools: tuple[dict, ...]
+    handlers: object
+    policies: object
+
+
+class ToolRegistry:
+    def __init__(self):
+        self._sources = ()
+        self._policies = MappingProxyType({})
+
+    def configure(self, *sources) -> None:
+        """Use explicit source functions; the registry imports no source module."""
+        self._sources = sources
+        self._policies = MappingProxyType({})
+
+    def snapshot(self) -> ToolSnapshot:
+        tools, handlers, policies, origins = [], {}, {}, {}
+        for source in self._sources:
+            for entry in source():
+                name = entry.schema["name"]
+                if name in origins:
+                    raise ValueError(
+                        "MCP tool name collision after normalization: "
+                        f"{name!r} maps both {origins[name]} and {entry.origin}"
+                    )
+                origins[name] = entry.origin
+                tools.append(entry.schema)
+                if entry.handler is not None:
+                    handlers[name] = entry.handler
+                policies[name] = entry.policy
+        snapshot = ToolSnapshot(
+            tuple(tools), MappingProxyType(handlers), MappingProxyType(policies)
+        )
+        # Publish policies only after the whole assembly has succeeded.
+        self._policies = snapshot.policies
+        return snapshot
+
+    def policy_for(self, name: str) -> str:
+        return self._policies.get(name, "confirm")
+
+
+REGISTRY = ToolRegistry()
 
 
 # ==== src/agent_harness/tasks.py ====
@@ -1745,9 +1803,8 @@ def permission_hook(block):
             return "Permission denied: path must be a string"
         if not (core.WORKDIR / path).resolve().is_relative_to(core.WORKDIR):
             return "Permission denied: path is outside the workspace"
-    from . import mcp_tools
     if (block.name.startswith("mcp__")
-            and mcp_tools.mcp_tool_policies.get(block.name, "confirm") != "allow"):
+            and tool_registry.REGISTRY.policy_for(block.name) != "allow"):
         if threading.current_thread() is not threading.main_thread():
             return ("Permission denied: interactive MCP approval is unavailable "
                     "during an asynchronous turn")
@@ -3095,7 +3152,6 @@ mcp_clients: dict[str, MCPClient] = {}
 _DISALLOWED_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 
 # 授权取决于 host 配置，而不是服务器返回的工具描述。
-mcp_tool_policies: dict[str, str] = {}
 
 MCP_HOST_POLICY = {
     ("docs", "search"): "allow",
@@ -3179,27 +3235,9 @@ def connect_mcp(name: str) -> str:
             f"Discovered {len(mcp_client.tools)} tools: {', '.join(tool_names)}")
 
 
-def assemble_tool_pool() -> tuple[list[dict], dict]:
-    """将内置工具和所有 MCP 工具合并到同一个工具池。
-
-    返回：
-        tools: 工具描述列表（发给模型，含 name/description/input_schema）。
-        handlers: 工具名 → 执行函数的映射（模型要求调用时按名取函数）。
-
-    命名规则：MCP 工具统一命名为 "mcp__<服务器名>__<工具名>"，
-    避免与内置工具撞名；规范化后重名会抛 ValueError 拒绝装配。
-    每个 MCP 工具的权限默认 "confirm"（需用户确认），MCP_HOST_POLICY 可覆盖。
-    """
-    global mcp_tool_policies
-    # 把本次装配的权限策略写回模块级变量，供工具调用流程读取
-    from . import registrations
-    # 拷贝内置注册表，避免后续 append 污染原始数据
-    tools = list(registrations.BUILTIN_TOOLS)
-    handlers = dict(registrations.BUILTIN_HANDLERS)
-    policies: dict[str, str] = {}
-    # 登记每个工具名的来源，用于冲突检测时报错定位
-    origins = {tool["name"]: f"built-in tool {tool['name']!r}"
-               for tool in tools}
+def discover_tools() -> list[ToolDefinition]:
+    """Return normalized MCP definitions; registry handles cross-source collisions."""
+    entries = []
     for server_name, mcp_client in mcp_clients.items():
         safe_server = normalize_mcp_name(server_name)
         for tool_def in mcp_client.tools:
@@ -3212,42 +3250,29 @@ def assemble_tool_pool() -> tuple[list[dict], dict]:
                     f"MCP tool name is longer than 64 characters: {prefixed}"
                 )
             origin = f"MCP tool {server_name!r}/{raw_name!r}"
-            # 冲突检测：规范化后名字已存在（内置或另一 MCP 工具）则拒绝合并
-            if prefixed in origins:
-                raise ValueError(
-                    "MCP tool name collision after normalization: "
-                    f"{prefixed!r} maps both {origins[prefixed]} and {origin}"
-                )
             schema = tool_def.get("inputSchema", {})
             # schema 必须是 dict 且 type 为 object，否则拒绝注册
             if not isinstance(schema, dict) or schema.get("type", "object") != "object":
                 raise ValueError(f"Invalid input schema for {origin}")
 
-            origins[prefixed] = origin
-            tools.append({
+            schema = {
                 "name": prefixed,
                 "description": tool_def.get("description", ""),
                 "input_schema": schema,
-            })
+            }
             #   闭包陷阱：用默认参数绑定当前循环的 client/tool，
             #   否则所有 lambda 都会共享循环结束时最后一次的值
-            handlers[prefixed] = (
+            handler = (
                 lambda *, client=mcp_client, tool=raw_name, **kwargs:
                 client.call_tool(tool, kwargs)
             )
             # 权限策略：MCP_HOST_POLICY 未配置的默认需用户确认
-            policies[prefixed] = MCP_HOST_POLICY.get(
+            policy = MCP_HOST_POLICY.get(
                 (server_name, raw_name), "confirm"
             )
 
-    mcp_tool_policies = policies
-
-    # 确保 Workflow 工具一定在池中（内置没有就补上）
-    if not any(tool.get("name") == "Workflow" for tool in tools):
-        tools.append(workflow.WORKFLOW_TOOL)
-    handlers["Workflow"] = workflow.run_workflow_sync
-
-    return tools, handlers
+            entries.append(ToolDefinition(schema, handler, origin, policy))
+    return entries
 
 
 
@@ -3347,34 +3372,39 @@ def run_connect_mcp(name: str) -> str:
 # -- 工具定义 --
 
 # 模型看到工具 schema，Python 执行处理器。两张表明确列出新增的每项能力。
-BUILTIN_TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
+BUILTIN_DEFINITIONS = [
+    ToolDefinition({"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object",
                       "properties": {"command": {"type": "string"},
                                      "run_in_background": {"type": "boolean"}},
                       "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
+                   file_tools.run_agent_bash, "built-in tool 'bash'"),
+    ToolDefinition({"name": "read_file", "description": "Read file contents.",
      "input_schema": {"type": "object",
                       "properties": {"path": {"type": "string"},
                                      "limit": {"type": "integer"},
                                      "offset": {"type": "integer"}},
                       "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to a file.",
+                   file_tools.run_agent_read, "built-in tool 'read_file'"),
+    ToolDefinition({"name": "write_file", "description": "Write content to a file.",
      "input_schema": {"type": "object",
                       "properties": {"path": {"type": "string"},
                                      "content": {"type": "string"}},
                       "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in a file once.",
+                   file_tools.run_agent_write, "built-in tool 'write_file'"),
+    ToolDefinition({"name": "edit_file", "description": "Replace exact text in a file once.",
      "input_schema": {"type": "object",
                       "properties": {"path": {"type": "string"},
                                      "old_text": {"type": "string"},
                                      "new_text": {"type": "string"}},
                       "required": ["path", "old_text", "new_text"]}},
-    {"name": "glob", "description": "Find files matching a glob pattern; ** matches recursively.",
+                   file_tools.run_agent_edit, "built-in tool 'edit_file'"),
+    ToolDefinition({"name": "glob", "description": "Find files matching a glob pattern; ** matches recursively.",
      "input_schema": {"type": "object",
                       "properties": {"pattern": {"type": "string"}},
                       "required": ["pattern"]}},
-    {"name": "todo_write",
+                   file_tools.run_agent_glob, "built-in tool 'glob'"),
+    ToolDefinition({"name": "todo_write",
      "description": "Create and manage a task list for the current session.",
      "input_schema": {"type": "object",
                       "properties": {"todos": {"type": "array",
@@ -3385,29 +3415,34 @@ BUILTIN_TOOLS = [
                                                    "enum": ["pending", "in_progress", "completed"]}},
                                     "required": ["content", "status"]}}},
                       "required": ["todos"]}},
-    {"name": "task",
+                   file_tools.run_todo_write, "built-in tool 'todo_write'"),
+    ToolDefinition({"name": "task",
      "description": "Launch a focused subagent. Returns only its final summary.",
      "input_schema": {"type": "object",
                       "properties": {"description": {"type": "string"}},
                       "required": ["description"]}},
-    {"name": "load_skill",
+                   subagent.spawn_subagent, "built-in tool 'task'"),
+    ToolDefinition({"name": "load_skill",
      "description": "Load the full content of a skill by name.",
      "input_schema": {"type": "object",
                       "properties": {"name": {"type": "string"}},
                       "required": ["name"]}},
-    {"name": "compact",
+                   skills.load_skill, "built-in tool 'load_skill'"),
+    ToolDefinition({"name": "compact",
      "description": "Summarize earlier conversation and continue with compacted context.",
      "input_schema": {"type": "object",
                       "properties": {"focus": {"type": "string"}},
                       "required": []}},
-    {"name": "create_task",
+                   None, "built-in tool 'compact'"),
+    ToolDefinition({"name": "create_task",
      "description": "Create a task and return its runtime-generated ID.",
      "input_schema": {"type": "object",
                       "properties": {"subject": {"type": "string"},
                                      "description": {"type": "string"}},
                       "required": ["subject"],
                       "additionalProperties": False}},
-    {"name": "update_task",
+                   run_create_task, "built-in tool 'create_task'"),
+    ToolDefinition({"name": "update_task",
      "description": "Add dependencies using IDs returned by create_task.",
      "input_schema": {"type": "object",
                       "properties": {
@@ -3420,21 +3455,26 @@ BUILTIN_TOOLS = [
                               "minItems": 1}},
                       "required": ["task_id", "addBlockedBy"],
                       "additionalProperties": False}},
-    {"name": "list_tasks", "description": "List all tasks.",
+                   run_update_task, "built-in tool 'update_task'"),
+    ToolDefinition({"name": "list_tasks", "description": "List all tasks.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "get_task", "description": "Get full task details.",
+                   run_list_tasks, "built-in tool 'list_tasks'"),
+    ToolDefinition({"name": "get_task", "description": "Get full task details.",
      "input_schema": {"type": "object",
                       "properties": {"task_id": {"type": "string"}},
                       "required": ["task_id"]}},
-    {"name": "claim_task", "description": "Claim a pending task.",
+                   run_get_task, "built-in tool 'get_task'"),
+    ToolDefinition({"name": "claim_task", "description": "Claim a pending task.",
      "input_schema": {"type": "object",
                       "properties": {"task_id": {"type": "string"}},
                       "required": ["task_id"]}},
-    {"name": "complete_task", "description": "Complete an in-progress task.",
+                   run_claim_task, "built-in tool 'claim_task'"),
+    ToolDefinition({"name": "complete_task", "description": "Complete an in-progress task.",
      "input_schema": {"type": "object",
                       "properties": {"task_id": {"type": "string"}},
                       "required": ["task_id"]}},
-    {"name": "schedule_cron",
+                   run_complete_task, "built-in tool 'complete_task'"),
+    ToolDefinition({"name": "schedule_cron",
      "description": ("Schedule a cron job. cron is 5-field: min hour dom "
                      "month dow. For one-shot reminders, compute the target "
                      "minute and set recurring=false."),
@@ -3444,13 +3484,16 @@ BUILTIN_TOOLS = [
                                      "recurring": {"type": "boolean"},
                                      "durable": {"type": "boolean"}},
                       "required": ["cron", "prompt"]}},
-    {"name": "list_crons", "description": "List registered cron jobs.",
+                   scheduler.run_schedule_cron, "built-in tool 'schedule_cron'"),
+    ToolDefinition({"name": "list_crons", "description": "List registered cron jobs.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "cancel_cron", "description": "Cancel a cron job by ID.",
+                   scheduler.run_list_crons, "built-in tool 'list_crons'"),
+    ToolDefinition({"name": "cancel_cron", "description": "Cancel a cron job by ID.",
      "input_schema": {"type": "object",
                       "properties": {"job_id": {"type": "string"}},
                       "required": ["job_id"]}},
-    {"name": "spawn_teammate", "description": "Spawn a persistent teammate.",
+                   scheduler.run_cancel_cron, "built-in tool 'cancel_cron'"),
+    ToolDefinition({"name": "spawn_teammate", "description": "Spawn a persistent teammate.",
      "input_schema": {"type": "object",
                       "properties": {"name": {
                                          "type": "string",
@@ -3464,32 +3507,38 @@ BUILTIN_TOOLS = [
                                      },
                                      "require_plan": {"type": "boolean"}},
                       "required": ["name", "role", "prompt"]}},
-    {"name": "list_teammates", "description": "List active teammates.",
+                   run_spawn_teammate, "built-in tool 'spawn_teammate'"),
+    ToolDefinition({"name": "list_teammates", "description": "List active teammates.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "send_message", "description": "Send message to a teammate.",
+                   run_list_teammates, "built-in tool 'list_teammates'"),
+    ToolDefinition({"name": "send_message", "description": "Send message to a teammate.",
      "input_schema": {"type": "object",
                       "properties": {"to": {"type": "string"},
                                      "content": {"type": "string"}},
                       "required": ["to", "content"]}},
-    {"name": "request_shutdown",
+                   run_send_message, "built-in tool 'send_message'"),
+    ToolDefinition({"name": "request_shutdown",
      "description": "Request a teammate to shut down.",
      "input_schema": {"type": "object",
                       "properties": {"teammate": {"type": "string"}},
                       "required": ["teammate"]}},
-    {"name": "request_plan",
+                   teams.run_request_shutdown, "built-in tool 'request_shutdown'"),
+    ToolDefinition({"name": "request_plan",
      "description": "Ask a teammate to submit a plan.",
      "input_schema": {"type": "object",
                       "properties": {"teammate": {"type": "string"},
                                      "task": {"type": "string"}},
                       "required": ["teammate", "task"]}},
-    {"name": "review_plan",
+                   teams.run_request_plan, "built-in tool 'request_plan'"),
+    ToolDefinition({"name": "review_plan",
      "description": "Approve or reject a submitted plan.",
      "input_schema": {"type": "object",
                       "properties": {"request_id": {"type": "string"},
                                      "approve": {"type": "boolean"},
                                      "feedback": {"type": "string"}},
                       "required": ["request_id", "approve"]}},
-    {"name": "create_worktree",
+                   teams.run_review_plan, "built-in tool 'review_plan'"),
+    ToolDefinition({"name": "create_worktree",
      "description": "Create a task-bound git worktree for a pending task.",
      "input_schema": {"type": "object",
                       "properties": {"name": {
@@ -3501,36 +3550,25 @@ BUILTIN_TOOLS = [
                                      "task_id": {"type": "string"}},
                       "required": ["name", "task_id"],
                       "additionalProperties": False}},
-    {"name": "connect_mcp",
+                   run_create_worktree, "built-in tool 'create_worktree'"),
+    ToolDefinition({"name": "connect_mcp",
      "description": "Connect to an MCP server (docs, deploy) and discover tools.",
      "input_schema": {"type": "object",
                       "properties": {"name": {"type": "string"}},
                       "required": ["name"]}},
+                   run_connect_mcp, "built-in tool 'connect_mcp'"),
 ]
 
+BUILTIN_TOOLS = [entry.schema for entry in BUILTIN_DEFINITIONS]
 BUILTIN_HANDLERS = {
-    "bash": file_tools.run_agent_bash,
-    "read_file": file_tools.run_agent_read,
-    "write_file": file_tools.run_agent_write,
-    "edit_file": file_tools.run_agent_edit,
-    "glob": file_tools.run_agent_glob,
-    "todo_write": file_tools.run_todo_write, "task": subagent.spawn_subagent,
-    "load_skill": skills.load_skill,
-    "create_task": run_create_task, "update_task": run_update_task,
-    "list_tasks": run_list_tasks,
-    "get_task": run_get_task,
-    "claim_task": run_claim_task, "complete_task": run_complete_task,
-    "schedule_cron": scheduler.run_schedule_cron,
-    "list_crons": scheduler.run_list_crons,
-    "cancel_cron": scheduler.run_cancel_cron,
-    "spawn_teammate": run_spawn_teammate,
-    "list_teammates": run_list_teammates,
-    "send_message": run_send_message,
-    "request_shutdown": teams.run_request_shutdown,
-    "request_plan": teams.run_request_plan, "review_plan": teams.run_review_plan,
-    "create_worktree": run_create_worktree,
-    "connect_mcp": run_connect_mcp,
+    entry.schema["name"]: entry.handler
+    for entry in BUILTIN_DEFINITIONS if entry.handler is not None
 }
+
+
+def builtin_definitions() -> list[ToolDefinition]:
+    """Provide builtin schemas and handlers in their existing order."""
+    return list(BUILTIN_DEFINITIONS)
 
 
 # ==== src/agent_harness/memory_runtime.py ====
@@ -5440,6 +5478,19 @@ workflow.RUNNER_FACTORY = (
     lambda: workflow.AnthropicAgentRunner(core.client, core.MODEL)
 )
 
+tool_registry.REGISTRY.configure(
+    registrations.builtin_definitions,
+    mcp_tools.discover_tools,
+    lambda: [tool_registry.ToolDefinition(
+        workflow.WORKFLOW_TOOL, workflow.run_workflow_sync, "Workflow")],
+)
+
+
+def assemble_tool_pool() -> tuple[list[dict], dict]:
+    """Return the model tools and handlers from the single registry snapshot."""
+    snapshot = tool_registry.REGISTRY.snapshot()
+    return list(snapshot.tools), dict(snapshot.handlers)
+
 GOAL = None
 
 
@@ -5614,7 +5665,7 @@ def agent_loop(messages: list, active_request: str):
     # TODO 提醒计数在多轮调用之间共享。
     global rounds_since_todo
     # 取得当前工具描述和工具名对应的处理函数。
-    tools, handlers = mcp_tools.assemble_tool_pool()
+    tools, handlers = assemble_tool_pool()
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
     # 首次调用使用默认输出 token 上限。
@@ -5660,7 +5711,7 @@ def agent_loop(messages: list, active_request: str):
         # 根据最新消息刷新记忆、MCP 和队友上下文。
         context = runtime_context.build_context(messages)
         # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
-        tools, handlers = mcp_tools.assemble_tool_pool()
+        tools, handlers = assemble_tool_pool()
         # 手动压缩完成后不再向模型提供 compact 工具。
         tools = manual_compaction.available_tools(tools)
 
