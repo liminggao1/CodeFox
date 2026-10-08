@@ -34,14 +34,14 @@ def host_factory(tmp_path, monkeypatch):
         import agent_harness.host as host
 
         # 路径和运行时状态位于模块全局变量中；新会话不能继承上个测试的
-        # 启动目录、队友、计划审批、任务分配或 MCP 客户端。
+        # 启动目录、子 agent、计划审批、任务分配或 MCP 客户端。
         host.core.WORKDIR = tmp_path
-        host.teams.active_teammates.clear()
-        host.teams.plan_gates.clear()
-        host.teams.plan_gate_versions.clear()
-        host.teams.plan_request_ids.clear()
-        host.teams.pending_requests.clear()
-        host.tasks.teammate_assignments.clear()
+        host.subagent.active_subagents.clear()
+        host.subagent.plan_gates.clear()
+        host.subagent.plan_gate_versions.clear()
+        host.subagent.plan_request_ids.clear()
+        host.subagent.pending_requests.clear()
+        host.tasks.assignments.clear()
         host.tasks.assignment_versions.clear()
         host.tasks.CURRENT_TODOS.clear()
         host.mcp_clients.clear()

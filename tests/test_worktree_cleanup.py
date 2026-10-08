@@ -74,7 +74,7 @@ def test_lead_completes_and_removes_in_one_model_round(worktree_runtime, monkeyp
     assert "Lead assignment released" in results[1]["content"]
     assert "default work directory" in results[1]["content"]
     assert not checkout.exists()
-    assert "agent" not in host.teammate_assignments
+    assert "agent" not in host.assignments
     assert host.tasks.assignment_versions["agent"] == version + 1
     assert host.load_task(task.id).status == "completed"
     assert host.load_task(task.id).worktree is None
@@ -108,7 +108,7 @@ def test_dirty_worktree_keeps_lead_assignment(worktree_runtime, file):
     assert_lease_preserved(host, task, checkout, version)
 
 
-def test_lead_cannot_release_teammate_lease(worktree_runtime):
+def test_lead_cannot_release_subagent_lease(worktree_runtime):
     host, task, checkout, _ = worktree_runtime(owner="alice")
     assert host.complete_task(task.id, owner="alice").startswith("Completed")
     version = host.tasks.assignment_versions["alice"]
@@ -167,7 +167,7 @@ def test_removed_directory_releases_lead_even_if_unbinding_save_fails(
     assert result.startswith("Partial success")
     assert "injected save failure" in result
     assert not checkout.exists()
-    assert "agent" not in host.teammate_assignments
+    assert "agent" not in host.assignments
     assert host.tasks.assignment_versions["agent"] == version + 1
     assert host.assignment_cwd("agent") == host.core.WORKDIR
     assert host.load_task(task.id).worktree == "feature"
@@ -180,13 +180,13 @@ def test_cleanup_preserves_leads_unrelated_assignment(worktree_runtime):
     assert host.release_completed_assignment("alice")
     other = host.tasks.create_task("Other Lead task")
     assert host.claim_task(other.id).startswith("Claimed")
-    assignment = dict(host.teammate_assignments["agent"])
+    assignment = dict(host.assignments["agent"])
     version = host.tasks.assignment_versions["agent"]
 
     assert host.run_remove_worktree("feature").startswith("Worktree")
 
     assert not checkout.exists()
-    assert host.teammate_assignments["agent"] == assignment
+    assert host.assignments["agent"] == assignment
     assert host.tasks.assignment_versions["agent"] == version
     assert host.load_task(other.id).status == "in_progress"
 
@@ -204,4 +204,4 @@ def test_model_tool_cannot_force_discard_changes(worktree_runtime):
 
     assert result.startswith("Error:")
     assert checkout.is_dir()
-    assert "agent" in host.teammate_assignments
+    assert "agent" in host.assignments

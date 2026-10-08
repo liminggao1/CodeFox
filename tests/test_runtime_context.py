@@ -13,18 +13,18 @@ def test_snapshot_owns_its_values(host_factory, monkeypatch) -> None:
     monkeypatch.setattr(host.memory_runtime, "load_memories", lambda messages: "")
     first = runtime_context.build_context([])
     host.connect_mcp("docs")
-    host.teams.active_teammates["alice"] = "working"
+    host.subagent.active_subagents["alice"] = host.SubagentRecord("alice")
     second = runtime_context.build_context([])
 
     assert first.connected_mcp == ()
-    assert first.active_teammates == ()
+    assert first.active_subagents == ()
     assert second.connected_mcp == ("docs",)
-    assert second.active_teammates == ("alice",)
+    assert second.active_subagents == ("alice",)
     with pytest.raises(FrozenInstanceError):
         first.memories = "changed"
 
 
-def test_agent_refreshes_memory_mcp_and_teammates_after_tool_round(host_factory, monkeypatch):
+def test_agent_refreshes_memory_mcp_and_subagents_after_tool_round(host_factory, monkeypatch):
     host = host_factory()
     calls = []
     monkeypatch.setattr(host.memory_runtime, "load_memories", lambda messages: "recalled")
@@ -34,7 +34,7 @@ def test_agent_refreshes_memory_mcp_and_teammates_after_tool_round(host_factory,
         if len(calls) == 1:
             host.memory_runtime.write_memory_file("Layout", "project", "src layout", "src/")
             host.memory_runtime.rebuild_memory_index()
-            host.teams.active_teammates["alice"] = "working"
+            host.subagent.active_subagents["alice"] = "working"
             content = [SimpleNamespace(
                 type="tool_use", id="connect", name="connect_mcp", input={"name": "docs"}
             )]
@@ -49,7 +49,7 @@ def test_agent_refreshes_memory_mcp_and_teammates_after_tool_round(host_factory,
     assert len(calls) == 2
     assert "Connected MCP servers: docs" not in calls[0]["system"]
     assert "Connected MCP servers: docs" in calls[1]["system"]
-    assert "Active teammates: alice" in calls[1]["system"]
+    assert "Active subagents: alice" in calls[1]["system"]
     assert "layout.md" in calls[1]["system"]
     assert "Relevant memory records:\nrecalled" in calls[1]["system"]
     assert any(tool["name"] == "mcp__docs__search" for tool in calls[1]["tools"])

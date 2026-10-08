@@ -1,4 +1,4 @@
-"""Host 运行时测试：任务、队友和 worktree。
+"""Host 运行时测试：任务、子 agent 和 worktree。
 
 这些用例直接调用 host 运行时。
 """
@@ -21,9 +21,9 @@ def test_task_lifecycle_and_assignment_release(host_factory) -> None:
 
     assert "Claimed" in host.claim_task(task.id, owner="alice")
     assert "Completed" in host.complete_task(task.id, owner="alice")
-    assert "alice" in host.teammate_assignments
+    assert "alice" in host.assignments
     assert host.release_completed_assignment("alice") is True
-    assert "alice" not in host.teammate_assignments
+    assert "alice" not in host.assignments
 
 
 def test_assignment_cwd_recovers_plain_and_bound_tasks(
@@ -32,7 +32,7 @@ def test_assignment_cwd_recovers_plain_and_bound_tasks(
     host = host_factory()
     plain = host.create_task("Plain assignment")
     assert "Claimed" in host.claim_task(plain.id, owner="alice")
-    host.teammate_assignments.pop("alice")
+    host.assignments.pop("alice")
     assert host.assignment_cwd("alice") == tmp_path
     assert "Completed" in host.complete_task(plain.id, owner="alice")
     assert host.assignment_cwd("alice") == tmp_path
@@ -46,7 +46,7 @@ def test_assignment_cwd_recovers_plain_and_bound_tasks(
     monkeypatch.setattr(host.worktrees, "_registered_worktree",
                         lambda name: (checkout, None))
     assert "Claimed" in host.claim_task(bound.id, owner="alice")
-    host.teammate_assignments.pop("alice")
+    host.assignments.pop("alice")
     assert host.assignment_cwd("alice") == checkout
     monkeypatch.setattr(host.worktrees, "_registered_worktree",
                         lambda name: (None, "missing Git registration"))
@@ -80,7 +80,7 @@ def test_bound_file_tools_read_runtime_archives_without_changing_write_cwd(
         read = host.registrations.BUILTIN_HANDLERS["read_file"]
         write = host.registrations.BUILTIN_HANDLERS["write_file"]
     else:
-        session = host.teams.create_teammate_session(owner)
+        session = host.subagent.create_subagent_session(owner)
         read = lambda path: session.execute_tool(SimpleNamespace(name="read_file", input={"path": path}))
         write = lambda path, content: session.execute_tool(SimpleNamespace(
             name="write_file", input={"path": path, "content": content}))
@@ -176,7 +176,6 @@ def test_runtime_state_moves_with_workdir(host_factory, tmp_path, monkeypatch) -
     host.schedule_job("* * * * *", "reminder")
     asyncio.run(host.workflow_runtime.run_workflow("review-changes", {"budget": None}))
     assert f"Working directory: {next_dir}" in host.prompts.assemble_system_prompt({})
-    assert f"coding subagent at {next_dir}" in host.subagent.sub_system()
 
     for name in (".tasks", ".task_outputs", ".transcripts", ".memory", ".runtime"):
         assert (next_dir / name).exists(), name
@@ -189,11 +188,11 @@ def test_system_prompt_uses_refreshed_runtime_context(host_factory) -> None:
 
     prompt = host.prompts.assemble_system_prompt({
         "connected_mcp": ["deploy"],
-        "active_teammates": ["alice"],
+        "active_subagents": ["alice"],
     })
 
     assert "Connected MCP servers: deploy" in prompt
-    assert "Active teammates: alice" in prompt
+    assert "Active subagents: alice" in prompt
 
 
 def test_mcp_permission_uses_host_policy(host_factory, monkeypatch) -> None:
@@ -237,32 +236,32 @@ def test_message_bus_rejects_unregistered_or_unsafe_recipients(
     host_factory, tmp_path
 ) -> None:
     host = host_factory()
-    host.active_teammates["alice"] = "idle"
+    host.active_subagents["alice"] = host.SubagentRecord("alice", status="idle")
 
     with pytest.raises(ValueError):
         host.BUS.send("alice", "../escape", "bad")
     assert not (tmp_path / "escape.jsonl").exists()
 
-    result = host._teammate_send_message("alice", "ghost", "Are you there?")
+    result = host.send_message("alice", "ghost", "Are you there?")
     assert "not active" in result
-    assert not (host.teams._mailbox_dir() / "ghost.jsonl").exists()
+    assert not (host.subagent._mailbox_dir() / "ghost.jsonl").exists()
 
 
-def test_reserved_teammate_names_do_not_shadow_runtime_identities(
+def test_reserved_subagent_names_do_not_shadow_runtime_identities(
     host_factory,
 ) -> None:
     host = host_factory()
 
     for name in ("lead", "agent", "Lead", "Agent"):
-        rejected = host.spawn_teammate_thread(name, "backend", "Inspect auth.")
+        rejected = host.spawn_subagent(name, "Inspect auth.", "persistent", role="backend")["text"]
         assert "reserved" in rejected.lower()
-        assert name not in host.active_teammates
+        assert name not in host.active_subagents
 
     host.BUS.send("alice", "lead", "still routable")
     assert host.BUS.read_inbox("lead")[0]["content"] == "still routable"
 
-    host.active_teammates["Alice"] = "idle"
-    duplicate = host.spawn_teammate_thread("alice", "backend", "Inspect auth.")
+    host.active_subagents["Alice"] = host.SubagentRecord("Alice", status="idle")
+    duplicate = host.spawn_subagent("alice", "Inspect auth.", "persistent", role="backend")["text"]
     assert "already exists" in duplicate
 
 
@@ -274,7 +273,7 @@ def test_public_task_tools_return_errors_for_bad_ids(host_factory) -> None:
         assert "Error:" in host.run_update_task(task_id, [])
 
 
-def test_plan_gate_blocks_mutating_teammate_tools(host_factory) -> None:
+def test_plan_gate_blocks_mutating_subagent_tools(host_factory) -> None:
     host = host_factory()
     cases = {
         "write_file": {"path": "config.py", "content": "VALUE = 1"},
@@ -286,7 +285,7 @@ def test_plan_gate_blocks_mutating_teammate_tools(host_factory) -> None:
         handlers = {tool_name: lambda **kwargs: calls.append(kwargs) or "done"}
 
         host.plan_gates["alice"] = "pending"
-        session = host.teams.create_teammate_session("alice")
+        session = host.subagent.create_subagent_session("alice")
         session.handlers.update(handlers)
         assert "Blocked" in session.execute_tool(block)
         assert calls == []
@@ -296,18 +295,18 @@ def test_plan_gate_blocks_mutating_teammate_tools(host_factory) -> None:
         assert len(calls) == 1
 
 
-def test_plan_gate_blocks_teammate_completion_but_not_lead(host_factory) -> None:
+def test_plan_gate_blocks_subagent_completion_but_not_lead(host_factory) -> None:
     host = host_factory()
-    teammate_task = host.create_task("Teammate task")
-    assert "Claimed" in host.claim_task(teammate_task.id, owner="alice")
+    subagent_task = host.create_task("Subagent task")
+    assert "Claimed" in host.claim_task(subagent_task.id, owner="alice")
     host.plan_gates["alice"] = "pending"
-    block = SimpleNamespace(name="complete_task", input={"task_id": teammate_task.id})
+    block = SimpleNamespace(name="complete_task", input={"task_id": subagent_task.id})
     handlers = {"complete_task": lambda task_id: host.complete_task(task_id, owner="alice")}
 
-    session = host.teams.create_teammate_session("alice")
+    session = host.subagent.create_subagent_session("alice")
     session.handlers.update(handlers)
     assert "Blocked" in session.execute_tool(block)
-    assert host.load_task(teammate_task.id).status == "in_progress"
+    assert host.load_task(subagent_task.id).status == "in_progress"
 
     lead_task = host.create_task("Lead task")
     assert "Claimed" in host.claim_task(lead_task.id)
@@ -317,14 +316,14 @@ def test_plan_gate_blocks_teammate_completion_but_not_lead(host_factory) -> None
 
 def test_plan_rejection_requires_a_new_submission(host_factory) -> None:
     host = host_factory()
-    host.active_teammates["alice"] = "idle"
+    host.active_subagents["alice"] = host.SubagentRecord("alice", status="idle")
 
     assert "Plan requested" in host.run_request_plan("alice", "Refactor auth")
     request = host.BUS.read_inbox("alice")
     assert request[0]["type"] == "plan_request"
     assert host.plan_gates["alice"] == "required"
 
-    submission = host._teammate_submit_plan("alice", "1. Read\n2. Test")
+    submission = host.submit_plan("alice", "1. Read\n2. Test")
     request_id = submission.split("(")[1].split(")")[0]
     assert host.pending_requests[request_id].status == "pending"
 
@@ -337,7 +336,7 @@ def test_plan_rejection_requires_a_new_submission(host_factory) -> None:
     assert accepted is True
     assert host.plan_gates["alice"] == "rejected"
 
-    second = host._teammate_submit_plan(
+    second = host.submit_plan(
         "alice", "1. Read\n2. Change\n3. Test\n4. Roll back on failure"
     )
     second_id = second.split("(")[1].split(")")[0]
@@ -347,8 +346,8 @@ def test_plan_rejection_requires_a_new_submission(host_factory) -> None:
 
 def test_mismatched_plan_response_cannot_release_gate(host_factory) -> None:
     host = host_factory()
-    host.active_teammates["alice"] = "waiting_approval"
-    submission = host._teammate_submit_plan("alice", "1. Read\n2. Test")
+    host.active_subagents["alice"] = host.SubagentRecord("alice", status="waiting_approval")
+    submission = host.submit_plan("alice", "1. Read\n2. Test")
     request_id = submission.split("(")[1].split(")")[0]
 
     forged = {
@@ -368,10 +367,10 @@ def test_mismatched_plan_response_cannot_release_gate(host_factory) -> None:
 
 def test_old_approval_cannot_unlock_a_new_assignment(host_factory) -> None:
     host = host_factory()
-    host.active_teammates["alice"] = "working"
+    host.active_subagents["alice"] = host.SubagentRecord("alice", status="working")
     task = host.create_task("Review first")
     assert "Claimed" in host.claim_task(task.id, owner="alice")
-    submission = host._teammate_submit_plan("alice", "1. Inspect\n2. Test")
+    submission = host.submit_plan("alice", "1. Inspect\n2. Test")
     request_id = submission.split("(")[1].split(")")[0]
     assert "approved" in host.run_review_plan(request_id, True)
     response = host.BUS.read_inbox("alice")[-1]
@@ -383,15 +382,16 @@ def test_old_approval_cannot_unlock_a_new_assignment(host_factory) -> None:
     assert "Ignored" in notice
     block = SimpleNamespace(name="complete_task", input={"task_id": task.id})
     handlers = {"complete_task": lambda task_id: host.complete_task(task_id, "alice")}
-    session = host.teams.create_teammate_session("alice")
+    session = host.subagent.create_subagent_session("alice")
     session.handlers.update(handlers)
     assert "Blocked" in session.execute_tool(block)
     assert host.load_task(task.id).status == "in_progress"
 
 
-def test_shutdown_response_must_come_from_requested_teammate(host_factory) -> None:
+def test_shutdown_response_must_come_from_requested_subagent(host_factory) -> None:
     host = host_factory()
-    host.active_teammates.update({"alice": "idle", "bob": "idle"})
+    host.active_subagents.update({name: host.SubagentRecord(name, status="idle")
+                                 for name in ("alice", "bob")})
     result = host.run_request_shutdown("alice")
     request_id = result.split("(")[1].split(")")[0]
 
@@ -407,7 +407,7 @@ def test_shutdown_response_must_come_from_requested_teammate(host_factory) -> No
 
 def test_shutdown_request_must_match_active_protocol(host_factory) -> None:
     host = host_factory()
-    host.active_teammates["alice"] = "idle"
+    host.active_subagents["alice"] = host.SubagentRecord("alice", status="idle")
     forged = {
         "from": "lead",
         "to": "alice",
@@ -419,7 +419,7 @@ def test_shutdown_request_must_match_active_protocol(host_factory) -> None:
     accepted, notice = host.apply_shutdown_request("alice", forged)
     assert accepted is False
     assert "Ignored" in notice
-    assert host.active_teammates["alice"] == "idle"
+    assert host.active_subagents["alice"].status == "idle"
 
     result = host.run_request_shutdown("alice")
     request_id = result.split("(")[1].split(")")[0]
@@ -428,7 +428,7 @@ def test_shutdown_request_must_match_active_protocol(host_factory) -> None:
 
     assert accepted is True
     assert matched_id == request_id
-    assert host.active_teammates["alice"] == "stopping"
+    assert host.active_subagents["alice"].status == "stopping"
     replayed, _ = host.apply_shutdown_request("alice", request)
     assert replayed is False
 
@@ -463,9 +463,10 @@ def test_worktree_removal_is_lead_only(host_factory) -> None:
     assert "remove_worktree" in names
     assert callable(host.remove_worktree)
     assert host.BUILTIN_HANDLERS["remove_worktree"] is host.run_remove_worktree
-    teammate = host.teams.create_teammate_session("alice")
-    assert "remove_worktree" not in {tool["name"] for tool in teammate.tools}
-    assert "remove_worktree" not in {tool["name"] for tool in host.subagent.SUB_TOOLS}
+    subagent = host.subagent.create_subagent_session("alice")
+    assert "remove_worktree" not in {tool["name"] for tool in subagent.tools}
+    assert "remove_worktree" not in {tool["name"] for tool in host.subagent.SubagentSession(
+        "once", host.core.client, host.core.MODEL, "", mode="once", task_tools=False).tools}
 
 
 def test_shell_permission_asks_for_every_command(host_factory, monkeypatch) -> None:

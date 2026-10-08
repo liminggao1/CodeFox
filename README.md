@@ -20,9 +20,6 @@ agent-harness
 # 离线演示工作流：mock runner，不联网
 agent-harness workflow demo
 agent-harness workflow resume
-
-# 单文件入口（在本仓库内运行，仍依赖 src/）
-python flat/agent_full.py workflow demo
 ```
 
 未安装成包时改用 `python -m agent_harness`，并先把源码目录放进 `PYTHONPATH`：
@@ -30,6 +27,8 @@ python flat/agent_full.py workflow demo
 ```sh
 export PYTHONPATH=src        # Windows PowerShell: $env:PYTHONPATH="src"
 python -m agent_harness
+python -m agent_harness workflow demo
+python -m agent_harness workflow resume
 ```
 
 ## 目录
@@ -47,9 +46,8 @@ python -m agent_harness
 | `src/agent_harness/skills.py` | 技能加载：扫描包内 `SKILL.md`，按名取用 |
 | `src/agent_harness/prompts.py` | 系统提示词拼装：身份、工具目录、工作目录、技能、memory、MCP |
 | `src/agent_harness/file_tools.py` | 基础工具：bash / 读写改文件 / glob / todo，含路径逃逸防护 |
-| `src/agent_harness/teams.py` | 持久团队：mailbox、协议状态、队友线程、Lead 工具 |
 | `src/agent_harness/hooks.py` | Hooks 与权限检查：UserPromptSubmit / PreToolUse / PostToolUse / Stop |
-| `src/agent_harness/subagent.py` | 子 agent：一次隔离、不可递归的 agent 运行 |
+| `src/agent_harness/subagent.py` | 子 agent：统一创建、once/persistent 生命周期、信箱与计划/关闭协议 |
 | `src/agent_harness/compaction.py` | 分层上下文压缩：工具结果瘦身、消息裁剪、摘要 |
 | `src/agent_harness/recovery.py` | 重试与错误恢复：模型回退、重试预算 |
 | `src/agent_harness/scheduler.py` | 后台任务与 cron 调度：`.scheduled_tasks.json` 持久化 |
@@ -58,14 +56,13 @@ python -m agent_harness
 | `src/agent_harness/memory_runtime.py` | memory 运行时：相关记忆选取与抽取 |
 | `src/agent_harness/runtime_context.py` | 每次模型调用前构造只读上下文快照 |
 | `src/agent_harness/tool_registry.py` | 统一装配工具 schema、handler 和权限快照 |
-| `src/agent_harness/teammate_session.py` | 队友的模型调用、工具执行和当前任务目录绑定 |
+| `src/agent_harness/message_content.py` | 共享文本提取和工具请求判断；不依赖生命周期 |
+| `src/agent_harness/subagent_session.py` | 两种模式共用模型回合、工具执行、目录绑定和历史压缩 |
 | `src/agent_harness/workflow_runtime.py` | 工作流运行时：journal、预算、resume、并行 agent |
 | `src/agent_harness/workflow_demo.py` | 保存的示例工作流、schema 与离线 mock runner；由 host/CLI 显式接线 |
 | `src/agent_harness/goal.py` | 目标层：GoalController / PromptGoalEvaluator |
 | `src/agent_harness/skills/` | 技能资产（随包分发） |
-| `scripts/build_flat.py` | 拼接生成 `flat/agent_full.py` |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
-| `flat/agent_full.py` | 生成物：仓库内单文件入口，仍从 `src/` 导入客户端 shim |
 | `tests/` | 离线测试，按模块拆分（协议、任务、压缩、调度、权限、编码、技能等） |
 | `docs/` | 项目级设计与执行记录，入口见 `docs/README.md` |
 | `note/` | `env-setup.md` 安装说明；`dev-notes.md` 本机运行与调试笔记 |
@@ -79,6 +76,8 @@ python -m agent_harness
 
 - **资源归属**：运行时状态（`.tasks` / `.memory` / `.runtime` / `.mailboxes` / `.worktrees` /
   `.scheduled_tasks.json` / `.transcripts` / `.task_outputs`）跟随**启动目录**；`skills/` 随包分发。
+- **子 agent**：统一用 `spawn_subagent(name, prompt, mode)` 创建；模式、通信和后续任务由模型决定。
+  能力与生命周期见 [调试笔记第 9 节](note/dev-notes.md#9-统一子-agent-生命周期与协议)。
 - **goal 接在 Stop 边界**：模型不再请求工具时先问目标控制器，返回 `block` 就补一条
   `[Goal still active]` 消息，继续同一条循环。
 - **goal 状态只在内存**：重启后需要重新 `/goal`。
@@ -108,11 +107,12 @@ python -m pytest -q
 - `tests/test_goal.py`：控制器用例，以及用脚本化 client 驱动 `agent_loop` 的会话级用例。
 - `tests/test_workflow.py`：覆盖 journal 回放、预算与 runner 接线。
 - `tests/test_llm_client.py`：覆盖响应协议、工具参数和失败响应的 Lead 行为。
-- `tests/test_agent_teams.py`：合并宿主的运行时用例。
+- `tests/test_subagents.py`：宿主与任务/审批协议用例。
+- `tests/test_subagent_lifetimes.py`：统一创建工具、真实线程、跨任务上下文和消息投递。
+- `tests/test_shared_session.py`：共享执行、截断与上下文恢复。
 - `tests/test_worktree_cleanup.py`：Lead 同轮清理、目录切换，以及拒绝和失败后的分配保留。
-- `tests/test_flat_build.py`：拼接输出确定、与生成物一致、可编译、可运行。
 
-离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、单文件版），说明见
+离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、子 agent），说明见
 [note/dev-notes.md](note/dev-notes.md)：
 
 ```sh
@@ -121,13 +121,3 @@ python scripts/debug_pass.py
 
 断点调试：用 VS Code 的 Remote-WSL 窗口打开本目录，按 F5 选「Agent 交互（真实 API）」。
 步骤见 [note/dev-notes.md](note/dev-notes.md)。
-
-## 重新生成单文件版
-
-改完 `src/agent_harness/` 下任一模块后：
-
-```sh
-python scripts/build_flat.py
-```
-
-`tests/test_flat_build.py::test_committed_flat_file_is_current` 会在生成物过期时报错。

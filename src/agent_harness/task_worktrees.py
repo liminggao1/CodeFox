@@ -109,7 +109,7 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
             默认为 False，目录存在这些文件或改动时拒绝移除。
     返回：
         成功、拒绝原因、Git 错误或部分成功结果的字符串。
-        要求绑定任务均已完成、没有队友占用，且目录内没有运行中的后台命令。
+        要求绑定任务均已完成、没有子 agent占用，且目录内没有运行中的后台命令。
         Lead 自己匹配的已完成分配可随清理释放；拒绝或 Git 失败时保留该分配。
         成功时删除目录并清空 ``task.worktree``，保留分支和任务记录。
         Git 已移除目录但保存解绑信息失败时，会返回部分成功提示。
@@ -128,9 +128,9 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
         if active:
             return (f"Error: Worktree '{name}' is bound to active task "
                     f"{active[0].id}; complete it before removal")
-        leased = [owner for owner, assignment in tasks.teammate_assignments.items()
+        leased = [owner for owner, assignment in tasks.assignments.items()
                   if Path(assignment["cwd"]).resolve() == path.resolve()]
-        lead_assignment = tasks.teammate_assignments.get("agent")
+        lead_assignment = tasks.assignments.get("agent")
         release_lead = "agent" in leased and any(
             task.owner == "agent" and task.id == lead_assignment["task_id"]
             for task in bound)

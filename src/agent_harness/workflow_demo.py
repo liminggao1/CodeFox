@@ -85,26 +85,33 @@ DEMO_CHANGES = (
 
 async def sample_workflow(ctx, args):
     """按预设维度审查输入变更，再并发验证发现。
-
     输入：ctx 为编排上下文；args.changes 为供审查的代码或变更文本。
     返回：含 confirmed 的字典，只保留验证步骤确认的问题，并按严重程度排序。
-        编排由 Python 脚本固定，步骤执行由安装的真实或模拟 runner 决定。
+    编排由 Python 脚本固定，步骤执行由安装的真实或模拟 runner 决定。
     """
+    # 标记当前工作流阶段为 Review（用于日志、计时、状态追踪）
     ctx.phase("Review")
+    # 获取待审查的变更文本
     changes = args.get("changes", "")
+    # 参数类型校验：变更内容必须是字符串，否则抛出工作流输入异常
     if not isinstance(changes, str):
         raise WorkflowInputError("args.changes must be a string")
+    # 去除首尾空白；空输入时替换为占位提示文本
     review_input = changes.strip() or "No change context was supplied."
 
+    # 单维度审计协程：针对单个审查维度调用agent扫描问题
     async def audit(_value, dimension, _idx):
+        # 调用子Agent，针对当前维度扫描变更内容，输出固定schema结构的发现项
         out = await ctx.agent(
             f"Review this change context for {dimension} issues. "
             "Report only issues supported by the supplied text.\n\n"
             f"{review_input}",
             schema=FINDINGS_SCHEMA, label=f"audit:{dimension}", phase="Review")
+        # 返回该维度名称 + 扫描得到的问题列表
         return {"dimension": dimension, "findings": out["findings"]}
 
     async def verify(audited, dimension, _idx):
+        # 切换工作流阶段标记为 Verify，用于日志、链路追踪
         ctx.phase("Verify")
         # 每个发现由独立的对抗式子 agent 并发验证。
         verdicts = await ctx.parallel([
@@ -115,16 +122,23 @@ async def sample_workflow(ctx, args):
                 f"Finding:\n{json.dumps(f, ensure_ascii=True)}",
                 schema=VERDICT_SCHEMA, label=f"verify:{dimension}:{f['title']}", phase="Verify"))
             for f in audited["findings"]])
+        # 将原始发现与验证结果配对，仅保留isReal标记为true的真实问题，过滤假阳性
         confirmed = [f for f, v in zip(audited["findings"], verdicts)
                      if v and v.get("isReal")]
         return {"dimension": dimension, "confirmed": confirmed}
 
+    # 工作流流水线：遍历DIMENSIONS，先执行audit审计，再执行verify复核
     results = await ctx.pipeline(DIMENSIONS, audit, verify)
+    # 扁平化聚合所有维度中确认有效的问题，嵌入dimension标记来源维度
     confirmed = [{"dimension": r["dimension"], **f}
                  for r in results if r for f in r["confirmed"]]
+    # 按严重程度排序：high最高优先级，medium次之，low最低，未知severity排末尾
     confirmed.sort(key=lambda f: {"high": 0, "medium": 1, "low": 2}.get(f["severity"], 3))
+    # 日志输出最终确认的问题数量
     ctx.log(f"confirmed {len(confirmed)} real finding(s)")
+    # 返回最终结果，仅包含经过对抗验证确认的问题
     return {"confirmed": confirmed}
+
 
 async def run_demo(argv):
     """启动内置审查示例，或恢复最近一次示例运行。

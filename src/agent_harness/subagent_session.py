@@ -1,17 +1,22 @@
-"""Execute one teammate model round without owning its mailbox or lifecycle."""
+"""Execute one subagent model round without owning its mailbox or lifecycle."""
 
 from . import core
 from . import file_tools
 from . import hooks
 from . import tasks
+from . import compaction
+from . import recovery
+from . import message_content
 from pathlib import Path
 
 
-class TeammateSession:
-    def __init__(self, name, client, model, system, authorize_tool, send_message, submit_plan):
-        """装配队友的模型参数、受限工具列表和执行回调。
+class SubagentSession:
+    def __init__(self, name, client, model, system, authorize_tool=None,
+                 send_message=None, submit_plan=None, *, mode="persistent",
+                 task_tools=True, work_context=None):
+        """装配子 agent的模型参数、受限工具列表和执行回调。
 
-        输入：name 为队友名称；client/model/system 为模型请求配置；
+        输入：name 为子 agent名称；client/model/system 为模型请求配置；
             authorize_tool 检查计划门禁，send_message 发信，submit_plan 提交审批。
         返回：None。保存配置并创建工具处理器；不请求模型、不启动线程。
         """
@@ -19,10 +24,11 @@ class TeammateSession:
         self.client = client
         self.model = model
         self.system = system
-        self.authorize_tool = authorize_tool
+        self.authorize_tool = authorize_tool or (lambda block: None)
+        self.work_context = work_context or (lambda: "")
+        self.active_request = ""
+        self._reactive_claimed = False
         def current_cwd() -> tuple[Path | None, str | None]:
-            if name not in tasks.teammate_assignments:
-                return None, "Error: Claim a Task before using workspace tools."
             try:
                 return tasks.assignment_cwd(name), None
             except (FileNotFoundError, ValueError) as exc:
@@ -104,7 +110,7 @@ class TeammateSession:
                                   "pattern": {"type": "string"}},
                               "required": ["pattern"]}},
             {"name": "send_message",
-             "description": "Send an intermediate message to 'lead' or an active teammate.",
+             "description": "Send an intermediate message to 'lead' or an active subagent.",
              "input_schema": {"type": "object",
                               "properties": {"to": {"type": "string"},
                                              "content": {"type": "string"}},
@@ -141,9 +147,22 @@ class TeammateSession:
             "complete_task": _run_complete_task,
         }
 
+        if mode == "once":
+            excluded = {"send_message", "submit_plan"}
+            if not task_tools:
+                excluded.update({"list_tasks", "claim_task", "complete_task"})
+            self.tools = [tool for tool in self.tools if tool["name"] not in excluded]
+            self.handlers = {key: value for key, value in self.handlers.items()
+                             if key not in excluded}
+
+    def begin_work(self, prompt: str):
+        """Set the current delegation and reset its single context recovery."""
+        self.active_request = prompt
+        self._reactive_claimed = False
+
 
     def execute_tool(self, block) -> str:
-        """依次检查计划门禁和权限 hooks，再执行队友工具。
+        """依次检查计划门禁和权限 hooks，再执行子 agent工具。
 
         输入：block 为包含 name 和 input 的模型工具请求。
         返回：拒绝原因、工具结果或执行错误的字符串。
@@ -160,17 +179,41 @@ class TeammateSession:
         return str(output)
 
     def run(self, messages: list):
-        """按 core.DEFAULT_MAX_TOKENS 执行一次队友模型请求，并将响应和工具结果写回历史。
+        """Request one response and append its paired tool results.
 
-        输入：messages 为当前队友历史，会原地追加 assistant 和配对的 tool_result 消息。
-        返回：模型响应对象；线程外层根据是否含工具请求决定继续工作或进入空闲。
-        异常：响应因 max_tokens 截断时抛出 RuntimeError，不保存截断响应或执行其中的工具。
+        Input: the mutable conversation for the current delegation.
+        Return: a complete model response. Context recovery is attempted at most
+            once per delegation; truncated responses produce no tool effects.
         """
-        response = self.client.messages.create(
-            model=self.model, system=self.system, messages=messages,
-            tools=self.tools, max_tokens=core.DEFAULT_MAX_TOKENS)
+        request = self.active_request or str(messages[0].get("content", ""))
+        tasks.assignment_cwd(self.name)
+        assignment = tasks.assignments.get(self.name)
+        context = "No assigned Task; workspace is the startup directory."
+        if assignment:
+            task = tasks.load_task(str(assignment["task_id"]))
+            cwd = tasks.assignment_cwd(self.name)
+            context = (f"Current Task: {task.id} [{task.status}] {task.subject}\n"
+                       f"Task description: {task.description}\nWork directory: {cwd}")
+        context += f"\n{self.work_context()}"
+        request = f"{request}\n\n[Current work]\n{context}"
+        result = compaction.prepare_history(
+            messages, request, client=self.client, model=self.model, preserve_tail=True)
+        if result.reason:
+            core.terminal_print(f"[subagent compact] {result.reason}")
+        try:
+            response = self._request(messages, request)
+        except Exception as exc:
+            if not recovery.is_prompt_too_long_error(exc) or self._reactive_claimed:
+                raise
+            self._reactive_claimed = True
+            result = compaction.reactive_compact(
+                messages, request, client=self.client, model=self.model,
+                strict_summary=True)
+            if result.reason or not result.applied:
+                raise RuntimeError(f"Subagent context recovery failed: {result.reason}") from exc
+            response = self._request(messages, request)
         if getattr(response, "stop_reason", None) == "max_tokens":
-            raise RuntimeError("Teammate response was truncated (max_tokens)")
+            raise RuntimeError("Subagent response was truncated (max_tokens)")
         messages.append({"role": "assistant", "content": response.content})
         calls = [block for block in response.content if block.type == "tool_use"]
         if calls:
@@ -178,3 +221,10 @@ class TeammateSession:
                         "content": self.execute_tool(block)} for block in calls]
             messages.append({"role": "user", "content": results})
         return response
+
+    def _request(self, messages, request):
+        return self.client.messages.create(
+            model=self.model, system=(f"{self.system}\n\n[Current delegation]\n{request}\n\n"
+                                     "Earlier delegations in history are reference only; follow the current delegation."),
+            messages=messages,
+            tools=self.tools, max_tokens=core.DEFAULT_MAX_TOKENS)

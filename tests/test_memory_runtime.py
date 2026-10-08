@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import ast
 import json
 from types import SimpleNamespace
 
@@ -39,12 +38,11 @@ def test_memory_runtime_exposes_memory_operations_only() -> None:
         assert hasattr(memory_runtime, name)
 
 
-def test_flat_memory_section_has_no_legacy_agent_runtime() -> None:
-    """The generated file contains one Lead loop plus independent worker loops."""
+def test_memory_source_has_no_legacy_agent_runtime() -> None:
+    """Memory storage does not embed file tools or a Lead loop."""
     source = (PROJECT_ROOT / "src/agent_harness/memory_runtime.py").read_text(
         encoding="utf-8"
     )
-    flat = (PROJECT_ROOT / "flat/agent_full.py").read_text(encoding="utf-8")
 
     legacy_markers = (
         "def run_bash(command: str)",
@@ -55,19 +53,6 @@ def test_flat_memory_section_has_no_legacy_agent_runtime() -> None:
     )
     for marker in legacy_markers:
         assert marker not in source
-
-    memory_start = flat.index("# ==== src/agent_harness/memory_runtime.py ====")
-    host_start = flat.index("# ==== src/agent_harness/host.py ====")
-    memory_section = flat[memory_start:host_start]
-    for marker in legacy_markers:
-        assert marker not in memory_section
-
-    assert "MEMORY_RUNTIME = sys.modules[__name__]" not in flat
-    assert sum(
-        isinstance(node, ast.FunctionDef) and node.name == "agent_loop"
-        for node in ast.parse(flat).body
-    ) == 1
-
 
 def test_memory_recall_survives_model_failure(tmp_path, monkeypatch) -> None:
     """Recall preserves paths, source metadata and keyword fallback offline."""

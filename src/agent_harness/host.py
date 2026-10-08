@@ -1,7 +1,7 @@
 """集成入口：agent 主循环、工作流和目标的 Stop 边界。
 
 本模块负责连接各功能模块。模型可用的能力分别位于 core（配置）、tasks、
-worktrees、task_worktrees、skills、prompts、file_tools、teams、hooks、
+worktrees、task_worktrees、skills、prompts、file_tools、subagent、hooks、
 subagent、compaction、recovery、scheduler、mcp_tools 和 registrations。
 从 cli.py 启动。
 """
@@ -22,9 +22,9 @@ from . import task_worktrees
 from . import skills
 from . import prompts
 from . import file_tools
-from . import teams
 from . import hooks
 from . import subagent
+from . import message_content
 from . import compaction
 from . import recovery
 from . import scheduler
@@ -37,7 +37,7 @@ from . import goal as goal_module
 from . import workflow_runtime
 from . import workflow_demo
 
-# 重新导出 cli.py 和 flat 构建依赖的名称。
+# Re-export names used by the CLI and source-level callers.
 from .core import (  # noqa: F401
     CONSOLE, PROMPT, READLINE_PROMPT,
     terminal_print,
@@ -45,8 +45,8 @@ from .core import (  # noqa: F401
 from .tasks import (  # noqa: F401
     CURRENT_TODOS, Task, assignment_cwd, assignment_versions, claim_task,
     complete_task, create_task, get_task_json, list_tasks, load_task,
-    release_completed_assignment, release_teammate_assignment, save_task,
-    task_lock, task_worktree_cwd, teammate_assignments, update_task,
+    release_completed_assignment, release_assignment, save_task,
+    task_lock, task_worktree_cwd, assignments, update_task,
 )
 from .worktrees import (  # noqa: F401
     run_git, _registered_worktrees, _registered_worktree,
@@ -59,15 +59,15 @@ from .file_tools import (  # noqa: F401
     run_agent_read, run_agent_write, run_bash, run_edit, run_glob, run_read,
     run_todo_write, run_write, safe_path,
 )
-from .teams import (  # noqa: F401
-    BUS, MessageBus, RESERVED_TEAMMATE_NAMES,
-    active_teammates, consume_lead_inbox, format_team_events, plan_gates,
+from .subagent import (  # noqa: F401
+    BUS, MessageBus, RESERVED_SUBAGENT_NAMES,
+    active_subagents, consume_lead_inbox, format_subagent_events, plan_gates,
     plan_request_ids, pending_requests, ProtocolState, new_request_id,
-    match_response, is_valid_agent_name, scan_unclaimed_tasks, claim_next_task,
+    match_response, is_valid_agent_name, SubagentRecord,
     current_work_identity, apply_plan_response,
-    apply_shutdown_request, _teammate_send_message, _teammate_submit_plan,
-    spawn_teammate_thread, run_request_plan, run_request_shutdown,
-    run_review_plan, team_lock,
+    apply_shutdown_request, send_message, submit_plan,
+    run_request_plan, run_request_shutdown,
+    run_review_plan, subagent_lock,
 )
 from .hooks import (  # noqa: F401
     register_hook, trigger_hooks, permission_hook, log_hook, large_output_hook,
@@ -91,7 +91,7 @@ from .mcp_tools import (  # noqa: F401
 from .registrations import (  # noqa: F401
     BUILTIN_TOOLS, BUILTIN_HANDLERS, run_create_task, run_update_task,
     run_list_tasks, run_get_task, run_claim_task, run_complete_task,
-    run_spawn_teammate, run_list_teammates, run_send_message,
+    run_spawn_subagent, run_list_subagents, run_send_message,
     run_connect_mcp, run_create_worktree, run_remove_worktree,
 )
 from .recovery import RecoveryState  # noqa: F401
@@ -118,7 +118,6 @@ tool_registry.REGISTRY.configure(
 
 def assemble_tool_pool() -> tuple[list[dict], dict]:
     """从同一个注册器快照取得模型工具描述和处理器映射。
-
     返回：(tools, handlers)，分别为新列表和新字典；装配或名称冲突异常继续抛出。
     """
     snapshot = tool_registry.REGISTRY.snapshot()
@@ -147,21 +146,6 @@ def configure_goal(evaluator_model: str | None = None):
 
 
 configure_goal()
-
-
-def spawn_teammate(name: str, role: str, prompt: str,
-                   task_id: str | None = None,
-                   require_plan: bool = False) -> str:
-    """将队友启动请求转交给团队运行时。
-
-    输入：name/role/prompt 为队友名称、角色和初始指令；task_id 为可选初始任务；
-        require_plan 为是否要求计划获批。
-    返回：团队模块的启动确认或错误文本，不等待队友完成。
-    """
-    return teams.spawn_teammate_thread(name, role, prompt, task_id, require_plan)
-
-
-# -- 上下文 --
 
 
 def remember_after_turn(messages: list) -> None:
@@ -330,7 +314,7 @@ def agent_loop(messages: list, active_request: str):
             if compacted.reason:
                 automatic_compaction_enabled = False
                 core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
-            # 根据最新消息刷新记忆、MCP 和队友上下文。
+            # 根据最新消息刷新记忆、MCP 和子 agent上下文。
             context = runtime_context.build_context(messages)
             # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
             tools, handlers = assemble_tool_pool()
@@ -391,7 +375,7 @@ def agent_loop(messages: list, active_request: str):
         # 保存模型响应，供工具结果和后续调用引用。
         messages.append({"role": "assistant", "content": response.content})
         # 没有工具请求时，模型已完成当前一轮回答。
-        if not subagent.has_tool_use(response.content):
+        if not message_content.has_tool_use(response.content):
             # 通知 Stop 钩子本轮模型输出已完成。
             hooks.trigger_hooks("Stop", messages)
             # 检查当前目标是否允许结束。
@@ -531,7 +515,7 @@ def async_event_loop(history: list, session_state: dict):
         with agent_lock:
             with scheduler.cron_lock:
                 fired = list(scheduler.cron_queue)
-            inbox = teams.consume_lead_inbox(route_protocol=True)
+            inbox = subagent.consume_lead_inbox(route_protocol=True)
             if not fired and not inbox and not scheduler.has_pending_background():
                 continue
             turn_start = len(history)
@@ -542,9 +526,9 @@ def async_event_loop(history: list, session_state: dict):
                     f"  \033[35m[cron auto] {job.prompt[:60]}\033[0m")
             if inbox:
                 history.append({"role": "user",
-                                "content": teams.format_team_events(inbox)})
+                                "content": subagent.format_subagent_events(inbox)})
                 core.terminal_print(
-                    f"  \033[33m[team auto] {len(inbox)} events\033[0m")
+                    f"  \033[33m[subagent auto] {len(inbox)} events\033[0m")
             active_request = (
                 "\n".join(scheduled_requests)
                 if scheduled_requests

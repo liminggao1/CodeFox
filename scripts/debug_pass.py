@@ -2,7 +2,7 @@
 """agent_harness 的离线端到端调试自检。
 
 覆盖真实 host 主循环、工具检查、目标 Stop 边界、任务生命周期、
-工作流恢复、Git worktree 和 flat 构建，全程不联网。
+工作流恢复、Git worktree 和子 agent 生命周期，全程不联网。
 
   PYTHONPATH=src python scripts/debug_pass.py
 
@@ -12,18 +12,18 @@
 
 from __future__ import annotations
 
-import importlib.util
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
-FLAT_FILE = PROJECT_ROOT / "flat" / "agent_full.py"
 
 os.environ.setdefault("MODEL_ID", "debug-model")
 os.environ.setdefault("ANTHROPIC_API_KEY", "debug-key")
@@ -101,7 +101,7 @@ def worktree_child() -> int:
     assert "Error" in host.remove_worktree("dbg", discard_changes=True)
     assert "Completed" in host.complete_task(task.id, owner="agent")
     assert host.BUILTIN_HANDLERS["remove_worktree"](name="dbg").startswith("Worktree")
-    assert "agent" not in host.teammate_assignments
+    assert "agent" not in host.assignments
     assert host.load_task(task.id).worktree is None
     assert host.assignment_cwd("agent") == repo
     listing = run_git("worktree", "list", cwd=repo).stdout
@@ -197,12 +197,12 @@ def main() -> int:
         return "block -> continue -> allow -> cleared"
 
     def t_tasks():
-        host.teammate_assignments.clear()
+        host.assignments.clear()
         task = host.create_task("debug task")
         assert "Claimed" in host.claim_task(task.id, owner="alice")
         assert "Completed" in host.complete_task(task.id, owner="alice")
         assert host.release_completed_assignment("alice") is True
-        assert "alice" not in host.teammate_assignments
+        assert "alice" not in host.assignments
         return "create/claim/complete/release"
 
     def t_workflow():
@@ -222,6 +222,50 @@ def main() -> int:
         assert (workdir / ".runtime").is_dir()
         return "demo, journal cache hit, state in launch dir"
 
+    def t_subagents():
+        done = threading.Event()
+        original_thread = threading.Thread
+        def thread_factory(target, **kwargs):
+            def run():
+                try:
+                    target()
+                finally:
+                    done.set()
+            return original_thread(target=run, **kwargs)
+        host.subagent.threading.Thread = thread_factory
+        host.core.client = FakeClient([
+            text_response("Investigation complete."),
+            tool_response("write_file", {"path": "child.txt", "content": "child result"}),
+            text_response("Persistent work complete."),
+        ])
+        try:
+            create = host.BUILTIN_HANDLERS["spawn_subagent"]
+            once = json.loads(create(name="scout", prompt="Inspect", mode="once"))
+            assert once["status"] == "completed" and "scout" not in host.active_subagents
+            started = json.loads(create(name="worker", prompt="Write child.txt", mode="persistent"))
+            assert started["status"] == "started"
+            events = []
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not any(
+                message["type"] == "idle_notification" for message in events
+            ):
+                events.extend(host.BUS.wait_for_messages("lead", deadline - time.monotonic()))
+            assert any(message["type"] == "result" for message in events), events
+            assert any(message["type"] == "idle_notification" for message in events), events
+            assert (workdir / "child.txt").read_text(encoding="utf-8") == "child result"
+            assert host.active_subagents["worker"].status == "idle"
+            host.run_request_shutdown("worker")
+            assert done.wait(3), "child failed to stop"
+            assert "worker" not in host.active_subagents
+            assert any(message["type"] == "shutdown_response"
+                       for message in host.consume_lead_inbox()), "no shutdown acknowledgement"
+            return "once result; persistent start/write/events/shutdown"
+        finally:
+            if "worker" in host.active_subagents:
+                host.run_request_shutdown("worker")
+                done.wait(3)
+            host.subagent.threading.Thread = original_thread
+
     def t_worktree():
         repo = workdir / "gitrepo"
         repo.mkdir()
@@ -240,30 +284,15 @@ def main() -> int:
         assert "WORKTREE FLOW OK" in result.stdout
         return "create/claim/commit/complete/remove"
 
-    def t_flat():
-        spec = importlib.util.spec_from_file_location(
-            "build_flat", PROJECT_ROOT / "scripts" / "build_flat.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        assert module.build() == FLAT_FILE.read_text(encoding="utf-8"), "flat file is stale"
-        result = subprocess.run(
-            [sys.executable, str(FLAT_FILE), "workflow", "demo"],
-            cwd=workdir, capture_output=True, text=True, timeout=180,
-        )
-        assert result.returncode == 0, result.stderr[-400:]
-        assert "status=completed" in result.stdout
-        return "in sync with sources and runs standalone"
-
     check("tool pool assembled", t_tool_pool)
     check("agent loop: tool call round-trip", t_loop_toolcall)
     check("edit_file: mismatch guarded", t_edit_guard)
     check("read_file: path escape blocked", t_escape)
     check("goal: stop boundary blocks once", t_goal_boundary)
     check("task lifecycle", t_tasks)
+    check("unified subagent lifetimes", t_subagents)
     check("workflow demo/resume offline", t_workflow)
     check("worktree git ops", t_worktree)
-    check("flat build freshness", t_flat)
 
     failures = sum(1 for status, _, _ in RESULTS if status == "FAIL")
     print("\n=== DEBUG REPORT ===")

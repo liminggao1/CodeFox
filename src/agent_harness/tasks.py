@@ -1,7 +1,7 @@
 """持久化任务板：记录归属和依赖关系的文件存储。
 
-任务是启动目录 .tasks/ 下的小型 JSON 记录。worktree 和队友复用该存储；
-审批状态由 teams.py 管理。
+任务是启动目录 .tasks/ 下的小型 JSON 记录。worktree 和子 agent复用该存储；
+审批状态由 subagent.py 管理。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ fcntl = core.fcntl
 # -- 任务系统 --
 TASK_ID_ALLOCATION_ATTEMPTS = 100
 
-# 任务是小型持久化记录；归属、依赖、worktree 和队友都建立在同一份文件状态上。
+# 任务是小型持久化记录；归属、依赖、worktree 和子 agent都建立在同一份文件状态上。
 def _tasks_dir() -> Path:
     """取得启动目录下的任务存储目录。
 
@@ -46,9 +46,9 @@ task_lock = threading.RLock()
 _task_store_state = threading.local()
 CURRENT_TODOS: list[dict] = []
 
-# owner -> {"task_id": str, "cwd": Path}。每个队友一次只领取一个任务，
+# owner -> {"task_id": str, "cwd": Path}。每个子 agent一次只领取一个任务，
 # 文件系统工具都通过该映射确定 cwd。
-teammate_assignments: dict[str, dict[str, object]] = {}
+assignments: dict[str, dict[str, object]] = {}
 assignment_versions: dict[str, int] = {}
 
 
@@ -88,7 +88,7 @@ def advance_assignment_version(owner: str):
     """递增执行者的任务分配版本，用于识别已经过期的协议回复。
 
     输入：
-        owner: 主 agent 的身份 ``'agent'``，或队友名称。
+        owner: 主 agent 的身份 ``'agent'``，或子 agent名称。
     返回：
         ``None``。将内存中的 ``assignment_versions[owner]`` 加一。
     """
@@ -327,7 +327,7 @@ def _owner_in_progress(owner: str) -> Task | None:
     """从持久化任务中查找执行者正在处理的第一个任务。
 
     输入：
-        owner: 主 agent 的身份 ``'agent'``，或队友名称。
+        owner: 主 agent 的身份 ``'agent'``，或子 agent名称。
     返回：
         属于该执行者且状态为 ``in_progress`` 的 ``Task``；没有则返回 ``None``。
     """
@@ -360,10 +360,10 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
 
     输入：
         task_id: 待办、无 owner 且依赖已完成的任务 ID。
-        owner: 主 agent 的身份 ``'agent'``，或认领任务的队友名称。
+        owner: 主 agent 的身份 ``'agent'``，或认领任务的子 agent名称。
     返回：
         认领成功或拒绝原因的字符串。成功时在存储锁内保存 ``in_progress``
-        和 owner，将任务目录登记到 ``teammate_assignments``，并递增分配版本。
+        和 owner，将任务目录登记到 ``assignments``，并递增分配版本。
         ID 不合法、记录缺失或保存失败时，异常会继续抛出。
     """
     with task_store_lock():
@@ -372,7 +372,7 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
             return f"Task {task_id} is {task.status}, cannot claim"
         if task.owner:
             return f"Task {task_id} is already owned by {task.owner}"
-        assignment = teammate_assignments.get(owner)
+        assignment = assignments.get(owner)
         if assignment:
             return (f"Owner {owner} must finish the current work turn for "
                     f"{assignment['task_id']} before claiming another task")
@@ -388,7 +388,7 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
         task.owner = owner
         task.status = "in_progress"
         save_task(task)
-        teammate_assignments[owner] = {"task_id": task.id, "cwd": cwd}
+        assignments[owner] = {"task_id": task.id, "cwd": cwd}
         advance_assignment_version(owner)
     print(f"  \033[36m[claim] {task.subject} -> in_progress (owner: {owner})\033[0m")
     return f"Claimed {task.id} ({task.subject})"
@@ -413,12 +413,12 @@ def complete_task(task_id: str, owner: str = "agent") -> str:
         if task.owner != owner:
             return (f"Task {task_id} is owned by {task.owner}, "
                     f"not {owner}; cannot complete")
-        assignment = teammate_assignments.get(owner)
+        assignment = assignments.get(owner)
         if not assignment or assignment.get("task_id") != task.id:
             cwd, error = task_worktree_cwd(task)
             if error:
                 return f"Task {task_id} cannot complete: {error}"
-            teammate_assignments[owner] = {"task_id": task.id, "cwd": cwd}
+            assignments[owner] = {"task_id": task.id, "cwd": cwd}
         task.status = "completed"
         save_task(task)
         unblocked = [t.subject for t in list_tasks()
@@ -451,24 +451,24 @@ def assignment_cwd(owner: str) -> Path:
     """取得执行者的任务目录，必要时从任务记录恢复内存中的分配信息。
 
     输入：
-        owner: 主 agent 的身份 ``'agent'``，或队友名称。
+        owner: 主 agent 的身份 ``'agent'``，或子 agent名称。
     返回：
         正在执行或尚未释放的已完成任务的有效目录。
         无分配且无正在执行的任务时返回 ``core.WORKDIR``。
-        可能根据持久化记录补回 ``teammate_assignments``。
+        可能根据持久化记录补回 ``assignments``。
     异常：
         ValueError: owner、任务状态或绑定目录不合法，或目录发生变化。
         任务文件缺失等读取异常也会继续抛出。
     """
     with task_lock:
-        assignment = teammate_assignments.get(owner)
+        assignment = assignments.get(owner)
         task = _owner_in_progress(owner)
         if task and (not assignment or assignment.get("task_id") != task.id):
             cwd, error = task_worktree_cwd(task)
             if error:
                 raise ValueError(error)
             assignment = {"task_id": task.id, "cwd": cwd}
-            teammate_assignments[owner] = assignment
+            assignments[owner] = assignment
         elif not assignment:
             return core.WORKDIR
         task = load_task(str(assignment["task_id"]))
@@ -486,28 +486,28 @@ def release_completed_assignment(owner: str) -> bool:
     """在回合结束或 worktree 清理成功后释放执行者已完成任务的分配记录。
 
     输入：
-        owner: 主 agent 的身份 ``'agent'``，或队友名称。
+        owner: 主 agent 的身份 ``'agent'``，或子 agent名称。
     返回：
         成功移除匹配的已完成分配并递增版本时返回 ``True``，否则返回 ``False``。
         保留已完成任务的文件、owner 字段和 worktree 绑定。
     """
     with task_lock:
-        assignment = teammate_assignments.get(owner)
+        assignment = assignments.get(owner)
         if not assignment:
             return False
         task = load_task(str(assignment["task_id"]))
         if task.status != "completed" or task.owner != owner:
             return False
-        teammate_assignments.pop(owner, None)
+        assignments.pop(owner, None)
         advance_assignment_version(owner)
         return True
 
 
-def release_teammate_assignment(owner: str):
-    """在队友退出时释放分配，让未完成任务可以再次被认领。
+def release_assignment(owner: str):
+    """在子 agent退出时释放分配，让未完成任务可以再次被认领。
 
     输入：
-        owner: 要释放分配的队友名称。
+        owner: 要释放分配的子 agent名称。
     返回：
         ``None``。将正在处理的任务重置为无 owner 的 ``pending``，保留 worktree。
         即使读取或保存任务失败，也会清理内存分配并递增版本；异常仍会抛出。
@@ -520,5 +520,5 @@ def release_teammate_assignment(owner: str):
                 task.owner = None
                 save_task(task)
         finally:
-            teammate_assignments.pop(owner, None)
+            assignments.pop(owner, None)
             advance_assignment_version(owner)

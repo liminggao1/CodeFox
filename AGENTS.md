@@ -10,9 +10,6 @@
 
 ## 项目不变量
 
-- `flat/agent_full.py` 是 `scripts/build_flat.py` 的生成物，不要直接编辑；改完
-  `src/agent_harness/` 必须重跑 `python scripts/build_flat.py`，`tests/test_flat_build.py`
-  会在生成物过期时报错。
 - 改动后除 `python -m pytest -q` 外，再跑 `python scripts/debug_pass.py`（离线端到端自检），
   操作说明见 `note/dev-notes.md`。
 - 运行时状态（`.tasks` / `.memory` / `.runtime` / `.mailboxes` / `.worktrees` / `.transcripts`

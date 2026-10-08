@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
+import json
+
 from . import tasks
 from . import task_worktrees
-from . import teams
 from . import skills
 from . import subagent
 from . import file_tools
@@ -34,7 +35,7 @@ def run_remove_worktree(name: str) -> str:
 
     输入：name 为已注册且绑定任务的 worktree 名称。
     返回：移除结果或拒绝原因；成功时保留分支，释放 Lead 自己的已完成分配。
-        不接受丢弃改动或释放队友分配的参数。
+        不接受丢弃改动或释放子 agent分配的参数。
     """
     return task_worktrees.remove_worktree(name)
 
@@ -140,42 +141,22 @@ def run_complete_task(task_id: str) -> str:
     except FileNotFoundError:
         return f"Error: task {task_id} not found"
 
-def run_spawn_teammate(name: str, role: str, prompt: str,
-                       task_id: str | None = None,
-                       require_plan: bool = False) -> str:
-    """处理主模型创建队友的工具请求。
-
-    输入：name 为队友名称；role 为角色；prompt 为初始指令；task_id 为可选初始任务；
-        require_plan 为是否要求先获得计划批准。
-    返回：队友启动或失败提示；由团队模块登记状态并启动守护线程。
-    """
-    return teams.spawn_teammate_thread(name, role, prompt, task_id, require_plan)
+def run_spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
+                       task_id: str | None = None, require_plan: bool = False) -> str:
+    """Serialize the unified runtime result for the Lead's creation tool."""
+    return json.dumps(subagent.spawn_subagent(
+        name, prompt, mode, role, task_id, require_plan), ensure_ascii=False)
 
 
-def run_list_teammates() -> str:
-    """展示当前活跃队友及其运行状态。
-
-    返回：按名称排序的状态文本；无活跃队友时返回提示，不改变队友状态。
-    """
-    with teams.team_lock:
-        if not teams.active_teammates:
-            return "No active teammates."
-        return "\n".join(
-            f"{name}: {status}"
-            for name, status in sorted(teams.active_teammates.items())
-        )
+def run_list_subagents() -> str:
+    """List active names, roles, modes and states without returning history."""
+    return json.dumps(subagent.list_subagents(), ensure_ascii=False)
 
 
 def run_send_message(to: str, content: str) -> str:
-    """以 Lead 身份向活跃队友发送普通消息。
+    """Deliver the Lead's chosen message to a live persistent child."""
+    return subagent.send_message("lead", to, content)
 
-    输入：to 为队友名称；content 为消息正文。
-    返回：投递确认或收件人不活跃的提示；成功时追加到队友信箱。
-    """
-    if to not in teams.active_teammates:
-        return f"Teammate '{to}' is not active"
-    teams.BUS.send("lead", to, content)
-    return f"Sent to {to}"
 
 def run_connect_mcp(name: str) -> str:
     """处理主模型连接模拟 MCP 服务器的请求。
@@ -233,12 +214,6 @@ BUILTIN_DEFINITIONS = [
                                     "required": ["content", "status"]}}},
                       "required": ["todos"]}},
                    file_tools.run_todo_write, "built-in tool 'todo_write'"),
-    ToolDefinition({"name": "task",
-     "description": "Launch a focused subagent. Returns only its final summary.",
-     "input_schema": {"type": "object",
-                      "properties": {"description": {"type": "string"}},
-                      "required": ["description"]}},
-                   subagent.spawn_subagent, "built-in tool 'task'"),
     ToolDefinition({"name": "load_skill",
      "description": "Load the full content of a skill by name.",
      "input_schema": {"type": "object",
@@ -310,43 +285,43 @@ BUILTIN_DEFINITIONS = [
                       "properties": {"job_id": {"type": "string"}},
                       "required": ["job_id"]}},
                    scheduler.run_cancel_cron, "built-in tool 'cancel_cron'"),
-    ToolDefinition({"name": "spawn_teammate", "description": "Spawn a persistent teammate.",
+    ToolDefinition({"name": "spawn_subagent",
+     "description": ("Create a child with explicit once or persistent lifetime. "
+                     "once waits for its final result; persistent returns started "
+                     "and delivers later events. Only persistent supports messaging and plan approval."),
      "input_schema": {"type": "object",
-                      "properties": {"name": {
-                                         "type": "string",
-                                         "pattern": "^[A-Za-z0-9_-]{1,64}$",
-                                     },
-                                     "role": {"type": "string"},
-                                     "prompt": {"type": "string"},
-                                     "task_id": {
-                                         "type": "string",
-                                         "pattern": "^task_[0-9a-f]{8}$",
-                                     },
-                                     "require_plan": {"type": "boolean"}},
-                      "required": ["name", "role", "prompt"]}},
-                   run_spawn_teammate, "built-in tool 'spawn_teammate'"),
-    ToolDefinition({"name": "list_teammates", "description": "List active teammates.",
+                      "properties": {
+                          "name": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+                          "prompt": {"type": "string", "minLength": 1},
+                          "mode": {"type": "string", "enum": ["once", "persistent"]},
+                          "role": {"type": "string"},
+                          "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{8}$"},
+                          "require_plan": {"type": "boolean"}},
+                      "required": ["name", "prompt", "mode"],
+                      "additionalProperties": False}},
+                   run_spawn_subagent, "built-in tool 'spawn_subagent'"),
+    ToolDefinition({"name": "list_subagents", "description": "List active child instances, modes and states.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
-                   run_list_teammates, "built-in tool 'list_teammates'"),
-    ToolDefinition({"name": "send_message", "description": "Send message to a teammate.",
+                   run_list_subagents, "built-in tool 'list_subagents'"),
+    ToolDefinition({"name": "send_message", "description": "Send message to a persistent subagent.",
      "input_schema": {"type": "object",
                       "properties": {"to": {"type": "string"},
                                      "content": {"type": "string"}},
                       "required": ["to", "content"]}},
                    run_send_message, "built-in tool 'send_message'"),
     ToolDefinition({"name": "request_shutdown",
-     "description": "Request a teammate to shut down.",
+     "description": "Request a persistent subagent to shut down.",
      "input_schema": {"type": "object",
-                      "properties": {"teammate": {"type": "string"}},
-                      "required": ["teammate"]}},
-                   teams.run_request_shutdown, "built-in tool 'request_shutdown'"),
+                      "properties": {"name": {"type": "string"}},
+                      "required": ["name"]}},
+                   subagent.run_request_shutdown, "built-in tool 'request_shutdown'"),
     ToolDefinition({"name": "request_plan",
-     "description": "Ask a teammate to submit a plan.",
+     "description": "Ask a persistent subagent to submit a plan.",
      "input_schema": {"type": "object",
-                      "properties": {"teammate": {"type": "string"},
+                      "properties": {"name": {"type": "string"},
                                      "task": {"type": "string"}},
-                      "required": ["teammate", "task"]}},
-                   teams.run_request_plan, "built-in tool 'request_plan'"),
+                      "required": ["name", "task"]}},
+                   subagent.run_request_plan, "built-in tool 'request_plan'"),
     ToolDefinition({"name": "review_plan",
      "description": "Approve or reject a submitted plan.",
      "input_schema": {"type": "object",
@@ -354,7 +329,7 @@ BUILTIN_DEFINITIONS = [
                                      "approve": {"type": "boolean"},
                                      "feedback": {"type": "string"}},
                       "required": ["request_id", "approve"]}},
-                   teams.run_review_plan, "built-in tool 'review_plan'"),
+                   subagent.run_review_plan, "built-in tool 'review_plan'"),
     ToolDefinition({"name": "create_worktree",
      "description": "Create a task-bound git worktree for a pending task.",
      "input_schema": {"type": "object",
@@ -370,7 +345,7 @@ BUILTIN_DEFINITIONS = [
                    run_create_worktree, "built-in tool 'create_worktree'"),
     ToolDefinition({"name": "remove_worktree",
      "description": ("Remove a completed task's clean worktree and retain its branch. "
-                     "Does not merge changes. Refuses teammate leases, running background "
+                     "Does not merge changes. Refuses persistent subagent leases, running background "
                      "commands, and uncommitted or ignored files. On success, releases "
                      "any matching completed Lead assignment and restores its default cwd."),
      "input_schema": {"type": "object",

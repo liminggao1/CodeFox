@@ -145,7 +145,7 @@ def test_subagent_uses_restricted_tools_and_permission_hook(
         return next(responses)
 
     host.core.client = SimpleNamespace(messages=SimpleNamespace(create=create))
-    assert host.spawn_subagent("Inspect only") == "Done"
+    assert host.spawn_subagent("inspector", "Inspect only", "once")["text"] == "Done"
 
     assert {tool["name"] for tool in calls[0]["tools"]} == {
         "bash", "read_file", "write_file", "edit_file", "glob",
