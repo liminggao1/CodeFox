@@ -456,13 +456,16 @@ def test_worktree_registry_parsing_does_not_use_display_truncation(
     assert len(registered) == 80
 
 
-def test_worktree_removal_is_host_only(host_factory) -> None:
+def test_worktree_removal_is_lead_only(host_factory) -> None:
     host = host_factory()
     names = {tool["name"] for tool in host.BUILTIN_TOOLS}
 
-    assert "remove_worktree" not in names
+    assert "remove_worktree" in names
     assert callable(host.remove_worktree)
-    assert not hasattr(host, "run_remove_worktree")
+    assert host.BUILTIN_HANDLERS["remove_worktree"] is host.run_remove_worktree
+    teammate = host.teams.create_teammate_session("alice")
+    assert "remove_worktree" not in {tool["name"] for tool in teammate.tools}
+    assert "remove_worktree" not in {tool["name"] for tool in host.subagent.SUB_TOOLS}
 
 
 def test_shell_permission_asks_for_every_command(host_factory, monkeypatch) -> None:

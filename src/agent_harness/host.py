@@ -92,7 +92,7 @@ from .registrations import (  # noqa: F401
     BUILTIN_TOOLS, BUILTIN_HANDLERS, run_create_task, run_update_task,
     run_list_tasks, run_get_task, run_claim_task, run_complete_task,
     run_spawn_teammate, run_list_teammates, run_send_message,
-    run_connect_mcp, run_create_worktree,
+    run_connect_mcp, run_create_worktree, run_remove_worktree,
 )
 from .recovery import RecoveryState  # noqa: F401
 

@@ -667,7 +667,7 @@ def complete_task(task_id: str, owner: str = "agent") -> str:
         owner: 必须与任务记录中的认领者一致。
     返回：
         完成成功或拒绝原因的字符串；成功时附带已满足依赖条件的任务标题。
-        保存 ``completed``，保留任务文件和分配目录，直到回合结束后释放分配。
+        保存 ``completed``，保留任务文件和分配目录；回合结束或成功移除 worktree 后释放分配。
         这里只记录完成状态，不独立验收工作成果。
         ID 不合法、记录缺失或保存失败时，异常会继续抛出。
     """
@@ -748,7 +748,7 @@ def assignment_cwd(owner: str) -> Path:
 
 
 def release_completed_assignment(owner: str) -> bool:
-    """在工作回合结束时释放执行者已完成任务的分配记录。
+    """在回合结束或 worktree 清理成功后释放执行者已完成任务的分配记录。
 
     输入：
         owner: 主 agent 的身份 ``'agent'``，或队友名称。
@@ -1063,7 +1063,7 @@ PROMPT_SECTIONS = {
              "schedule_cron, list_crons, cancel_cron, "
              "spawn_teammate, list_teammates, send_message, "
              "request_shutdown, request_plan, review_plan, "
-             "create_worktree, "
+             "create_worktree, remove_worktree, "
              "connect_mcp. MCP tools are prefixed mcp__{server}__{tool}.",
     "tasks": (
         "Create all task nodes first. Only after create_task returns "
@@ -1079,8 +1079,12 @@ PROMPT_SECTIONS = {
         "create a task-bound worktree only when a separate working directory "
         "would prevent conflicting edits. A teammate "
         "must complete its current Task before claiming another. A worktree "
-        "changes tool default cwd only; it is not a sandbox. Worktree removal "
-        "stays with the host or user. After spawning a teammate, end the "
+        "changes tool default cwd only; it is not a sandbox. Preserve results "
+        "before complete_task. Use remove_worktree to clean up a completed "
+        "task's worktree; removal retains the branch and does not merge it. "
+        "Removing its own worktree releases the Lead's completed assignment "
+        "and restores the startup cwd. Wait for teammates to release their "
+        "assignments before removing their worktrees. After spawning a teammate, end the "
         "current turn instead of polling its status; the runtime will deliver "
         "team events and wake the Lead. React to those events, and shut "
         "teammates down when "
@@ -3892,7 +3896,7 @@ def create_worktree(name: str, task_id: str) -> str:
 
 
 def remove_worktree(name: str, discard_changes: bool = False) -> str:
-    """移除已完成任务不再占用的工作目录，并清除任务中的绑定信息。
+    """移除已完成任务的工作目录，成功后释放 Lead 自己的占用并解除绑定。
 
     输入：
         name: 已注册且绑定了任务的 worktree 名称。
@@ -3900,7 +3904,8 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
             默认为 False，目录存在这些文件或改动时拒绝移除。
     返回：
         成功、拒绝原因、Git 错误或部分成功结果的字符串。
-        要求绑定任务均已完成、分配记录不再占用目录，且目录内没有运行中的后台命令。
+        要求绑定任务均已完成、没有队友占用，且目录内没有运行中的后台命令。
+        Lead 自己匹配的已完成分配可随清理释放；拒绝或 Git 失败时保留该分配。
         成功时删除目录并清空 ``task.worktree``，保留分支和任务记录。
         Git 已移除目录但保存解绑信息失败时，会返回部分成功提示。
     """
@@ -3920,6 +3925,12 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
                     f"{active[0].id}; complete it before removal")
         leased = [owner for owner, assignment in tasks.teammate_assignments.items()
                   if Path(assignment["cwd"]).resolve() == path.resolve()]
+        lead_assignment = tasks.teammate_assignments.get("agent")
+        release_lead = "agent" in leased and any(
+            task.owner == "agent" and task.id == lead_assignment["task_id"]
+            for task in bound)
+        if release_lead:
+            leased.remove("agent")
         if leased:
             return (f"Error: Worktree '{name}' is still in use by "
                     f"{', '.join(sorted(leased))}; wait for the turn to end")
@@ -3951,17 +3962,23 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
                 return f"Git error: {result}"
 
             try:
+                # 只有 Git 已移除目录后才结束 Lead 的分配，失败时保留原 cwd。
+                if release_lead:
+                    tasks.release_completed_assignment("agent")
                 for task in bound:
                     task.worktree = None
                     tasks.save_task(task)
             except Exception as exc:
                 return (f"Partial success: Worktree '{name}' was removed and "
                         f"branch '{worktrees._worktree_branch(name)}' retained, "
-                        f"but task unbinding failed: {exc}. Manual recovery is required.")
+                        f"but task cleanup failed: {exc}. Manual recovery is required.")
 
     print(f"  \033[33m[worktree] removed: {name}; branch retained\033[0m")
-    return (f"Worktree '{name}' removed; branch "
-            f"'{worktrees._worktree_branch(name)}' retained")
+    result = (f"Worktree '{name}' removed; branch "
+              f"'{worktrees._worktree_branch(name)}' retained")
+    if release_lead:
+        result += f"; Lead assignment released; default work directory: {core.WORKDIR}"
+    return result
 
 
 # ==== src/agent_harness/mcp_tools.py ====
@@ -4163,6 +4180,16 @@ def run_create_worktree(name: str, task_id: str) -> str:
         ``task_worktrees.create_worktree`` 返回的创建结果或错误文本。
     """
     return task_worktrees.create_worktree(name, task_id)
+
+
+def run_remove_worktree(name: str) -> str:
+    """处理 Lead 的非强制 worktree 清理请求。
+
+    输入：name 为已注册且绑定任务的 worktree 名称。
+    返回：移除结果或拒绝原因；成功时保留分支，释放 Lead 自己的已完成分配。
+        不接受丢弃改动或释放队友分配的参数。
+    """
+    return task_worktrees.remove_worktree(name)
 
 # -- 基础工具处理器 --
 
@@ -4494,6 +4521,16 @@ BUILTIN_DEFINITIONS = [
                       "required": ["name", "task_id"],
                       "additionalProperties": False}},
                    run_create_worktree, "built-in tool 'create_worktree'"),
+    ToolDefinition({"name": "remove_worktree",
+     "description": ("Remove a completed task's clean worktree and retain its branch. "
+                     "Does not merge changes. Refuses teammate leases, running background "
+                     "commands, and uncommitted or ignored files. On success, releases "
+                     "any matching completed Lead assignment and restores its default cwd."),
+     "input_schema": {"type": "object",
+                      "properties": {"name": {"type": "string"}},
+                      "required": ["name"],
+                      "additionalProperties": False}},
+                   run_remove_worktree, "built-in tool 'remove_worktree'"),
     ToolDefinition({"name": "connect_mcp",
      "description": "Connect to an MCP server (docs, deploy) and discover tools.",
      "input_schema": {"type": "object",

@@ -86,6 +86,8 @@ python -m agent_harness
 - **历史压缩**：失败保留原历史，自动或手动失败后继续主请求；真正超限时只尝试一次被动恢复。
 - **后台结果**：超过 200 字符的通知保留全文路径，全文随启动目录保存；绑定 worktree 的任务仍可通过 `read_file` 读取运行时归档，保存失败后整批等待重试。
 - **Lead 恢复**：每回合独立管理输出升级、续写和一次被动压缩；429 会打断连续 529 的计数。
+- **worktree 清理**：Lead 可请求 `remove_worktree`，移除目录并保留分支，不自动合并。
+  完成、占用检查和分配释放时机见 [调试笔记第 8 节](note/dev-notes.md#8-任务与-worktree-绑定)。
 - **workflow resume**：相同调用键回放 journal，不再次调用模型；预算包含该 run 的历史 token，
   返回的 `usage` 是本次新增用量，`cumulativeUsage` 是整个 run 的累计用量。旧格式 journal
   缺少 `tokens` 时会报错；重新运行 `workflow demo` 可生成新格式记录。
@@ -107,6 +109,7 @@ python -m pytest -q
 - `tests/test_workflow.py`：覆盖 journal 回放、预算与 runner 接线。
 - `tests/test_llm_client.py`：覆盖响应协议、工具参数和失败响应的 Lead 行为。
 - `tests/test_agent_teams.py`：合并宿主的运行时用例。
+- `tests/test_worktree_cleanup.py`：Lead 同轮清理、目录切换，以及拒绝和失败后的分配保留。
 - `tests/test_flat_build.py`：拼接输出确定、与生成物一致、可编译、可运行。
 
 离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、单文件版），说明见

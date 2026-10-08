@@ -28,6 +28,16 @@ def run_create_worktree(name: str, task_id: str) -> str:
     """
     return task_worktrees.create_worktree(name, task_id)
 
+
+def run_remove_worktree(name: str) -> str:
+    """处理 Lead 的非强制 worktree 清理请求。
+
+    输入：name 为已注册且绑定任务的 worktree 名称。
+    返回：移除结果或拒绝原因；成功时保留分支，释放 Lead 自己的已完成分配。
+        不接受丢弃改动或释放队友分配的参数。
+    """
+    return task_worktrees.remove_worktree(name)
+
 # -- 基础工具处理器 --
 
 def run_create_task(subject: str, description: str = "") -> str:
@@ -358,6 +368,16 @@ BUILTIN_DEFINITIONS = [
                       "required": ["name", "task_id"],
                       "additionalProperties": False}},
                    run_create_worktree, "built-in tool 'create_worktree'"),
+    ToolDefinition({"name": "remove_worktree",
+     "description": ("Remove a completed task's clean worktree and retain its branch. "
+                     "Does not merge changes. Refuses teammate leases, running background "
+                     "commands, and uncommitted or ignored files. On success, releases "
+                     "any matching completed Lead assignment and restores its default cwd."),
+     "input_schema": {"type": "object",
+                      "properties": {"name": {"type": "string"}},
+                      "required": ["name"],
+                      "additionalProperties": False}},
+                   run_remove_worktree, "built-in tool 'remove_worktree'"),
     ToolDefinition({"name": "connect_mcp",
      "description": "Connect to an MCP server (docs, deploy) and discover tools.",
      "input_schema": {"type": "object",

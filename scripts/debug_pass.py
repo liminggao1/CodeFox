@@ -100,8 +100,10 @@ def worktree_child() -> int:
     # 任务仍在进行时不允许移除 worktree，必须先完成任务。
     assert "Error" in host.remove_worktree("dbg", discard_changes=True)
     assert "Completed" in host.complete_task(task.id, owner="agent")
-    assert host.release_completed_assignment("agent") is True
-    assert host.remove_worktree("dbg", discard_changes=True).startswith("Worktree")
+    assert host.BUILTIN_HANDLERS["remove_worktree"](name="dbg").startswith("Worktree")
+    assert "agent" not in host.teammate_assignments
+    assert host.load_task(task.id).worktree is None
+    assert host.assignment_cwd("agent") == repo
     listing = run_git("worktree", "list", cwd=repo).stdout
     assert ".worktrees/dbg" not in listing, listing
     print("WORKTREE FLOW OK")

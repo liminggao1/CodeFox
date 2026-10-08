@@ -29,7 +29,7 @@ PROMPT_SECTIONS = {
              "schedule_cron, list_crons, cancel_cron, "
              "spawn_teammate, list_teammates, send_message, "
              "request_shutdown, request_plan, review_plan, "
-             "create_worktree, "
+             "create_worktree, remove_worktree, "
              "connect_mcp. MCP tools are prefixed mcp__{server}__{tool}.",
     "tasks": (
         "Create all task nodes first. Only after create_task returns "
@@ -45,8 +45,12 @@ PROMPT_SECTIONS = {
         "create a task-bound worktree only when a separate working directory "
         "would prevent conflicting edits. A teammate "
         "must complete its current Task before claiming another. A worktree "
-        "changes tool default cwd only; it is not a sandbox. Worktree removal "
-        "stays with the host or user. After spawning a teammate, end the "
+        "changes tool default cwd only; it is not a sandbox. Preserve results "
+        "before complete_task. Use remove_worktree to clean up a completed "
+        "task's worktree; removal retains the branch and does not merge it. "
+        "Removing its own worktree releases the Lead's completed assignment "
+        "and restores the startup cwd. Wait for teammates to release their "
+        "assignments before removing their worktrees. After spawning a teammate, end the "
         "current turn instead of polling its status; the runtime will deliver "
         "team events and wake the Lead. React to those events, and shut "
         "teammates down when "

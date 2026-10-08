@@ -101,7 +101,7 @@ def create_worktree(name: str, task_id: str) -> str:
 
 
 def remove_worktree(name: str, discard_changes: bool = False) -> str:
-    """移除已完成任务不再占用的工作目录，并清除任务中的绑定信息。
+    """移除已完成任务的工作目录，成功后释放 Lead 自己的占用并解除绑定。
 
     输入：
         name: 已注册且绑定了任务的 worktree 名称。
@@ -109,7 +109,8 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
             默认为 False，目录存在这些文件或改动时拒绝移除。
     返回：
         成功、拒绝原因、Git 错误或部分成功结果的字符串。
-        要求绑定任务均已完成、分配记录不再占用目录，且目录内没有运行中的后台命令。
+        要求绑定任务均已完成、没有队友占用，且目录内没有运行中的后台命令。
+        Lead 自己匹配的已完成分配可随清理释放；拒绝或 Git 失败时保留该分配。
         成功时删除目录并清空 ``task.worktree``，保留分支和任务记录。
         Git 已移除目录但保存解绑信息失败时，会返回部分成功提示。
     """
@@ -129,6 +130,12 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
                     f"{active[0].id}; complete it before removal")
         leased = [owner for owner, assignment in tasks.teammate_assignments.items()
                   if Path(assignment["cwd"]).resolve() == path.resolve()]
+        lead_assignment = tasks.teammate_assignments.get("agent")
+        release_lead = "agent" in leased and any(
+            task.owner == "agent" and task.id == lead_assignment["task_id"]
+            for task in bound)
+        if release_lead:
+            leased.remove("agent")
         if leased:
             return (f"Error: Worktree '{name}' is still in use by "
                     f"{', '.join(sorted(leased))}; wait for the turn to end")
@@ -160,14 +167,20 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
                 return f"Git error: {result}"
 
             try:
+                # 只有 Git 已移除目录后才结束 Lead 的分配，失败时保留原 cwd。
+                if release_lead:
+                    tasks.release_completed_assignment("agent")
                 for task in bound:
                     task.worktree = None
                     tasks.save_task(task)
             except Exception as exc:
                 return (f"Partial success: Worktree '{name}' was removed and "
                         f"branch '{worktrees._worktree_branch(name)}' retained, "
-                        f"but task unbinding failed: {exc}. Manual recovery is required.")
+                        f"but task cleanup failed: {exc}. Manual recovery is required.")
 
     print(f"  \033[33m[worktree] removed: {name}; branch retained\033[0m")
-    return (f"Worktree '{name}' removed; branch "
-            f"'{worktrees._worktree_branch(name)}' retained")
+    result = (f"Worktree '{name}' removed; branch "
+              f"'{worktrees._worktree_branch(name)}' retained")
+    if release_lead:
+        result += f"; Lead assignment released; default work directory: {core.WORKDIR}"
+    return result

@@ -402,7 +402,7 @@ def complete_task(task_id: str, owner: str = "agent") -> str:
         owner: 必须与任务记录中的认领者一致。
     返回：
         完成成功或拒绝原因的字符串；成功时附带已满足依赖条件的任务标题。
-        保存 ``completed``，保留任务文件和分配目录，直到回合结束后释放分配。
+        保存 ``completed``，保留任务文件和分配目录；回合结束或成功移除 worktree 后释放分配。
         这里只记录完成状态，不独立验收工作成果。
         ID 不合法、记录缺失或保存失败时，异常会继续抛出。
     """
@@ -483,7 +483,7 @@ def assignment_cwd(owner: str) -> Path:
 
 
 def release_completed_assignment(owner: str) -> bool:
-    """在工作回合结束时释放执行者已完成任务的分配记录。
+    """在回合结束或 worktree 清理成功后释放执行者已完成任务的分配记录。
 
     输入：
         owner: 主 agent 的身份 ``'agent'``，或队友名称。
