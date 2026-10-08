@@ -207,11 +207,20 @@ class ToolRegistry:
         self._policies = MappingProxyType({})
 
     def configure(self, *sources) -> None:
-        """Use explicit source functions; the registry imports no source module."""
+        """设置生成 ToolDefinition 列表的来源函数。
+
+        输入：sources 为按装配顺序执行的无参来源函数。
+        返回：None。替换来源并清空权限快照，实际装配在 snapshot 中执行。
+        """
         self._sources = sources
         self._policies = MappingProxyType({})
 
     def snapshot(self) -> ToolSnapshot:
+        """统一装配工具描述、处理器和权限，并检查跨来源名称冲突。
+
+        返回：ToolSnapshot，含工具描述元组、名称到处理器及权限的只读映射。
+            全部装配成功后才发布新权限表；重名或来源失败会抛出异常并保留旧权限。
+        """
         tools, handlers, policies, origins = [], {}, {}, {}
         for source in self._sources:
             for entry in source():
@@ -234,6 +243,11 @@ class ToolRegistry:
         return snapshot
 
     def policy_for(self, name: str) -> str:
+        """查询最近一次成功装配的工具权限。
+
+        输入：name 为模型工具名称。
+        返回：已登记策略；未知工具默认返回 confirm，要求交互确认。
+        """
         return self._policies.get(name, "confirm")
 
 
@@ -248,9 +262,19 @@ fcntl = core.fcntl
 
 # 任务是小型持久化记录；归属、依赖、worktree 和队友都建立在同一份文件状态上。
 def _tasks_dir() -> Path:
+    """取得启动目录下的任务存储目录。
+
+    返回：
+        ``core.WORKDIR / '.tasks'``，这里只返回路径，不创建目录。
+    """
     return core.WORKDIR / ".tasks"
 
 def _tasks_root() -> Path:
+    """取得任务存储目录的真实路径，用于检查路径是否越界。
+
+    返回：
+        解析符号链接后的绝对路径 ``Path``。
+    """
     return _tasks_dir().resolve()
 
 
@@ -267,7 +291,13 @@ assignment_versions: dict[str, int] = {}
 
 @contextmanager
 def task_store_lock():
-    """让跨线程、跨 host 进程的任务修改串行执行。"""
+    """让任务写入、认领和 worktree 绑定串行执行，支持同一线程嵌套加锁。
+
+    输出：
+        供 ``with task_store_lock():`` 使用的上下文管理器。
+        进入时持有进程内线程锁；POSIX 下还持有跨进程的 ``.tasks/.lock``
+        文件锁。嵌套调用复用文件锁，最外层退出时释放；按需创建目录和锁文件。
+    """
     with task_lock:
         depth = getattr(_task_store_state, "depth", 0)
         if depth == 0:
@@ -292,6 +322,13 @@ def task_store_lock():
 
 
 def advance_assignment_version(owner: str):
+    """递增执行者的任务分配版本，用于识别已经过期的协议回复。
+
+    输入：
+        owner: 主 agent 的身份 ``'agent'``，或队友名称。
+    返回：
+        ``None``。将内存中的 ``assignment_versions[owner]`` 加一。
+    """
     with task_lock:
         assignment_versions[owner] = assignment_versions.get(owner, 0) + 1
 
@@ -308,6 +345,15 @@ class Task:
 
 
 def _task_path(task_id: str) -> Path:
+    """校验任务 ID，并取得任务存储目录内对应的 JSON 文件路径。
+
+    输入：
+        task_id: 格式为 ``task_`` 加 8 位小写十六进制字符的运行时 ID。
+    返回：
+        任务文件的绝对路径，不检查文件是否存在。
+    异常：
+        ValueError: ID 格式不合法，或解析后的路径越出允许范围。
+    """
     if not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(task_id):
         raise ValueError(f"Invalid task ID: {task_id!r}")
     path = (_tasks_dir() / f"{task_id}.json").resolve()
@@ -318,6 +364,18 @@ def _task_path(task_id: str) -> Path:
 
 
 def create_task(subject: str, description: str = "") -> Task:
+    """生成唯一任务 ID，创建并保存一个尚未认领的任务。
+
+    输入：
+        subject: 任务标题，会去掉首尾空白。
+        description: 可选的任务详情。
+    返回：
+        已保存的 ``Task``，初始状态为 ``pending``，无 owner、依赖或 worktree。
+        在任务存储锁内写入 ``.tasks/<id>.json``。
+    异常：
+        ValueError: 去掉空白后的标题为空。
+        RuntimeError: 尝试 100 次后仍无法生成未占用的 ID。
+    """
     subject = subject.strip()
     if not subject:
         raise ValueError("Task subject cannot be empty")
@@ -341,7 +399,15 @@ def create_task(subject: str, description: str = "") -> Task:
 
 
 def _task_depends_on(task_id: str, target_id: str) -> bool:
-    """判断 task_id 是否传递依赖 target_id。"""
+    """沿任务依赖关系查找目标，用于判断是否会形成循环依赖。
+
+    输入：
+        task_id: 开始查找的任务 ID。
+        target_id: 要查找的目标 ID，起始任务本身也纳入判断。
+    返回：
+        能到达目标时为 ``True``，否则为 ``False``。
+        读取任务记录，并记录已访问的 ID，避免重复遍历。
+    """
     pending = [task_id]
     visited = set()
     while pending:
@@ -356,7 +422,17 @@ def _task_depends_on(task_id: str, target_id: str) -> bool:
 
 
 def update_task(task_id: str, addBlockedBy: list[str]) -> Task:
-    """create_task 返回实际任务 ID 后再添加依赖关系。"""
+    """为尚未认领的待办任务追加依赖，并保存更新后的记录。
+
+    输入：
+        task_id: 要更新的任务 ID。
+        addBlockedBy: 必须先完成的现有任务 ID 列表。
+    返回：
+        已保存的 ``Task``，新依赖追加到原列表中，重复 ID 不会重复加入。
+    异常：
+        ValueError: 任务已被认领或不是待办状态、输入不是列表、
+            依赖不存在，或新增依赖会形成循环。
+    """
     if not isinstance(addBlockedBy, list):
         raise ValueError("addBlockedBy must be a list of task IDs")
 
@@ -390,6 +466,14 @@ def update_task(task_id: str, addBlockedBy: list[str]) -> Task:
 
 
 def save_task(task: Task):
+    """在任务存储锁内，将任务的当前字段原子地写入 JSON 文件。
+
+    输入：
+        task: 要保存的任务对象。
+    返回：
+        ``None``。先写临时文件，再替换 ``.tasks/<id>.json``，最后清理临时文件。
+        文件系统错误会继续抛给调用方。
+    """
     with task_store_lock():
         path = _task_path(task.id)
         temporary = path.with_name(
@@ -405,6 +489,16 @@ def save_task(task: Task):
 
 
 def load_task(task_id: str) -> Task:
+    """从 JSON 文件读取任务，并校验记录中的 ID 和生命周期状态。
+
+    输入：
+        task_id: 要读取的运行时任务 ID。
+    返回：
+        ID 与请求一致、状态合法的 ``Task`` 对象。
+    异常：
+        FileNotFoundError: 任务文件不存在。
+        ValueError: ID、JSON 数据或记录中的状态不合法。
+    """
     with task_lock:
         data = json.loads(_task_path(task_id).read_text(encoding="utf-8"))
         task = Task(**data)
@@ -416,6 +510,12 @@ def load_task(task_id: str) -> Task:
 
 
 def list_tasks() -> list[Task]:
+    """在线程锁内按文件名顺序读取任务存储中的全部任务。
+
+    返回：
+        校验后的 ``Task`` 对象列表；存储目录不存在时返回 ``[]``。
+        某条记录无法读取或校验失败时，继续抛出 ``load_task`` 的异常。
+    """
     with task_lock:
         if not _tasks_dir().exists():
             return []
@@ -426,10 +526,26 @@ def list_tasks() -> list[Task]:
 
 
 def get_task_json(task_id: str) -> str:
+    """将校验后的任务记录转换为工具可返回的格式化 JSON。
+
+    输入：
+        task_id: 要读取的任务 ID。
+    返回：
+        包含任务全部字段的 JSON 字符串；读取异常会继续抛出。
+    """
     return json.dumps(asdict(load_task(task_id)), indent=2)
 
 
 def can_start(task_id: str) -> bool:
+    """检查任务的前置依赖是否完成，不认领任务，也不改变任务状态。
+
+    输入：
+        task_id: 要检查依赖的任务 ID。
+    返回：
+        所有依赖均存在且已完成时返回 ``True``，没有依赖也返回 ``True``。
+        依赖 ID 不合法、依赖缺失或未完成时返回 ``False``。
+        不检查当前任务的状态和 owner，这些由 ``claim_task`` 校验。
+    """
     # 依赖规则保持简单：阻塞任务必须存在且已完成，当前任务才能被领取。
     task = load_task(task_id)
     for dep_id in task.blockedBy:
@@ -445,11 +561,25 @@ def can_start(task_id: str) -> bool:
 
 
 def _owner_in_progress(owner: str) -> Task | None:
+    """从持久化任务中查找执行者正在处理的第一个任务。
+
+    输入：
+        owner: 主 agent 的身份 ``'agent'``，或队友名称。
+    返回：
+        属于该执行者且状态为 ``in_progress`` 的 ``Task``；没有则返回 ``None``。
+    """
     return next((task for task in list_tasks()
                  if task.status == "in_progress" and task.owner == owner), None)
 
 
 def _incomplete_dependencies(task: Task) -> list[str]:
+    """收集阻止任务执行的依赖 ID，供认领失败时说明原因。
+
+    输入：
+        task: 要检查 ``blockedBy`` 列表的任务。
+    返回：
+        不合法、缺失或未完成的依赖 ID 列表，保留原有顺序。
+    """
     incomplete = []
     for dep_id in task.blockedBy:
         try:
@@ -463,7 +593,16 @@ def _incomplete_dependencies(task: Task) -> list[str]:
 
 
 def claim_task(task_id: str, owner: str = "agent") -> str:
-    """原子地领取任务，并绑定所有者的文件系统 cwd。"""
+    """认领满足依赖条件的任务，并登记执行者使用的工具工作目录。
+
+    输入：
+        task_id: 待办、无 owner 且依赖已完成的任务 ID。
+        owner: 主 agent 的身份 ``'agent'``，或认领任务的队友名称。
+    返回：
+        认领成功或拒绝原因的字符串。成功时在存储锁内保存 ``in_progress``
+        和 owner，将任务目录登记到 ``teammate_assignments``，并递增分配版本。
+        ID 不合法、记录缺失或保存失败时，异常会继续抛出。
+    """
     with task_store_lock():
         task = load_task(task_id)
         if task.status != "pending":
@@ -493,7 +632,17 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
 
 
 def complete_task(task_id: str, owner: str = "agent") -> str:
-    """仅允许任务所有者完成分配。"""
+    """由认领者将正在处理的任务标记为完成。
+
+    输入：
+        task_id: 要完成的任务 ID。
+        owner: 必须与任务记录中的认领者一致。
+    返回：
+        完成成功或拒绝原因的字符串；成功时附带已满足依赖条件的任务标题。
+        保存 ``completed``，保留任务文件和分配目录，直到回合结束后释放分配。
+        这里只记录完成状态，不独立验收工作成果。
+        ID 不合法、记录缺失或保存失败时，异常会继续抛出。
+    """
     with task_store_lock():
         task = load_task(task_id)
         if task.status != "in_progress":
@@ -520,6 +669,15 @@ def complete_task(task_id: str, owner: str = "agent") -> str:
 
 
 def task_worktree_cwd(task: Task) -> tuple[Path, str | None]:
+    """取得任务的文件工具应使用的工作目录。
+
+    输入：
+        task: 可能绑定了 worktree 名称的任务。
+    返回：
+        ``(cwd, error)``。未绑定时返回 ``(core.WORKDIR, None)``；绑定有效时
+        返回对应 Git 工作目录。绑定校验失败时路径仍为 ``core.WORKDIR``，
+        但同时带有错误，调用方必须先处理错误，不能直接在这个目录执行任务。
+    """
     if not task.worktree:
         return core.WORKDIR, None
     path, error = worktrees._registered_worktree(task.worktree)
@@ -527,6 +685,18 @@ def task_worktree_cwd(task: Task) -> tuple[Path, str | None]:
 
 
 def assignment_cwd(owner: str) -> Path:
+    """取得执行者的任务目录，必要时从任务记录恢复内存中的分配信息。
+
+    输入：
+        owner: 主 agent 的身份 ``'agent'``，或队友名称。
+    返回：
+        正在执行或尚未释放的已完成任务的有效目录。
+        无分配且无正在执行的任务时返回 ``core.WORKDIR``。
+        可能根据持久化记录补回 ``teammate_assignments``。
+    异常：
+        ValueError: owner、任务状态或绑定目录不合法，或目录发生变化。
+        任务文件缺失等读取异常也会继续抛出。
+    """
     with task_lock:
         assignment = teammate_assignments.get(owner)
         task = _owner_in_progress(owner)
@@ -550,6 +720,14 @@ def assignment_cwd(owner: str) -> Path:
 
 
 def release_completed_assignment(owner: str) -> bool:
+    """在工作回合结束时释放执行者已完成任务的分配记录。
+
+    输入：
+        owner: 主 agent 的身份 ``'agent'``，或队友名称。
+    返回：
+        成功移除匹配的已完成分配并递增版本时返回 ``True``，否则返回 ``False``。
+        保留已完成任务的文件、owner 字段和 worktree 绑定。
+    """
     with task_lock:
         assignment = teammate_assignments.get(owner)
         if not assignment:
@@ -563,6 +741,14 @@ def release_completed_assignment(owner: str) -> bool:
 
 
 def release_teammate_assignment(owner: str):
+    """在队友退出时释放分配，让未完成任务可以再次被认领。
+
+    输入：
+        owner: 要释放分配的队友名称。
+    返回：
+        ``None``。将正在处理的任务重置为无 owner 的 ``pending``，保留 worktree。
+        即使读取或保存任务失败，也会清理内存分配并递增版本；异常仍会抛出。
+    """
     with task_store_lock():
         try:
             task = _owner_in_progress(owner)
@@ -578,10 +764,20 @@ def release_teammate_assignment(owner: str):
 # ==== src/agent_harness/worktrees.py ====
 
 def _worktrees_dir() -> Path:
+    """取得启动目录下存放独立 Git 工作目录的父目录。
+
+    返回：
+        ``core.WORKDIR / '.worktrees'``，这里只返回路径，不创建目录。
+    """
     return core.WORKDIR / ".worktrees"
 
 
 def _worktrees_root() -> Path:
+    """取得 worktree 父目录的真实路径，用于检查路径是否越界。
+
+    返回：
+        解析符号链接后的绝对路径 ``Path``。
+    """
     return _worktrees_dir().resolve()
 
 
@@ -589,6 +785,15 @@ VALID_WORKTREE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def validate_worktree_name(name: str) -> str | None:
+    """校验任务 worktree 工具接受的名称格式。
+
+    输入：
+        name: 以字母或数字开头、长度为 1-64 的名称，只允许字母、数字、
+            点、下划线和短横线。
+    返回：
+        合法时返回 ``None``，否则返回错误字符串。
+        名称中不能出现 ``..``；这里不检查目录或分支是否已被占用。
+    """
     if not isinstance(name, str) or not VALID_WORKTREE_NAME.fullmatch(name):
         return ("worktree name must be 1-64 letters, digits, dots, "
                 "underscores, or dashes, and start with a letter or digit")
@@ -598,6 +803,15 @@ def validate_worktree_name(name: str) -> str | None:
 
 
 def _worktree_path(name: str) -> Path:
+    """取得工作目录的真实路径，并确认它位于允许的 worktree 父目录内。
+
+    输入：
+        name: worktree 名称，名称格式由工具调用方另行校验。
+    返回：
+        ``.worktrees/<name>`` 的绝对路径，不创建目录。
+    异常：
+        ValueError: 路径越出允许范围，或指向 worktree 父目录本身。
+    """
     path = (_worktrees_dir() / name).resolve()
     if (not _worktrees_root().is_relative_to(core.WORKDIR.resolve())
             or not path.is_relative_to(_worktrees_root())
@@ -607,6 +821,13 @@ def _worktree_path(name: str) -> Path:
 
 
 def _worktree_branch(name: str) -> str:
+    """生成任务 worktree 对应的分支名称。
+
+    输入：
+        name: worktree 名称。
+    返回：
+        ``wt/<name>`` 字符串；分支名是否合法由调用方通过 Git 检查。
+    """
     return f"wt/{name}"
 
 
@@ -614,6 +835,16 @@ run_git_impl = None
 
 
 def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
+    """执行 Git 并保留完整输出；测试时可使用注入的替代执行器。
+
+    输入：
+        args: Git 子命令和参数列表，不包含 ``git`` 可执行文件名。
+        cwd: 命令工作目录，默认使用 ``core.WORKDIR``。
+    返回：
+        ``(是否成功, 输出文本)``。合并标准输出和错误输出并去掉首尾空白，
+        无输出时使用 ``'(no output)'``。启动失败或超过 30 秒时返回失败及错误文本。
+        创建、移除等子命令会实际改变 Git 状态。
+    """
     if run_git_impl is not None:
         return run_git_impl(args, cwd)
     try:
@@ -628,11 +859,27 @@ def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
 
 
 def run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
+    """执行 Git，并限制返回给工具的输出长度。
+
+    输入：
+        args: Git 子命令和参数列表，不包含可执行文件名。
+        cwd: 命令工作目录，默认使用 ``core.WORKDIR``。
+    返回：
+        ``_run_git`` 的 ``(是否成功, 输出文本)``，输出最多保留 5,000 个字符。
+        解析 Git 注册表时使用未截断的 ``_run_git``。
+    """
     ok, output = _run_git(args, cwd)
     return ok, output[:5000]
 
 
 def _registered_worktrees() -> tuple[dict[Path, dict[str, str]], str | None]:
+    """读取 Git 的 worktree 注册表，保留完整的 porcelain 格式输出。
+
+    返回：
+        ``(entries, error)``。entries 将解析后的目录路径映射到 Git 元数据，
+        例如 ``branch`` 和 ``HEAD``。成功时 error 为 None；Git 执行失败时
+        返回空字典和错误字符串。
+    """
     ok, output = _run_git(["worktree", "list", "--porcelain"])
     if not ok:
         return {}, f"cannot read Git worktree registry: {output}"
@@ -651,6 +898,14 @@ def _registered_worktrees() -> tuple[dict[Path, dict[str, str]], str | None]:
 
 
 def _registered_worktree(name: str) -> tuple[Path | None, str | None]:
+    """校验工作目录的路径、Git 注册信息和对应分支。
+
+    输入：
+        name: worktree 名称，预期分支为 ``wt/<name>``。
+    返回：
+        目录存在、已注册且分支匹配时返回 ``(path, None)``，否则返回
+        ``(None, 错误文本)``。任务归属和绑定关系由任务生命周期函数另行检查。
+    """
     try:
         path = _worktree_path(name)
     except ValueError as exc:
@@ -701,6 +956,11 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def scan_skills():
+    """扫描随包分发的 skill 目录并重建内存索引。
+
+    返回：None。清空并填充 SKILL_REGISTRY；目录不存在时索引为空。
+        读取直接子目录中的 SKILL.md，保存名称、描述和全文，跳过越界路径。
+    """
     SKILL_REGISTRY.clear()
     if not core.SKILLS_DIR.exists():
         return
@@ -732,6 +992,10 @@ scan_skills()
 
 
 def list_skills() -> str:
+    """生成可放入系统提示词的 skill 名称与描述目录。
+
+    返回：每项一行的字符串；索引为空时返回无 skill 提示，不读取正文或请求模型。
+    """
     if not SKILL_REGISTRY:
         return "(no skills found)"
     return "\n".join(
@@ -740,6 +1004,11 @@ def list_skills() -> str:
 
 
 def load_skill(name: str) -> str:
+    """按已扫描名称加载 skill 全文，作为工具结果返回模型。
+
+    输入：name 为 SKILL_REGISTRY 中的名称。
+    返回：SKILL.md 原文；未找到时返回错误及可用名称，不重新扫描目录。
+    """
     skill = SKILL_REGISTRY.get(name)
     if not skill:
         available = ", ".join(SKILL_REGISTRY.keys()) or "(none)"
@@ -802,6 +1071,12 @@ PROMPT_SECTIONS = {
 
 
 def assemble_system_prompt(context: dict) -> str:
+    """将固定规则、环境信息和当前上下文拼成系统提示词。
+
+    输入：context 含 memory_catalog、memories、connected_mcp 和 active_teammates。
+    返回：完整 system 字符串，包含启动目录、当前时间和 skill 目录；
+        空的记忆、MCP 和队友段落不添加。这里只组装文本，不请求模型。
+    """
     # 每轮根据实时上下文重建系统提示词，让 memory、skills、MCP 状态和队友可见。
     sections = [PROMPT_SECTIONS["identity"],
                 PROMPT_SECTIONS["tools"],
@@ -832,6 +1107,11 @@ def assemble_system_prompt(context: dict) -> str:
 
 
 def safe_path(path: str, cwd: Path | None = None) -> Path:
+    """解析文件路径，并确保真实路径位于指定工作目录内。
+
+    输入：path 为相对或绝对路径；cwd 为允许的根目录，默认使用启动目录。
+    返回：解析符号链接后的绝对 Path；越界时抛出 ValueError，不创建文件。
+    """
     base = (cwd or core.WORKDIR).resolve()
     resolved = (base / path).resolve()
     if not resolved.is_relative_to(base):
@@ -930,13 +1210,24 @@ def _format_bash_result(output: str, exit_code: int | None) -> str:
 
 def run_bash(command: str, cwd: Path | None = None,
              run_in_background: bool = False) -> str:
+    """同步执行 shell 命令并返回格式化结果。
+
+    输入：command 为命令；cwd 为执行目录；run_in_background 由外层分发器处理，
+        直接调用本函数时不改变同步执行行为。
+    返回：输出或错误字符串；权限确认由调用方在执行前完成。
+    """
     # run_in_background 由分发器处理；直接执行时忽略它。
     return _format_bash_result(*_run_bash_process(command, cwd))
 
 
 def run_read(path: str, limit: int | None = None,
              offset: int = 0, cwd: Path | None = None) -> str:
-    """Read workspace files or absolute runtime archives, with optional line bounds."""
+    """读取工作目录内文件，或按绝对路径读取运行时归档。
+
+    输入：path 为文件路径；limit 为最多读取行数；offset 为跳过行数；cwd 为任务目录。
+    返回：文件文本或错误字符串；未展示完时附加剩余行数提示。
+        归档目录内绝对路径按启动目录校验，其他路径按 cwd 校验，默认使用启动目录。
+    """
     try:
         absolute = Path(path)
         if absolute.is_absolute() and any(
@@ -957,6 +1248,11 @@ def run_read(path: str, limit: int | None = None,
 
 
 def run_write(path: str, content: str, cwd: Path | None = None) -> str:
+    """在允许的目录内创建或覆盖 UTF-8 文本文件。
+
+    输入：path 为路径；content 为正文；cwd 为允许根目录，默认使用启动目录。
+    返回：写入确认或错误字符串；成功时按需创建父目录并替换文件内容。
+    """
     try:
         fp = safe_path(path, cwd)
         fp.parent.mkdir(parents=True, exist_ok=True)
@@ -968,6 +1264,11 @@ def run_write(path: str, content: str, cwd: Path | None = None) -> str:
 
 def run_edit(path: str, old_text: str, new_text: str,
              cwd: Path | None = None) -> str:
+    """替换文件中第一次出现的指定文本。
+
+    输入：path 为路径；old_text 为原文；new_text 为替换文本；cwd 为允许根目录。
+    返回：编辑确认或错误字符串；原文未找到时不写文件。
+    """
     try:
         fp = safe_path(path, cwd)
         text = fp.read_text(encoding="utf-8")
@@ -980,6 +1281,12 @@ def run_edit(path: str, old_text: str, new_text: str,
 
 
 def run_glob(pattern: str, cwd: Path | None = None) -> str:
+    """搜索指定目录内匹配 glob 模式的路径。
+
+    输入：pattern 为模式，支持 ** 递归；cwd 为搜索根目录，默认使用启动目录。
+    返回：排序去重后的路径文本，最多展示 200 项；无匹配或异常时返回提示。
+        解析后越界的匹配项不会返回，不修改文件。
+    """
     import glob as g
     try:
         base = (cwd or core.WORKDIR).resolve()
@@ -997,6 +1304,10 @@ def run_glob(pattern: str, cwd: Path | None = None) -> str:
 
 
 def _agent_cwd() -> tuple[Path | None, str | None]:
+    """取得主 agent 当前任务的有效工具目录。
+
+    返回：(目录, None)，无分配时使用启动目录；分配缺失或失效时返回 (None, 错误文本)。
+    """
     try:
         return tasks.assignment_cwd("agent"), None
     except (FileNotFoundError, ValueError) as exc:
@@ -1004,32 +1315,63 @@ def _agent_cwd() -> tuple[Path | None, str | None]:
 
 
 def run_agent_bash(command: str, run_in_background: bool = False) -> str:
+    """按主 agent 当前分配执行 shell 工具。
+
+    输入：command 为命令；run_in_background 为交给外层调度器解释的后台标志。
+    返回：分配错误或 run_bash 的结果字符串。
+    """
     cwd, error = _agent_cwd()
     return error or run_bash(command, cwd, run_in_background)
 
 
 def run_agent_read(path: str, limit: int | None = None,
                    offset: int = 0) -> str:
+    """按主 agent 当前分配读取文件。
+
+    输入：path 为路径；limit/offset 为读取行数上限和跳过行数。
+    返回：分配错误或 run_read 的文本结果；归档绝对路径遵循共享读取规则。
+    """
     cwd, error = _agent_cwd()
     return error or run_read(path, limit, offset, cwd)
 
 
 def run_agent_write(path: str, content: str) -> str:
+    """按主 agent 当前分配写入文件。
+
+    输入：path 为文件路径；content 为正文。
+    返回：分配错误或写入结果字符串，成功时修改对应任务目录中的文件。
+    """
     cwd, error = _agent_cwd()
     return error or run_write(path, content, cwd)
 
 
 def run_agent_edit(path: str, old_text: str, new_text: str) -> str:
+    """按主 agent 当前分配替换文件文本。
+
+    输入：path 为路径；old_text/new_text 为原文和替换内容。
+    返回：分配错误或编辑结果字符串。
+    """
     cwd, error = _agent_cwd()
     return error or run_edit(path, old_text, new_text, cwd)
 
 
 def run_agent_glob(pattern: str) -> str:
+    """按主 agent 当前分配搜索文件。
+
+    输入：pattern 为 glob 模式。
+    返回：分配错误、匹配路径列表或无匹配提示。
+    """
     cwd, error = _agent_cwd()
     return error or run_glob(pattern, cwd)
 
 
 def call_tool_handler(handler, args: dict, name: str) -> str:
+    """统一执行同步工具，将参数字典展开并把结果转换为文本。
+
+    输入：handler 为查表得到的函数或 None；args 为关键字参数字典；name 为工具名称。
+    返回：字符串结果；无处理器时返回未知工具，执行异常时返回异常类型及说明。
+        本函数不执行权限检查，调用方须先经过相应 hooks。
+    """
     if not handler:
         return f"Unknown tool: {name}"
     try:
@@ -1059,6 +1401,11 @@ def _normalize_todos(todos):
     return todos, None
 
 def run_todo_write(todos: list) -> str:
+    """校验并替换当前会话的内存 TODO 列表。
+
+    输入：todos 为包含 content 和 status 的条目列表，也支持规范化器接受的字符串。
+    返回：更新数量的确认或错误文本；成功时替换 tasks.CURRENT_TODOS，不写任务 JSON。
+    """
     global CURRENT_TODOS
     todos, error = _normalize_todos(todos)
     if error:
@@ -1072,6 +1419,12 @@ def run_todo_write(todos: list) -> str:
 
 class TeammateSession:
     def __init__(self, name, client, model, system, authorize_tool, send_message, submit_plan):
+        """装配队友的模型参数、受限工具列表和执行回调。
+
+        输入：name 为队友名称；client/model/system 为模型请求配置；
+            authorize_tool 检查计划门禁，send_message 发信，submit_plan 提交审批。
+        返回：None。保存配置并创建工具处理器；不请求模型、不启动线程。
+        """
         self.name = name
         self.client = client
         self.model = model
@@ -1200,7 +1553,12 @@ class TeammateSession:
 
 
     def execute_tool(self, block) -> str:
-        """Apply the current assignment gate and hooks before calling a handler."""
+        """依次检查计划门禁和权限 hooks，再执行队友工具。
+
+        输入：block 为包含 name 和 input 的模型工具请求。
+        返回：拒绝原因、工具结果或执行错误的字符串。
+            放行后调用处理器并触发 PostToolUse；拒绝时不执行处理器或后置 hook。
+        """
         blocked = self.authorize_tool(block)
         if blocked is not None:
             return str(blocked)
@@ -1212,7 +1570,12 @@ class TeammateSession:
         return str(output)
 
     def run(self, messages: list):
-        """Append a model response and a complete batch of tool results; return it."""
+        """执行一次队友模型请求，并将响应和工具结果写回历史。
+
+        输入：messages 为当前队友历史，会原地追加 assistant 和配对的 tool_result 消息。
+        返回：模型响应对象；线程外层根据是否含工具请求决定继续工作或进入空闲。
+        异常：响应因 max_tokens 截断时抛出 RuntimeError，不保存截断响应或执行其中的工具。
+        """
         response = self.client.messages.create(
             model=self.model, system=self.system, messages=messages,
             tools=self.tools, max_tokens=8000)
@@ -1270,6 +1633,12 @@ class MessageBus:
 
     def send(self, from_agent: str, to_agent: str, content: str,
              msg_type: str = "message", metadata: dict | None = None):
+        """向文件信箱追加一条消息，并唤醒当前总线中等待收信的线程。
+
+        输入：from_agent/to_agent 为发送者和收件人；content 为正文；
+            msg_type 为消息类型；metadata 为可选的 request_id、审批结果等信息。
+        返回：None。写入消息及时间戳并打印投递日志，文件错误继续抛出。
+        """
         msg = {"from": from_agent, "to": to_agent,
                "content": content, "type": msg_type,
                "ts": time.time(), "metadata": metadata or {}}
@@ -1282,6 +1651,11 @@ class MessageBus:
               f"({msg_type}) {content[:50]}\033[0m")
 
     def read_inbox(self, agent: str) -> list[dict]:
+        """在线程锁内读取并清空指定信箱。
+
+        输入：agent 为收件人名称。
+        返回：消息字典列表；无信箱时为空。成功消费后删除文件。
+        """
         with self._lock:
             return self._read_unlocked(agent)
 
@@ -1292,6 +1666,11 @@ class MessageBus:
 
     def wait_for_messages(self, agent: str,
                           timeout: float | None = None) -> list[dict]:
+        """阻塞等待信箱出现内容，再读取并消费消息。
+
+        输入：agent 为收件人；timeout 为最多等待的秒数，None 表示持续等待。
+        返回：收到的消息列表；超时返回空列表。使用单调时钟计算剩余等待时间。
+        """
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._changed:
             while not self.peek(agent):
@@ -1338,6 +1717,13 @@ def new_request_id() -> str:
 
 def match_response(response_type: str, request_id: str, approve: bool,
                    from_agent: str, to_agent: str) -> bool:
+    """匹配待处理协议请求与回复，防止错误身份或重复回复改变状态。
+
+    输入：response_type 为回复类型；request_id 为请求 ID；approve 为是否批准；
+        from_agent/to_agent 为回复的发送者和收件人。
+    返回：类型、身份和 pending 状态均匹配时返回 True，并记录 approved 或 rejected。
+        不匹配时返回 False；计划对应的任务版本由计划处理函数进一步校验。
+    """
     with team_lock:
         state = pending_requests.get(request_id)
         if not state:
@@ -1365,6 +1751,11 @@ def match_response(response_type: str, request_id: str, approve: bool,
 
 
 def consume_lead_inbox(route_protocol=True) -> list[dict]:
+    """消费 Lead 信箱，并按需将协议回复交给请求匹配器。
+
+    输入：route_protocol 为是否处理带 request_id 的协议回复，默认开启。
+    返回：本次收到的全部消息列表，包括协议消息；读取成功后信箱已被清空。
+    """
     msgs = BUS.read_inbox("lead")
     if route_protocol:
         for msg in msgs:
@@ -1378,6 +1769,11 @@ def consume_lead_inbox(route_protocol=True) -> list[dict]:
 
 
 def format_team_events(msgs: list[dict]) -> str:
+    """将团队消息转换为可加入主模型历史的事件文本。
+
+    输入：msgs 为含 type、from、content 和可选 metadata 的消息列表。
+    返回：带 [Team events] 前缀的字符串，每条消息包含类型、发送者和可选请求 ID。
+    """
     lines = []
     for msg in msgs:
         request_id = msg.get("metadata", {}).get("request_id")
@@ -1409,7 +1805,12 @@ def scan_unclaimed_tasks() -> list[tasks.Task]:
 
 
 def claim_next_task(name: str) -> tasks.Task | None:
-    """领取第一个仍可用的任务，不重复分配。"""
+    """为空闲队友认领扫描结果中第一个仍可用的任务。
+
+    输入：name 为队友名称。
+    返回：认领成功后的 Task；已有分配或没有可认领任务时返回 None。
+        通过 claim_task 保存归属和目录，扫描后被其他执行者抢先认领的任务会跳过。
+    """
     with tasks.task_lock:
         if tasks.teammate_assignments.get(name) or tasks._owner_in_progress(name):
             return None
@@ -1437,6 +1838,13 @@ def current_work_identity(owner: str) -> tuple[int, str | None]:
 
 
 def authorize_teammate_tool(name: str, block) -> str | None:
+    """根据队友当前任务的计划审批状态决定是否允许工具执行。
+
+    输入：name 为队友名称；block 为含 name 的工具请求。
+    返回：放行时为 None，未获批准时为拒绝文本。
+        分配版本变化会清理旧请求，并让需要审批的计划重新进入 required 状态。
+        bash、写入、编辑和完成任务需获批；此处放行后仍需经过通用权限 hooks。
+    """
     with tasks.task_lock:
         version = tasks.assignment_versions.get(name, 0)
         with team_lock:
@@ -1453,7 +1861,12 @@ def authorize_teammate_tool(name: str, block) -> str | None:
 
 
 def create_teammate_session(name: str, system: str = ""):
-    """Wire a session to live assignment and protocol operations."""
+    """装配队友的一轮模型执行器及当前协议回调。
+
+    输入：name 为队友名称；system 为该队友的系统提示词。
+    返回：使用当前 client 和 MODEL 的 TeammateSession，连接计划权限、发信和提交计划。
+        不启动线程，不独立管理信箱或队友生命周期。
+    """
     return TeammateSession(
         name, core.client, core.MODEL, system,
         lambda block: authorize_teammate_tool(name, block),
@@ -1463,7 +1876,13 @@ def create_teammate_session(name: str, system: str = ""):
 
 
 def apply_plan_response(name: str, msg: dict) -> tuple[bool, str]:
-    """只接受 Lead 对该队友当前计划的回复。"""
+    """只接受 Lead 针对队友当前任务和当前计划的审批回复。
+
+    输入：name 为队友名称；msg 为含 request_id 和 approve 的回复消息。
+    返回：(是否接受, 提示文本)。身份、任务 ID、版本、请求 ID 和状态均匹配时，
+        更新计划门禁、将队友登记为 working，并移除当前计划请求索引。
+        不匹配时返回忽略提示；批准和拒绝都会被接受，但拒绝不会开放工具权限。
+    """
     metadata = msg.get("metadata", {})
     request_id = metadata.get("request_id", "")
     with tasks.task_lock:
@@ -1496,7 +1915,12 @@ def apply_plan_response(name: str, msg: dict) -> tuple[bool, str]:
 
 
 def apply_shutdown_request(name: str, msg: dict) -> tuple[bool, str]:
-    """只接受 Lead 发给该队友且仍待处理的关闭请求。"""
+    """验证 Lead 发给当前队友的待处理关闭请求。
+
+    输入：name 为队友名称；msg 为含 request_id 的关闭请求消息。
+    返回：有效时为 (True, 请求 ID)，并将队友标记为 stopping。
+        无效或重复请求返回 (False, 忽略提示)，不在这里发送确认或退出线程。
+    """
     request_id = msg.get("metadata", {}).get("request_id", "")
     with team_lock:
         state = pending_requests.get(request_id)
@@ -1530,6 +1954,14 @@ def _teammate_send_message(from_name: str, to: str, content: str) -> str:
 def spawn_teammate_thread(name: str, role: str, prompt: str,
                           task_id: str | None = None,
                           require_plan: bool = False) -> str:
+    """登记队友并启动独立守护线程，持续处理工作和信箱协议。
+
+    输入：name 为非保留且不重名的队友名称；role 为角色；prompt 为初始任务文本；
+        task_id 为可选的初始任务 ID；require_plan 为是否要求先提交计划并获批。
+    返回：启动确认或校验、认领失败的提示。指定任务时先认领，失败则回滚队友登记。
+        启动成功即返回，不等待任务完成；线程会汇报结果、等待消息或认领新任务，
+        接受关闭请求或发生异常后清理分配与队友状态。
+    """
     if not is_valid_agent_name(name):
         return ("Invalid teammate name: use 1-64 letters, digits, "
                 "underscores, or dashes")
@@ -1571,6 +2003,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
               "intermediate coordination, and address the coordinator as 'lead'.")
 
     def handle_inbox_message(name: str, msg: dict, messages: list):
+        """处理队友收到的单条消息，并按协议更新状态或对话历史。
+
+        输入：name 为队友；msg 为信箱消息；messages 为该队友可修改的历史列表。
+        返回：接受有效关闭请求并发送确认时为 True，表示应停止循环；其他情况为 False。
+            计划回复、计划要求和普通消息会追加到历史，供下一轮模型读取。
+        """
         msg_type = msg.get("type", "message")
         meta = msg.get("metadata", {})
         req_id = meta.get("request_id", "")
@@ -1601,6 +2039,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
         return False
 
     def run_loop():
+        """在线程内交替执行队友模型回合、协议收信和空闲任务认领。
+
+        输入：使用外层捕获的队友名称、提示词、初始任务和计划要求。
+        返回：None。原地维护队友历史，向 Lead 汇报结果或错误，释放已完成分配。
+            空闲时等待信箱并定期尝试认领任务；接受关闭请求或模型调用失败时退出。
+        """
         initial_prompt = prompt
         if task_id:
             task = tasks.load_task(task_id)
@@ -1681,6 +2125,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
                 break
 
     def run():
+        """作为守护线程入口执行队友循环，并保证退出时清理登记。
+
+        输入：使用外层捕获的队友名称和 run_loop。
+        返回：None。尽力向 Lead 报告异常；无论正常退出还是失败，都释放任务分配，
+            移除活跃队友及计划门禁、版本和请求索引。
+        """
         try:
             run_loop()
         except Exception as exc:
@@ -1717,6 +2167,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
 
 
 def _teammate_submit_plan(from_name: str, plan: str) -> str:
+    """为队友当前分配创建计划审批请求并投递给 Lead。
+
+    输入：from_name 为提交队友；plan 为计划正文。
+    返回：提交确认和新 request_id；已有 pending 计划时拒绝重复提交。
+        保存当前任务 ID 和分配版本，将计划设为 pending、队友设为 waiting_approval。
+    """
     with tasks.task_lock:
         assignment = tasks.teammate_assignments.get(from_name)
         task_id = str(assignment["task_id"]) if assignment else None
@@ -1743,6 +2199,12 @@ def _teammate_submit_plan(from_name: str, plan: str) -> str:
 # -- Lead 团队工具 --
 
 def run_request_shutdown(teammate: str) -> str:
+    """以 Lead 身份向活跃队友发起有请求 ID 的关闭协议。
+
+    输入：teammate 为目标队友名称。
+    返回：请求确认或队友不活跃的提示。登记 pending 请求并写入信箱，
+        不直接终止线程，等待队友处理关闭请求并回复确认。
+    """
     if teammate not in active_teammates:
         return f"Teammate '{teammate}' is not active"
     with team_lock:
@@ -1760,6 +2222,12 @@ def run_request_shutdown(teammate: str) -> str:
 
 
 def run_request_plan(teammate: str, task: str) -> str:
+    """以 Lead 身份要求队友先为指定工作提交计划。
+
+    输入：teammate 为目标队友；task 为计划要求的正文，不是任务 ID。
+    返回：投递确认或队友不活跃的提示。将门禁设为 required 并发送 plan_request；
+        审批请求 ID 会在队友真正提交计划时生成。
+    """
     if teammate not in active_teammates:
         return f"Teammate '{teammate}' is not active"
     with team_lock:
@@ -1770,6 +2238,12 @@ def run_request_plan(teammate: str, task: str) -> str:
 
 def run_review_plan(request_id: str, approve: bool,
                     feedback: str = "") -> str:
+    """审核队友当前分配的待处理计划，并发送批准或拒绝回复。
+
+    输入：request_id 为计划请求 ID；approve 为是否批准；feedback 为可选反馈正文。
+    返回：审批结果或拒绝处理的原因。只更新当前任务、版本和计划索引匹配的请求；
+        将协议状态设为 approved 或 rejected 后投递回复，队友收信时再更新工具门禁。
+    """
     state = pending_requests.get(request_id)
     if not state:
         return f"Request {request_id} not found"
@@ -1808,10 +2282,21 @@ HOOKS = {"UserPromptSubmit": [], "PreToolUse": [],
 
 
 def register_hook(event: str, callback):
+    """按顺序登记某个事件的回调。
+
+    输入：event 为 HOOKS 中的事件名；callback 为接受该事件参数的函数。
+    返回：None。将回调追加到事件列表，不去重；未知事件名抛出 KeyError。
+    """
     HOOKS[event].append(callback)
 
 
 def trigger_hooks(event: str, *args):
+    """按注册顺序执行事件回调，并在第一个非 None 结果处停止。
+
+    输入：event 为事件名；args 为原样传给各回调的位置参数。
+    返回：第一个非 None 的回调结果；全部放行时返回 None。
+        回调异常继续抛出。工具执行入口将拒绝结果转为工具结果文本。
+    """
     for callback in HOOKS[event]:
         result = callback(*args)
         if result is not None:
@@ -1821,6 +2306,14 @@ def trigger_hooks(event: str, *args):
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
 def permission_hook(block):
+    """在工具执行前检查命令、文件路径和 MCP 工具权限。
+
+    输入：block 为工具请求，包含 name 和 input。
+    返回：放行时为 None，拒绝时为原因字符串。
+        bash 先按子串检查拒绝列表，再在主线程询问用户；文件路径必须在启动目录内。
+        未明确允许的 MCP 工具也需主线程确认；其他线程无法交互确认，因此拒绝。
+        任务目录的进一步限制由文件工具执行器检查。
+    """
     # 权限层在分发前检查原始 tool_use，可拒绝、询问用户或放行。
     if block.name == "bash":
         command = block.input.get("command", "")
@@ -1941,6 +2434,11 @@ SUB_HANDLERS = {
 
 
 def extract_text(content) -> str:
+    """提取 SDK 内容块中的文本。
+
+    输入：content 为 SDK 对象列表，或可转为字符串的其他内容。
+    返回：列表内文本块用换行连接并去掉首尾空白；非列表直接转为字符串。
+    """
     if not isinstance(content, list):
         return str(content)
     return "\n".join(
@@ -1950,12 +2448,24 @@ def extract_text(content) -> str:
 
 
 def has_tool_use(content) -> bool:
+    """根据实际 SDK 内容块检查是否有工具请求。
+
+    输入：content 为响应内容块列表。
+    返回：存在 type 为 tool_use 的对象时为 True，不依赖 stop_reason。
+    """
     # 不只依赖 stop_reason；主循环以实际的 tool_use 块判断是否继续。
     return any(getattr(block, "type", None) == "tool_use"
                for block in content)
 
 
 def spawn_subagent(description: str) -> str:
+    """同步执行一次独立历史、受限工具池的子 agent 任务。
+
+    输入：description 为任务说明。
+    返回：最近一次非空助手文本，或没有总结的提示。
+        最多调用模型 30 次，文件和 shell 工具经过权限 hooks，不能继续创建 agent。
+        使用启动目录，不管理队友信箱和任务认领；模型请求异常继续抛出。
+    """
     messages = [{"role": "user", "content": description}]
     for _ in range(30):
         response = core.client.messages.create(
@@ -1998,7 +2508,12 @@ class CompactionResult:
 
 
 def _history_transaction(messages: list, transform) -> CompactionResult:
-    """Commit a complete candidate history, preserving the caller's list identity."""
+    """在副本上完成历史转换，成功后一次性替换原列表内容。
+
+    输入：messages 为调用方持有的历史；transform 接收深拷贝并返回候选历史。
+    返回：CompactionResult，记录是否替换和失败原因；异常时原历史不变。
+        列表对象身份保持不变，转换过程中已经产生的归档文件不回滚。
+    """
     try:
         candidate = transform(copy.deepcopy(messages))
         if candidate == messages:
@@ -2010,7 +2525,13 @@ def _history_transaction(messages: list, transform) -> CompactionResult:
 
 
 def prepare_history(messages: list, active_request: str, *, enabled=True) -> CompactionResult:
-    """Apply the layered budget policy atomically, or retain the original history."""
+    """在每次模型调用前按分层字符预算处理历史。
+
+    输入：messages 为可原地替换的历史；active_request 为需保留的当前请求；
+        enabled 为本回合是否允许自动处理。
+    返回：CompactionResult；禁用或无需变化时 applied 为 False，失败时附带 reason。
+        先限制工具输出、归档旧消息，再缩减工具结果，仍超限时请求模型摘要。
+    """
     if not enabled:
         return CompactionResult(False)
 
@@ -2181,6 +2702,7 @@ def save_output(tool_use_id: str, output: str, *, subdirectory: str | None = Non
     Args:
         tool_use_id: 工具调用 ID，用于生成安全的文件名。
         output: 要保存的完整输出文本。
+        subdirectory: 可选的归档子目录，例如 background。
     Returns:
         已写入文件的路径。
     """
@@ -2447,7 +2969,7 @@ def summarize_history(messages: list) -> str:
     Args:
         messages: 待摘要的历史，序列化后最多发送前 80000 字符。
     Returns:
-        Complete, non-empty summary text; invalid summaries raise ValueError.
+        完整且非空的摘要文本；停止原因不是 end_turn 或正文为空时抛出 ValueError。
     """
     conversation = json.dumps(messages, default=str)[:80000]
     handoff_system = (
@@ -2536,7 +3058,12 @@ def _reactive_history(messages: list, active_request: str) -> list:
 
 
 def reactive_compact(messages: list, active_request: str) -> CompactionResult:
-    """Commit an archived summary and intact tail, or report the archive failure."""
+    """输入上下文过长后，尝试提交归档摘要和完整的最近消息尾部。
+
+    输入：messages 为原历史；active_request 为压缩后保留的当前请求。
+    返回：CompactionResult。归档失败时保留原历史并附带原因；摘要失败时
+        使用说明文本保留尾部，成功后原地替换列表内容。
+    """
     return _history_transaction(messages, lambda candidate: _reactive_history(candidate, active_request))
 
 
@@ -2568,7 +3095,7 @@ class ManualCompaction:
             block: 模型返回的工具调用块。
         Returns:
             非 compact 工具返回 None；否则返回工具结果字典。
-            The first request schedules compaction; repeats report it was requested.
+            首次请求登记待执行压缩并保存结果引用；重复请求只提示已经请求过。
         """
         if block.name != "compact":
             return None
@@ -2591,7 +3118,8 @@ class ManualCompaction:
             messages: 含完整工具结果的历史，压缩时会就地替换内容。
             active_request: 摘要后需要保留的当前请求。
         Returns:
-            CompactionResult after applying a pending request, otherwise None.
+            有待执行请求时返回 CompactionResult，否则为 None。
+            压缩失败保留原历史，并修改首次工具结果的正文，向模型说明失败原因。
         """
         if self.pending:
             self.pending = False
@@ -2632,7 +3160,12 @@ class RecoveryState:
         return self._recovery_count
 
     def accept_response(self, stop_reason: str) -> str:
-        """Return retry, continue, stop or accept without changing conversation history."""
+        """根据停止原因更新恢复额度并决定如何处理响应。
+
+        输入：stop_reason 为模型停止原因。
+        返回：首次 max_tokens 提高额度并返回 retry；后续按额度返回 continue 或 stop；
+            正常响应重置输出额度和升级标志，返回 accept。不直接修改对话历史。
+        """
         if stop_reason == "max_tokens":
             if not self._has_escalated:
                 self._has_escalated = True
@@ -2647,7 +3180,10 @@ class RecoveryState:
         return "accept"
 
     def claim_reactive_compaction(self) -> bool:
-        """Consume this turn's single reactive compaction opportunity."""
+        """申请本回合唯一一次上下文过长后的压缩机会。
+
+        返回：首次申请记录已使用并返回 True，后续申请返回 False。
+        """
         if self._reactive_compaction_claimed:
             return False
         self._reactive_compaction_claimed = True
@@ -2660,7 +3196,10 @@ class RecoveryState:
         self._consecutive_529 = 0
 
     def note_overload(self) -> bool:
-        """Count consecutive overloads and report whether the model was switched."""
+        """累计连续过载，并在达到阈值时切换备用模型。
+
+        返回：发生切换时为 True，并清零过载次数；未满足切换条件时为 False。
+        """
         self._consecutive_529 += 1
         if self._consecutive_529 >= core.MAX_CONSECUTIVE_529 and core.FALLBACK_MODEL:
             self._current_model = core.FALLBACK_MODEL
@@ -2726,6 +3265,12 @@ def with_retry(fn, state: RecoveryState):
 
 
 def is_prompt_too_long_error(e: Exception) -> bool:
+    """根据异常文本识别输入上下文过长错误。
+
+    输入：e 为模型调用异常。
+    返回：匹配 prompt/long、context_length_exceeded 或 max_context_window 时为 True；
+        协议响应错误始终为 False，避免误触发压缩。
+    """
     if isinstance(e, ProtocolResponseError):
         return False
     msg = str(e).lower()
@@ -2746,6 +3291,11 @@ background_lock = threading.Lock()
 
 
 def should_run_background(tool_name: str, tool_input: dict) -> bool:
+    """判断工具请求是否应由后台线程执行。
+
+    输入：tool_name 为工具名；tool_input 为参数字典。
+    返回：仅 bash 且 run_in_background 明确为 True 时返回 True。
+    """
     return (
         tool_name == "bash"
         and tool_input.get("run_in_background") is True
@@ -2753,10 +3303,22 @@ def should_run_background(tool_name: str, tool_input: dict) -> bool:
 
 
 def start_background_task(block, handlers: dict) -> str:
+    """登记后台命令并启动守护线程，立即向主循环返回任务 ID。
+
+    输入：block 为 bash 工具请求；handlers 为分发表，当前实现直接执行共享 shell 函数。
+    返回：bg_ 前缀的 ID。启动时固定当前任务目录，结果稍后由收集器交付。
+        启动线程失败会撤销登记并抛出异常；权限须由调用方提前检查。
+    """
     global _bg_counter
     command = block.input.get("command", block.name)
 
     def worker():
+        """在固定的任务目录执行后台命令，并登记最终结果。
+
+        输入：使用外层捕获的 block、cwd、cwd_error 和 bg_id。
+        返回：None。执行命令和 PostToolUse，写入 completed/failed 及文本结果；
+            执行或 hook 错误会转换成失败结果，已被移除的登记不再写回。
+        """
         try:
             if block.name != "bash":
                 raise ValueError("only bash can run in the background")
@@ -2807,7 +3369,12 @@ def start_background_task(block, handlers: dict) -> str:
 
 
 def collect_background_results() -> list[str]:
-    """Save full long outputs and publish the ready batch atomically."""
+    """收集已结束后台任务，先保存长输出，再一次性交付整批通知。
+
+    返回：task_notification 文本列表，包含摘要和可选 full_output 路径。
+        超过 200 字符的结果保存全文；整批构造成功后删除内存登记。
+        文件保存失败会抛出异常，整批仍保持待交付，重试可复用已经保存的路径。
+    """
     with background_lock:
         ready = [bg_id for bg_id, task in background_tasks.items()
                  if task["status"] in {"completed", "failed"}]
@@ -2890,6 +3457,12 @@ def _cron_field_matches(field: str, value: int) -> bool:
 
 
 def cron_matches(cron_expr: str, dt: datetime) -> bool:
+    """判断五字段 cron 表达式是否匹配指定本地时间。
+
+    输入：cron_expr 为分、时、日、月、星期表达式；dt 为待判断时间。
+    返回：是否匹配。星期日记为 0；日和星期同时受限时满足其一即可。
+        字段数错误返回 False，字段内容应先通过 validate_cron 校验。
+    """
     fields = cron_expr.strip().split()
     if len(fields) != 5:
         return False
@@ -2944,6 +3517,11 @@ def _validate_cron_field(field: str, lo: int, hi: int) -> str | None:
 
 
 def validate_cron(cron_expr: str) -> str | None:
+    """校验项目支持的五字段 cron 表达式。
+
+    输入：cron_expr 为分、时、日、月、星期表达式。
+    返回：合法时为 None，否则为带字段名称的错误文本；星期范围为 0–6。
+    """
     fields = cron_expr.strip().split()
     if len(fields) != 5:
         return f"Expected 5 fields, got {len(fields)}"
@@ -2957,6 +3535,11 @@ def validate_cron(cron_expr: str) -> str | None:
 
 
 def save_durable_jobs():
+    """将内存中的 durable cron 任务原子地写入持久化文件。
+
+    返回：None。持有 cron 锁，写临时文件后替换正式文件；非持久化任务不写入。
+        写入错误继续抛出，临时文件在 finally 中清理。
+    """
     with cron_lock:
         durable = [asdict(job) for job in scheduled_jobs.values() if job.durable]
         durable_path = _durable_path()
@@ -2969,6 +3552,11 @@ def save_durable_jobs():
 
 
 def load_durable_jobs():
+    """启动时从文件恢复持久化 cron 及尚未确认交付的任务。
+
+    返回：None。有效记录加入 scheduled_jobs；pending_delivery 记录同时加入队列。
+        文件缺失时不操作，读取或解析异常忽略；调用方保证只初始化一次。
+    """
     if not _durable_path().exists():
         return
     try:
@@ -2984,6 +3572,13 @@ def load_durable_jobs():
 
 def schedule_job(cron: str, prompt: str,
                  recurring: bool = True, durable: bool = True) -> CronJob | str:
+    """校验并登记一个周期或一次性定时提示词任务。
+
+    输入：cron 为时间表达式；prompt 为到期注入的文本；recurring 为是否重复；
+        durable 为是否跨进程启动保留。
+    返回：已登记的 CronJob，或 cron 校验错误文本。
+        持久化失败时恢复之前的登记并抛出异常。
+    """
     err = validate_cron(cron)
     if err:
         return err
@@ -3007,6 +3602,11 @@ def schedule_job(cron: str, prompt: str,
 
 
 def cancel_job(job_id: str) -> str:
+    """取消已登记的 cron，并移除队列中尚未消费的同 ID 投递。
+
+    输入：job_id 为 cron 任务 ID。
+    返回：取消确认或未找到提示；持久化写入失败时恢复登记和队列，再抛出异常。
+    """
     with cron_lock:
         previous_queue = list(cron_queue)
         job = scheduled_jobs.pop(job_id, None)
@@ -3024,7 +3624,12 @@ def cancel_job(job_id: str) -> str:
 
 
 def _enqueue_due_job(job: CronJob):
-    """先持久化一次性投递，再通过队列公开。"""
+    """将到期任务入队，一次性任务先记录待交付状态。
+
+    输入：job 为到期的 CronJob，调用方持有 cron 锁。
+    返回：None。一次性 durable 任务先保存 pending_delivery，再加入 cron_queue；
+        保存失败时撤销待交付标志并抛出异常，不发布队列项。
+    """
     if not job.recurring:
         job.pending_delivery = True
         try:
@@ -3037,6 +3642,11 @@ def _enqueue_due_job(job: CronJob):
 
 
 def cron_scheduler_loop():
+    """每秒检查到期 cron，并在同一分钟内避免重复入队。
+
+    返回：正常情况下持续循环。按本地时间匹配，跳过等待交付的一次性任务；
+        单个任务出错时打印原因并继续处理其他任务，不在这里请求模型。
+    """
     while True:
         time.sleep(1)
         now = datetime.now()
@@ -3054,6 +3664,10 @@ def cron_scheduler_loop():
 
 
 def consume_cron_queue() -> list[CronJob]:
+    """取出本批到期任务，交给主循环注入模型历史。
+
+    返回：队列快照并清空原队列；不确认交付、不删除 scheduled_jobs 中的任务。
+    """
     with cron_lock:
         fired = list(cron_queue)
         cron_queue.clear()
@@ -3061,7 +3675,12 @@ def consume_cron_queue() -> list[CronJob]:
 
 
 def acknowledge_cron_jobs(jobs: list[CronJob]):
-    """模型调用接收提示词后，删除对应的一次性任务。"""
+    """模型成功响应后确认本批提示词已交付。
+
+    输入：jobs 为已经消费并发送给模型的任务列表。
+    返回：None。删除匹配的一次性 pending_delivery 任务，周期任务保留。
+        持久化失败时恢复任务登记并重新入队，然后抛出异常。
+    """
     durable_changed = False
     with cron_lock:
         previous_jobs = dict(scheduled_jobs)
@@ -3081,7 +3700,11 @@ def acknowledge_cron_jobs(jobs: list[CronJob]):
 
 
 def restore_cron_jobs(jobs: list[CronJob]):
-    """模型调用失败后，将未确认的投递重新入队。"""
+    """将未确认交付且仍存在的 cron 任务放回队列。
+
+    输入：jobs 为需要恢复的任务列表。
+    返回：None。按 ID 去重，不重新加入已经取消或删除的任务。
+    """
     with cron_lock:
         queued_ids = {job.id for job in cron_queue}
         for job in jobs:
@@ -3093,6 +3716,11 @@ def restore_cron_jobs(jobs: list[CronJob]):
 
 def run_schedule_cron(cron: str, prompt: str,
                       recurring: bool = True, durable: bool = True) -> str:
+    """处理模型创建 cron 的工具请求。
+
+    输入：cron/prompt 为时间表达式和提示词；recurring/durable 为重复和持久化开关。
+    返回：包含任务 ID 的确认或校验错误文本；实际登记由 schedule_job 执行。
+    """
     result = schedule_job(cron, prompt, recurring, durable)
     if isinstance(result, str):
         return f"Error: {result}"
@@ -3100,6 +3728,10 @@ def run_schedule_cron(cron: str, prompt: str,
 
 
 def run_list_crons() -> str:
+    """生成当前定时任务列表。
+
+    返回：任务 ID、表达式、提示词预览及重复/持久化标志的文本；无任务时给出提示。
+    """
     with cron_lock:
         jobs = list(scheduled_jobs.values())
     if not jobs:
@@ -3112,6 +3744,11 @@ def run_list_crons() -> str:
 
 
 def run_cancel_cron(job_id: str) -> str:
+    """处理模型取消 cron 的工具请求。
+
+    输入：job_id 为要取消的定时任务 ID。
+    返回：cancel_job 的取消结果文本，存储异常继续抛出。
+    """
     return cancel_job(job_id)
 
 
@@ -3120,7 +3757,10 @@ _runtime_services_lock = threading.Lock()
 
 
 def start_runtime_services():
-    """CLI host 启动时只初始化一次持久化调度。"""
+    """在当前进程内只初始化一次 cron 服务。
+
+    返回：None。恢复持久化任务并启动调度守护线程，之后的调用直接返回。
+    """
     global _runtime_services_started
     with _runtime_services_lock:
         if _runtime_services_started:
@@ -3133,6 +3773,17 @@ def start_runtime_services():
 # ==== src/agent_harness/task_worktrees.py ====
 
 def create_worktree(name: str, task_id: str) -> str:
+    """从当前 HEAD 创建独立 Git 工作目录，并绑定到尚未认领的任务。
+
+    输入：
+        name: 唯一 worktree 名称，用于目录 ``.worktrees/<name>`` 和新分支
+            ``wt/<name>``。
+        task_id: 已存在、状态为 pending、无 owner 且未绑定 worktree 的任务 ID。
+    返回：
+        成功、拒绝原因、Git 错误或部分操作结果的字符串。
+        成功时创建目录和分支，再保存 ``task.worktree``；全过程使用与任务认领
+        相同的存储锁。部分失败时保留已产生的 Git 数据，供人工恢复。
+    """
     error = worktrees.validate_worktree_name(name)
     if error:
         return f"Error: {error}"
@@ -3212,6 +3863,18 @@ def create_worktree(name: str, task_id: str) -> str:
 
 
 def remove_worktree(name: str, discard_changes: bool = False) -> str:
+    """移除已完成任务不再占用的工作目录，并清除任务中的绑定信息。
+
+    输入：
+        name: 已注册且绑定了任务的 worktree 名称。
+        discard_changes: 是否允许 Git 丢弃未提交文件，包括未跟踪和被忽略的文件。
+            默认为 False，目录存在这些文件或改动时拒绝移除。
+    返回：
+        成功、拒绝原因、Git 错误或部分成功结果的字符串。
+        要求绑定任务均已完成、分配记录不再占用目录，且目录内没有运行中的后台命令。
+        成功时删除目录并清空 ``task.worktree``，保留分支和任务记录。
+        Git 已移除目录但保存解绑信息失败时，会返回部分成功提示。
+    """
     error = worktrees.validate_worktree_name(name)
     if error:
         return f"Error: {error}"
@@ -3299,6 +3962,11 @@ class MCPClient:
         self._handlers = dict(handlers)
 
     def call_tool(self, tool_name: str, args: dict) -> str:
+        """按原始工具名称执行模拟 MCP 处理器。
+
+        输入：tool_name 为服务器内部名称；args 为展开成关键字参数的字典。
+        返回：字符串结果；未知工具或处理器异常转换成 MCP 错误文本。
+        """
         handler = self._handlers.get(tool_name)
         if not handler:
             return f"MCP error: unknown tool '{tool_name}'"
@@ -3381,6 +4049,12 @@ MOCK_SERVERS = {
 
 
 def connect_mcp(name: str) -> str:
+    """连接项目内置的模拟 MCP 服务器并登记客户端。
+
+    输入：name 为 MOCK_SERVERS 中的服务器名称。
+    返回：连接及发现工具的提示，或重复连接、未知服务器的提示。
+        成功时写入 mcp_clients，下次工具池装配可见；当前实现不连接外部服务器。
+    """
     if name in mcp_clients:
         return f"MCP server '{name}' already connected"
     factory = MOCK_SERVERS.get(name)
@@ -3396,7 +4070,11 @@ def connect_mcp(name: str) -> str:
 
 
 def discover_tools() -> list[ToolDefinition]:
-    """Return normalized MCP definitions; registry handles cross-source collisions."""
+    """将已连接 MCP 工具转换为统一注册器接收的定义。
+
+    返回：ToolDefinition 列表，包含 mcp__ 前缀名称、schema、绑定处理器和 host 权限。
+        名称过长或 schema 不是对象时抛出 ValueError；跨来源重名由注册器检查。
+    """
     entries = []
     for server_name, mcp_client in mcp_clients.items():
         safe_server = normalize_mcp_name(server_name)
@@ -3447,17 +4125,43 @@ def run_create_worktree(name: str, task_id: str) -> str:
 # -- Lead 的 worktree 工具 --
 
 def run_create_worktree(name: str, task_id: str) -> str:
+    """处理主模型发出的 ``create_worktree`` 工具请求。
+
+    输入：
+        name: 新工作目录的名称，也用于分支 ``wt/<name>``。
+        task_id: 要绑定的待办任务 ID，必须在任务被认领前创建绑定。
+    返回：
+        ``task_worktrees.create_worktree`` 返回的创建结果或错误文本。
+    """
     return task_worktrees.create_worktree(name, task_id)
 
 # -- 基础工具处理器 --
 
 def run_create_task(subject: str, description: str = "") -> str:
+    """处理 ``create_task`` 请求，将生成的任务 ID 返回给模型。
+
+    输入：
+        subject: 非空任务标题。
+        description: 可选的任务描述。
+    返回：
+        包含已保存待办任务 ID 的确认文本。
+        校验和存储异常继续抛给通用工具执行器处理。
+    """
     task = tasks.create_task(subject, description)
     print(f"  \033[34m[create] {task.subject}\033[0m")
     return f"Created {task.id}: {task.subject}"
 
 
 def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
+    """处理模型为尚未认领的任务添加依赖的工具请求。
+
+    输入：
+        task_id: 要更新的待办任务 ID。
+        addBlockedBy: 必须先完成的现有任务 ID 列表。
+    返回：
+        列出依赖的确认文本；输入不合法或任务缺失时返回错误文本。
+        更新成功时会保存任务记录。
+    """
     try:
         task = tasks.update_task(task_id, addBlockedBy)
     except ValueError as exc:
@@ -3470,6 +4174,12 @@ def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
 
 
 def run_list_tasks() -> str:
+    """为主模型的 ``list_tasks`` 请求生成任务板文本。
+
+    返回：
+        每个任务一行，包含 ID、标题、状态和可选的 worktree 名称。
+        无任务时返回 ``'No tasks.'``，不修改任务记录。
+    """
     task_list = tasks.list_tasks()
     if not task_list:
         return "No tasks."
@@ -3480,6 +4190,14 @@ def run_list_tasks() -> str:
 
 
 def run_get_task(task_id: str) -> str:
+    """处理模型读取任务完整字段的工具请求。
+
+    输入：
+        task_id: 要查看的任务 ID。
+    返回：
+        格式化的任务 JSON；记录不合法或不存在时返回错误文本。
+        不修改任务或分配信息。
+    """
     try:
         return tasks.get_task_json(task_id)
     except ValueError as exc:
@@ -3488,6 +4206,14 @@ def run_get_task(task_id: str) -> str:
         return f"Error: task {task_id} not found"
 
 def run_claim_task(task_id: str) -> str:
+    """以主 agent 的身份 ``'agent'`` 处理 ``claim_task`` 请求。
+
+    输入：
+        task_id: 主 agent 要认领的任务 ID。
+    返回：
+        成功或拒绝原因的字符串；任务不合法或缺失时转为错误文本。
+        成功时保存任务归属，并登记工具工作目录。
+    """
     try:
         return tasks.claim_task(task_id, owner="agent")
     except ValueError as exc:
@@ -3496,6 +4222,14 @@ def run_claim_task(task_id: str) -> str:
         return f"Error: task {task_id} not found"
 
 def run_complete_task(task_id: str) -> str:
+    """以主 agent 的身份 ``'agent'`` 处理 ``complete_task`` 请求。
+
+    输入：
+        task_id: 主 agent 正在处理的任务 ID。
+    返回：
+        完成结果或拒绝原因；任务不合法或缺失时转为错误文本。
+        成功时保存 ``completed``，分配记录在工作回合结束时另行释放。
+    """
     try:
         return tasks.complete_task(task_id, owner="agent")
     except ValueError as exc:
@@ -3506,10 +4240,20 @@ def run_complete_task(task_id: str) -> str:
 def run_spawn_teammate(name: str, role: str, prompt: str,
                        task_id: str | None = None,
                        require_plan: bool = False) -> str:
+    """处理主模型创建队友的工具请求。
+
+    输入：name 为队友名称；role 为角色；prompt 为初始指令；task_id 为可选初始任务；
+        require_plan 为是否要求先获得计划批准。
+    返回：队友启动或失败提示；由团队模块登记状态并启动守护线程。
+    """
     return teams.spawn_teammate_thread(name, role, prompt, task_id, require_plan)
 
 
 def run_list_teammates() -> str:
+    """展示当前活跃队友及其运行状态。
+
+    返回：按名称排序的状态文本；无活跃队友时返回提示，不改变队友状态。
+    """
     with teams.team_lock:
         if not teams.active_teammates:
             return "No active teammates."
@@ -3520,12 +4264,22 @@ def run_list_teammates() -> str:
 
 
 def run_send_message(to: str, content: str) -> str:
+    """以 Lead 身份向活跃队友发送普通消息。
+
+    输入：to 为队友名称；content 为消息正文。
+    返回：投递确认或收件人不活跃的提示；成功时追加到队友信箱。
+    """
     if to not in teams.active_teammates:
         return f"Teammate '{to}' is not active"
     teams.BUS.send("lead", to, content)
     return f"Sent to {to}"
 
 def run_connect_mcp(name: str) -> str:
+    """处理主模型连接模拟 MCP 服务器的请求。
+
+    输入：name 为内置模拟服务器名称。
+    返回：连接结果或错误文本；成功后工具在下一次装配时可见。
+    """
     return mcp_tools.connect_mcp(name)
 
 
@@ -3727,7 +4481,10 @@ BUILTIN_HANDLERS = {
 
 
 def builtin_definitions() -> list[ToolDefinition]:
-    """Provide builtin schemas and handlers in their existing order."""
+    """提供内置工具的统一定义，供注册器装配。
+
+    返回：保持声明顺序的新列表，元素为已有 ToolDefinition，不执行工具处理器。
+    """
     return list(BUILTIN_DEFINITIONS)
 
 
@@ -3815,7 +4572,12 @@ def _normalized_memory_text(value: str) -> str:
     return " ".join(value.lower().split())
 
 def should_store_memory(candidate: dict, existing: list[dict]) -> bool:
-    """仅接受非临时且未存储过的持久化记录。"""
+    """判断候选记忆是否符合持久化规则且尚未存储。
+
+    输入：candidate 为候选字典；existing 为现有记忆列表。
+    返回：scope 为 persistent、类型和字段有效、没有临时标记且无名称或正文等重复时
+        返回 True，否则为 False。这里只判断，不写文件。
+    """
     if not isinstance(candidate, dict):
         return False
     if candidate.get("scope") != "persistent":
@@ -3856,6 +4618,12 @@ def memory_document(name: str, mem_type: str, description: str, body: str) -> st
     return f"---\n{metadata}\n---\n\n{body.strip()}\n"
 
 def write_memory_file(name: str, mem_type: str, description: str, body: str) -> Path:
+    """校验并写入一条记忆，然后重建索引。
+
+    输入：name/mem_type/description/body 为名称、允许的类型、描述和正文。
+    返回：已写入 Markdown 的路径；同名 slug 会覆盖原文件。
+        必填文本为空或类型错误时抛出 ValueError，文件操作错误继续抛出。
+    """
     if not name.strip():
         raise ValueError("Memory name cannot be empty")
     if mem_type not in MEMORY_TYPES:
@@ -3872,6 +4640,11 @@ def write_memory_file(name: str, mem_type: str, description: str, body: str) -> 
     return path
 
 def rebuild_memory_index() -> None:
+    """根据现有记忆文件重建名称、描述和链接索引。
+
+    返回：None。创建记忆目录并覆盖 MEMORY.md，跳过索引本身及越界文件。
+        文件读取或写入错误继续抛出。
+    """
     memory_dir().mkdir(parents=True, exist_ok=True)
     lines = []
     for path in sorted(memory_dir().glob("*.md")):
@@ -3893,6 +4666,11 @@ def rebuild_memory_index() -> None:
     )
 
 def read_memory_index() -> str:
+    """读取记忆索引供系统提示词展示。
+
+    返回：去掉首尾空白的索引文本；路径不合法或文件不存在时为空字符串。
+        文件存在但读取失败时异常继续抛出。
+    """
     # 函数签名：返回记忆索引文件的文本内容；读不到就返回 ""（空字符串）
     try:
         # 尝试定位记忆索引文件的路径（allow_index=True 表示允许走索引文件）
@@ -3907,6 +4685,11 @@ def read_memory_index() -> str:
 
 
 def read_memory_file(filename: str) -> str | None:
+    """读取单条记忆的完整 Markdown。
+
+    输入：filename 为不含目录的记忆文件名。
+    返回：文件全文；路径不合法或文件不存在时为 None，其他读取异常继续抛出。
+    """
     try:
         path = memory_path(filename)
     except ValueError:
@@ -3914,6 +4697,11 @@ def read_memory_file(filename: str) -> str | None:
     return path.read_text(encoding="utf-8") if path.is_file() else None
 
 def list_memory_files() -> list[dict]:
+    """读取并整理记忆目录中的全部记录。
+
+    返回：按文件名排序的字典列表，含 filename、name、description、type 和 body。
+        跳过索引与越界文件；目录不存在时为空，合法路径上的读取错误继续抛出。
+    """
     records = []
     if not memory_dir().exists():
         return records
@@ -4095,6 +4883,12 @@ def dialogue_text(messages: list, max_messages: int = 12) -> str:
 def validate_memory_record(
     record, require_scope: bool = False
 ) -> dict | None:
+    """校验模型候选记忆并规范化字段。
+
+    输入：record 为候选记录；require_scope 为是否要求合法 scope 字段。
+    返回：含名称、类型、描述和正文的字典，存在 scope 时保留；无效记录返回 None。
+        此处接受合法的 current_task scope，是否持久化由 should_store_memory 决定。
+    """
     if not isinstance(record, dict):
         return None
     name = str(record.get("name", "")).strip()
@@ -4118,6 +4912,12 @@ def validate_memory_record(
     return validated
 
 def extract_memories(messages: list) -> int:
+    """请求模型从最近对话抽取可跨会话保存的新知识。
+
+    输入：messages 为已处理的对话历史。
+    返回：本次保存数量，无对话、无合格候选或处理异常时返回 0。
+        校验后仅写入非临时且不重复的持久化记录，并更新索引；异常打印跳过原因。
+    """
     dialogue = dialogue_text(messages)
     if not dialogue:
         return 0
@@ -4182,6 +4982,12 @@ def extract_memories(messages: list) -> int:
         return 0
 
 def consolidate_memories() -> int:
+    """达到数量阈值时，请求模型整理重复或过时记忆。
+
+    返回：整理后保留的记录数；不足阈值、结果无效或失败时返回 0。
+        校验完整输出后替换原记录并重建索引，写入失败时尝试按快照恢复原文件。
+        输入目录过大时跳过本轮，避免把未发送的记忆覆盖丢失。
+    """
     records = list_memory_files()
     if len(records) < CONSOLIDATE_THRESHOLD:
         return 0
@@ -4281,7 +5087,11 @@ class RuntimeContext:
     active_teammates: tuple[str, ...] = ()
 
     def prompt_values(self) -> dict:
-        """Return existing prompt keys without sharing mutable runtime state."""
+        """将当前快照转换为系统提示词接收的字段字典。
+
+        返回：包含记忆目录、召回正文、MCP 名称和队友名称的新字典。
+            名称字段保留不可变元组，不暴露运行时的可变登记表。
+        """
         return {
             "memory_catalog": self.memory_catalog,
             "memories": self.memories,
@@ -4291,7 +5101,12 @@ class RuntimeContext:
 
 
 def build_context(messages: list) -> RuntimeContext:
-    """Read current memory, MCP and teammate state for one model call."""
+    """为本次主模型调用读取最新上下文并创建只读快照。
+
+    输入：messages 为当前历史，供记忆选取使用。
+    返回：RuntimeContext，包含记忆索引、相关正文、已连接 MCP 和活跃队友名称。
+        记忆选取可能请求模型；读取或选取异常按记忆模块规则处理。
+    """
     with teams.team_lock:
         teammate_names = tuple(teams.active_teammates)
     return RuntimeContext(
@@ -4388,7 +5203,11 @@ def _plain_content(content: Any) -> str:
 def transcript_text(
     messages: list[dict[str, Any]], max_characters: int = 24000
 ) -> str:
-    """保留最近的完整消息，仅裁剪过大的最新消息。"""
+    """在字符预算内保留最近的完整消息，并处理单条过大消息。
+
+    输入：messages 为历史；max_characters 为评估记录的字符预算，默认 24,000。
+    返回：带角色标签的纯文本；最新消息本身超限时保留其头尾并标记省略的中间部分。
+    """
 
     rendered = [
         f"{message.get('role', 'unknown').upper()}:\n"
@@ -4417,6 +5236,12 @@ def transcript_text(
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
+    """解析评估器 JSON 并检查完成状态字段。
+
+    输入：text 为模型文本，可包在 Markdown 代码围栏中。
+    返回：含布尔 ok、非空 reason 和布尔 impossible 的字典。
+        JSON、字段类型或状态组合不合法时抛出 GoalError。
+    """
     stripped = text.strip()
     if stripped.startswith("```"):
         lines = stripped.splitlines()
@@ -4554,6 +5379,13 @@ class GoalController:
         self.consecutive_blocks = 0
 
     def set_goal(self, condition: str, tokens_at_start: int = 0) -> GoalState:
+        """设置新的会话完成条件，并记录目标开始事件。
+
+        输入：condition 为非空条件，去掉首尾空白后最多 4,000 字符；
+            tokens_at_start 为开始时的 token 计数。
+        返回：新 GoalState，同时替换 active 并清零连续阻止次数。
+            已有目标会记录被替换事件；条件不合法时抛出 GoalError。
+        """
         condition = condition.strip()
         if not condition:
             raise GoalError("goal condition cannot be empty")
@@ -4579,6 +5411,11 @@ class GoalController:
         return self.active
 
     def clear(self, reason: str = "cleared") -> str:
+        """主动清除当前活动目标。
+
+        输入：reason 为清除原因。
+        返回：清除确认或无目标提示；记录事件并重置连续阻止计数，不调用评估器。
+        """
         if self.active is None:
             return "No goal set"
         condition = self.active.condition
@@ -4593,6 +5430,11 @@ class GoalController:
         return f"Goal cleared: {condition}"
 
     def status(self, current_tokens: int = 0) -> str:
+        """生成可展示的目标状态文本。
+
+        输入：current_tokens 为当前 token 计数，用于计算目标设置后的消费。
+        返回：活动条件、耗时、评估次数和原因，或最近完成/失败状态；不更新目标。
+        """
         if self.active is None:
             if self.last_status and self.last_status.get("met"):
                 return (
@@ -4625,9 +5467,12 @@ class GoalController:
         """评估本轮对话是否满足活动目标，并返回停止决定。
         Args:
             messages: 当前完整对话历史。
-            background_running: 是否仍有后台任务等待结果。
+            background_running: 调用方是否要求延迟评估；host 传入已结束但尚未交付的
+                后台结果是否存在，不代表仍有命令运行。
         Returns:
-            ``StopDecision``，其 ``action`` 表示允许结束、继续、延迟或失败。
+            StopDecision：无目标为 allow，需延迟为 defer；否则调用评估器。
+            完成为 achieved、不可完成为 failed，并清空活动目标；未完成为 block，
+            超过连续阻止上限为 limit；异常为 error，保留目标并记录原因。
         """
         # 没有活动目标时，不需要调用评估器，可以直接允许本轮结束。
         if self.active is None:
@@ -4812,7 +5657,12 @@ def create_run_id(meta) -> str:
 
 
 def reserve_run_id(meta) -> str:
-    """在截断任何 journal 之前先预留新的运行标识。"""
+    """在打开新 journal 前，独占创建快照占位文件以预留运行 ID。
+
+    输入：meta 为工作流元数据。
+    返回：已预留的运行 ID；最多尝试 32 次，仍冲突则抛出 WorkflowInputError。
+        创建 .runtime 和空快照文件，避免重复运行 ID 覆盖旧 journal。
+    """
     store_dir().mkdir(parents=True, exist_ok=True)
     for _ in range(32):
         run_id = validate_run_id(create_run_id(meta))
@@ -4856,7 +5706,12 @@ def _warn_missing_fcntl():
 
 @contextmanager
 def workflow_run_lock(run_id: str):
-    """在整个生命周期中为同一次运行跨线程、跨 host 进程加锁。"""
+    """在整个工作流运行期间持有同 ID 的独占锁。
+
+    输入：run_id 为已校验的运行 ID。
+    输出：供 with 使用的上下文管理器；当前运行已被占用时立即抛出 WorkflowInputError。
+        使用进程内锁和 POSIX 文件锁，退出时释放；无 fcntl 时仅进程内有效。
+    """
     with _run_locks_guard:
         local_lock = _run_locks.setdefault(run_id, threading.Lock())
     if not local_lock.acquire(blocking=False):
@@ -4893,7 +5748,11 @@ def workflow_run_lock(run_id: str):
 
 # -- 元数据校验 --
 def validate_meta(meta):
-    """启动前校验名称、描述和可选阶段。"""
+    """校验启动工作流需要的名称、描述和可选阶段。
+
+    输入：meta 为元数据字典，name 为合法名称，description 为字符串。
+    返回：校验通过后原样返回 meta；字段无效时抛出 WorkflowInputError。
+    """
     if not isinstance(meta, dict):
         raise WorkflowInputError("meta must be an object literal")
     if not meta.get("name") or not meta.get("description"):
@@ -4913,7 +5772,11 @@ def validate_meta(meta):
 
 
 def check_permission(meta, settings=None):
-    """启动工作流前执行允许/拒绝权限检查。"""
+    """检查工作流是否被传入的设置明确拒绝。
+
+    输入：meta 为已校验元数据；settings 为可选设置字典，当前只读取 deny 名单。
+    返回：未被拒绝时为 allow；名称在 deny 中时抛出 WorkflowInputError。
+    """
     settings = settings or {}
     if meta["name"] in settings.get("deny", []):
         raise WorkflowInputError(f"workflow '{meta['name']}' denied by settings")
@@ -4929,6 +5792,12 @@ class SimpleJsonSchema:
         self.schema = schema
 
     def validate(self, value, schema=None):
+        """递归检查输出值是否满足项目支持的 schema 子集。
+
+        输入：value 为候选结果；schema 为可选局部定义，默认使用实例定义。
+        返回：(是否通过, 错误文本或 None)，检查 enum、类型、required、properties 和 items。
+            不实现完整 JSON Schema；当前 integer 与 number 均按非布尔数值判断。
+        """
         schema = self.schema if schema is None else schema
         if "enum" in schema and value not in schema["enum"]:
             return False, f"expected one of {schema['enum']}"
@@ -5017,6 +5886,12 @@ class AnthropicAgentRunner:
         self.model = model
 
     def run(self, prompt, schema=None, label=None):
+        """同步请求模型完成一个无直接工具权限的工作流步骤。
+
+        输入：prompt 为步骤指令；schema 为可选输出结构；label 为接口标签，当前不发送。
+        返回：RunnerOutput，含文本或解析值及输入/输出 token 总数。
+            JSON 解析失败时保留文本，让上层校验触发重试；截断响应直接抛出 RuntimeError。
+        """
         request = prompt
         if schema is not None:
             request += (
@@ -5060,6 +5935,12 @@ class WorkflowJournal:
     直接从缓存重放，不再次执行。"""
 
     def __init__(self, run_id, resume, store=None):
+        """打开运行 journal，并按需恢复缓存和历史用量。
+
+        输入：run_id 为运行 ID；resume 为是否恢复；store 为可选状态目录。
+        返回：None。新运行创建空 journal；恢复逐行校验记录并以追加方式打开。
+            journal 缺失或记录不合法时抛出 WorkflowInputError，不将坏记录当作缓存。
+        """
         store = store_dir() if store is None else store
         store.mkdir(parents=True, exist_ok=True)
         self.path = store / f"{run_id}.journal.jsonl"
@@ -5119,14 +6000,30 @@ class WorkflowJournal:
             self._f = self.path.open("w", encoding="utf-8")             # 新运行从空文件开始
 
     def key(self, kind, label, prompt, schema):
+        """生成不依赖并发执行顺序的 journal 语义键。
+
+        输入：kind 为调用类型；label 为标签；prompt 为指令；schema 为输出结构。
+        返回：基于以上字段稳定哈希的字符串，用于运行内去重及 resume 重放。
+        """
         # 语义键不依赖并发顺序，parallel/pipeline 调用在恢复时仍能得到相同的键。
         basis = f"{kind}|{label}|{prompt}|{json.dumps(schema, sort_keys=True)}"
         return f"{kind}-{_stable_hash(basis) % 10**10:010d}"
 
     def cached(self, key):
+        """读取已完成步骤的缓存值。
+
+        输入：key 为语义键。
+        返回：已记录结果，未命中返回 MISS；None 也可以是有效缓存值。
+        """
         return self.cache.get(key, MISS)
 
     def record(self, key, value, tokens, cumulative_usage):
+        """追加成功步骤结果并刷新 journal 与内存缓存。
+
+        输入：key 为语义键；value 为结果；tokens 为步骤消费；cumulative_usage 为累计用量。
+        返回：None。写入一行 JSON 并 flush，再更新缓存和历史 token/agent 计数。
+            序列化或写入失败时异常继续抛出。
+        """
         self._f.write(json.dumps({
             "key": key, "value": value, "tokens": tokens,
             "cumulative_tokens": cumulative_usage["tokens"],
@@ -5151,6 +6048,12 @@ class Budget:
         self._spent = spent
 
     def add(self, n):
+        """在步骤返回后将其 token 消费计入预算。
+
+        输入：n 为新增消费量。
+        返回：None。超出上限时抛出 WorkflowInputError，并保持原计数。
+            校验发生在模型请求完成后，不撤销已经发生的真实 API 消费。
+        """
         if self.total is not None and self._spent + n > self.total:
             raise WorkflowInputError(
                 f"token budget exceeded ({self._spent + n} > {self.total})"
@@ -5216,19 +6119,31 @@ class ExecutionState:
         self._limits = limits or ExecutionLimits()
 
     def phase(self, title):
-        """开启阶段，后续 agent() 归入该阶段；重复声明同一阶段时不再次播报。"""
+        """设置后续步骤默认所属阶段。
+
+        输入：title 为阶段标题。
+        返回：None。更新当前阶段，同一标题只登记一次 workflow_phase 进度事件。
+        """
         self._phase = title
         if title not in self._phases_seen:
             self._phases_seen.add(title)
             self.task.progress_event("workflow_phase", title=title)
 
     def log(self, message):
-        """发出一条 workflow_log 进度记录。"""
+        """记录工作流脚本的进度说明。
+
+        输入：message 为日志正文。
+        返回：None。追加并打印 workflow_log 进度事件。
+        """
         self.task.progress_event("workflow_log", message=message)
 
     async def agent(self, prompt, schema=None, label=None, phase=None):
-        """启动一个子 agent；提供 schema 时要求结构化输出并校验，最多重试一次。
-        恢复时若命中缓存键，直接返回缓存结果。"""
+        """执行或重放一个工作流 agent 步骤。
+
+        输入：prompt 为步骤指令；schema 为可选输出结构；label 为稳定标签；phase 为可选阶段。
+        返回：步骤结果。申请调用额度并按语义键加锁，缓存命中直接校验后返回；
+            未命中则执行 runner，schema 不合格时最多重试一次，成功结果写入 journal。
+        """
         label = label or (prompt[:24] + "...")
         self._limits.claim_agent()
         key = self.journal.key("agent", label, prompt, schema)
@@ -5236,6 +6151,12 @@ class ExecutionState:
             return await self._run_agent(prompt, schema, label, phase, key)
 
     async def _run_agent(self, prompt, schema, label, phase, key):
+        """在语义键锁内检查缓存、执行步骤并提交结果和消费量。
+
+        输入：prompt/schema/label/phase 为步骤配置；key 为已加锁的 journal 语义键。
+        返回：缓存或有效执行结果。真实调用在线程中运行；成功后累计预算及用量并写日志。
+            缓存不合格、无剩余额度、重试仍无效或累计超预算时抛出 WorkflowInputError。
+        """
         cached = self.journal.cached(key)
         if cached is not MISS:
             if schema is not None:
@@ -5284,12 +6205,21 @@ class ExecutionState:
         return result
 
     async def parallel(self, thunks):
-        """同步点：并发执行所有任务，任一任务失败则整体失败。"""
+        """并发启动一组异步任务，并等待全部结果。
+
+        输入：thunks 为无参函数列表，每个调用返回可等待对象。
+        返回：按输入顺序排列的结果列表；任一异常会传播给工作流。
+            使用 asyncio.gather，不在这里主动取消其他已启动任务。
+        """
         return await asyncio.gather(*[thunk() for thunk in thunks])
 
     async def pipeline(self, items, *stages):
-        """逐项执行分阶段流程，阶段间没有同步点：A 可进入第三阶段，B 仍在第一阶段。
-        每个阶段接收（上阶段结果，原始项，索引）；任一阶段抛错则工作流失败。"""
+        """让各输入项并发进入流水线，每项内部依次执行各阶段。
+
+        输入：items 为原始条目；stages 为异步阶段函数，接收 (上阶段结果, 原始项, 索引)。
+        返回：按条目原顺序排列的最终结果；阶段异常向外传播。
+            阶段之间无全局等待点，一个条目进入下一阶段时其他条目可仍在前一阶段。
+        """
         async def run_item(item, idx):
             value = item
             for stage in stages:
@@ -5298,8 +6228,12 @@ class ExecutionState:
         return await asyncio.gather(*[run_item(it, i) for i, it in enumerate(items)])
 
     async def workflow(self, name, args=None):
-        """以内联子流程运行已保存的工作流（只允许一层），
-        共享本次运行的 journal、预算和 agent 计数器。"""
+        """以内联方式执行注册的子工作流。
+
+        输入：name 为已注册名称；args 为可选子流程参数。
+        返回：子脚本的返回值，共享父运行的任务、journal、runner、预算和限制。
+            只允许一层嵌套，名称不存在或继续嵌套时抛出 WorkflowInputError。
+        """
         if self._depth >= 1:
             raise WorkflowInputError("workflow() nesting is one level only")
         if name not in WORKFLOWS:
@@ -5318,6 +6252,13 @@ class WorkflowTool:
     并支持 resume。"""
 
     async def call(self, meta, script_fn, args=None, resume_from_run_id=None):
+        """校验工作流输入、预留或恢复运行 ID，并持锁执行完整运行。
+
+        输入：meta 为元数据；script_fn 为可信异步脚本；args 为参数字典；
+            resume_from_run_id 为可选恢复 ID。
+        返回：含 launched、result 和 LocalWorkflowTask 的字典。
+            输入不合法或同一运行已被占用时抛出 WorkflowInputError，不并发写同一 journal。
+        """
         validate_meta(meta)
         check_permission(meta)
         resuming = resume_from_run_id is not None
@@ -5331,6 +6272,13 @@ class WorkflowTool:
             )
 
     async def _call_locked(self, meta, script_fn, args, run_id, resuming):
+        """在运行锁内创建上下文、执行脚本并保存最终状态。
+
+        输入：meta/script_fn/args 为运行配置；run_id 为已锁定 ID；resuming 为恢复标志。
+        返回：launched、result 和任务对象。恢复时校验名称与原参数并加载历史预算。
+            脚本异常记录为 failed 结果；关闭 journal 后保存输出、快照和 last_run。
+            初始化或文件保存错误仍可向外抛出。
+        """
         if resuming:
             snapshot = _read_snapshot(run_id)
             if snapshot.get("workflowName") != meta["name"]:
@@ -5402,6 +6350,11 @@ def _write_json(path, value):
 
 
 def _read_snapshot(run_id):
+    """读取恢复运行所需的快照字典。
+
+    输入：run_id 为已校验运行 ID。
+    返回：快照字典；文件缺失、JSON 不合法或不是对象时抛出 WorkflowInputError。
+    """
     path = store_dir() / f"{run_id}.json"
     if not path.exists():
         raise WorkflowInputError(f"resume snapshot not found for {run_id}")
@@ -5450,6 +6403,11 @@ WORKFLOW_TOOL = {
 
 
 def serialize_task(task):
+    """将工作流任务转换为工具返回和快照保存使用的字典。
+
+    输入：task 为 LocalWorkflowTask。
+    返回：包含标识、名称、状态、本次/累计用量和进度的新字典，复制可变容器。
+    """
     return {
         "taskId": task.task_id,
         "taskType": "local_workflow",
@@ -5463,7 +6421,13 @@ def serialize_task(task):
 
 
 async def run_workflow(name, args=None, resume_from_run_id=None):
-    """面向模型的适配器：从 host 注册表定位可信代码。"""
+    """按注册名称运行工作流，并把任务对象转换为工具返回字段。
+
+    输入：name 为 WORKFLOWS 中的名称；args 为可选参数字典；
+        resume_from_run_id 为可选恢复运行 ID。
+    返回：含 launched、result 和序列化 task 的字典；不接受模型提供的任意脚本代码。
+        名称或参数无效时抛出 WorkflowInputError。
+    """
     if not isinstance(name, str):
         raise WorkflowInputError("workflow name must be a string")
     if name not in WORKFLOWS:
@@ -5488,7 +6452,11 @@ WORKFLOW_HANDLERS = {"Workflow": run_workflow}
 
 
 def run_workflow_sync(**tool_input):
-    """连接同步 host 分发器与异步工作流运行时。"""
+    """将同步工具分发连接到异步工作流入口，并等待运行结果。
+
+    输入：tool_input 为 name、args 和可选 resume_from_run_id 关键字参数。
+    返回：工作流结果的 JSON 字符串；WorkflowInputError 转成错误文本，其他异常继续抛出。
+    """
     try:
         return json.dumps(asyncio.run(run_workflow(**tool_input)), default=str)
     except WorkflowInputError as exc:
@@ -5515,6 +6483,11 @@ class MockAgentRunner:
     """供 demo 和单元测试使用的确定性执行器。"""
 
     def run(self, prompt, schema=None, label=None):
+        """按提示词稳定生成离线步骤结果。
+
+        输入：prompt 为步骤指令；schema 为可选结构；label 为展示标签。
+        返回：RunnerOutput，含模拟值和估算 token 数，不请求网络模型。
+        """
         if schema is None:
             value = f"[mock] {(label or prompt)[:60]}"
             return RunnerOutput(value, self._tokens(prompt, value))
@@ -5571,8 +6544,12 @@ DEMO_CHANGES = (
 )
 
 async def sample_workflow(ctx, args):
-    """按审查维度执行 pipeline（审计后逐项验证），只保留验证者确认的问题。
-    计划由代码表达，不占用一轮对话。"""
+    """按预设维度审查输入变更，再并发验证发现。
+
+    输入：ctx 为编排上下文；args.changes 为供审查的代码或变更文本。
+    返回：含 confirmed 的字典，只保留验证步骤确认的问题，并按严重程度排序。
+        编排由 Python 脚本固定，步骤执行由安装的真实或模拟 runner 决定。
+    """
     ctx.phase("Review")
     changes = args.get("changes", "")
     if not isinstance(changes, str):
@@ -5610,6 +6587,12 @@ async def sample_workflow(ctx, args):
     return {"confirmed": confirmed}
 
 async def run_demo(argv):
+    """启动内置审查示例，或恢复最近一次示例运行。
+
+    输入：argv 为 workflow 后的命令参数，首项为 resume 时读取 last_run。
+    返回：None。执行注册工作流并打印结果、状态、消费和 journal 路径。
+        离线能力由 CLI 安装 MockAgentRunner 提供，本函数不自行替换执行器。
+    """
     resume_id = None
     if argv and argv[0] == "resume":
         resume_id = workflow_runtime._read_last_run()
@@ -5636,7 +6619,10 @@ async def run_demo(argv):
 
 
 def register_workflows() -> None:
-    """Install the shipped workflow explicitly at the application boundary."""
+    """在应用入口显式登记随包提供的审查示例。
+
+    返回：None。将元数据和 sample_workflow 写入 WORKFLOWS，同名登记会替换原项。
+    """
     workflow_runtime.WORKFLOWS[SAMPLE_META["name"]] = (SAMPLE_META, sample_workflow)
 
 
@@ -5665,7 +6651,10 @@ tool_registry.REGISTRY.configure(
 
 
 def assemble_tool_pool() -> tuple[list[dict], dict]:
-    """Return the model tools and handlers from the single registry snapshot."""
+    """从同一个注册器快照取得模型工具描述和处理器映射。
+
+    返回：(tools, handlers)，分别为新列表和新字典；装配或名称冲突异常继续抛出。
+    """
     snapshot = tool_registry.REGISTRY.snapshot()
     return list(snapshot.tools), dict(snapshot.handlers)
 
@@ -5673,7 +6662,11 @@ GOAL = None
 
 
 def configure_goal(evaluator_model: str | None = None):
-    """创建 Stop 边界使用的会话目标控制器。"""
+    """创建并替换会话级目标控制器。
+
+    输入：evaluator_model 为可选评估模型；未指定时按环境变量和 core.MODEL 选择。
+    返回：新 GoalController，同时写入全局 GOAL；这里只配置评估器，不请求模型。
+    """
     global GOAL
     import os
     model = (evaluator_model
@@ -5693,6 +6686,12 @@ configure_goal()
 def spawn_teammate(name: str, role: str, prompt: str,
                    task_id: str | None = None,
                    require_plan: bool = False) -> str:
+    """将队友启动请求转交给团队运行时。
+
+    输入：name/role/prompt 为队友名称、角色和初始指令；task_id 为可选初始任务；
+        require_plan 为是否要求计划获批。
+    返回：团队模块的启动确认或错误文本，不等待队友完成。
+    """
     return teams.spawn_teammate_thread(name, role, prompt, task_id, require_plan)
 
 
@@ -5787,7 +6786,8 @@ def evaluate_goal(messages: list):
     Args:
         messages: 当前完整对话历史，供目标评估器判断完成条件。
     Returns:
-        ``StopDecision`` 目标决定；没有活动目标或评估失败时返回 ``None``。
+        ``StopDecision``，其 action 表示继续、完成、延迟或错误等结果。
+        无活动目标或外层执行异常时返回 None；评估器内部失败通常返回 error 决定。
     """
     # 没有创建目标控制器，或控制器当前没有活动目标时，不需要评估。
     if GOAL is None or GOAL.active is None:
@@ -5815,7 +6815,6 @@ def agent_loop(messages: list, active_request: str):
     Returns:
         ``None``。执行结果通过更新 ``messages`` 和相关运行时状态交付。
     """
-    # TODO 提醒计数在多轮调用之间共享。
     global rounds_since_todo
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
@@ -6040,6 +7039,11 @@ def agent_loop(messages: list, active_request: str):
 
 
 def print_turn_assistants(messages: list, turn_start: int):
+    """向终端输出本轮新产生的助手文本块。
+
+    输入：messages 为历史；turn_start 为本轮开始前的历史长度。
+    返回：None。只打印新增 assistant 消息的文本，不打印工具请求或修改历史。
+    """
     for msg in messages[turn_start:]:
         if msg.get("role") != "assistant":
             continue
@@ -6049,6 +7053,13 @@ def print_turn_assistants(messages: list, turn_start: int):
 
 
 def async_event_loop(history: list, session_state: dict):
+    """在后台线程轮询运行时事件，并串行唤醒主 agent。
+
+    输入：history 为与 CLI 共享的历史；session_state 保存当前 active_user_request。
+    返回：正常情况下持续循环。每秒检查 cron、Lead 信箱和后台任务，
+        有事件时在 agent_lock 内追加团队消息、执行 agent_loop 并打印新增回复。
+        这是普通同步函数，函数名中的 async 不表示 asyncio 协程。
+    """
     while True:
         time.sleep(1)
         with agent_lock:

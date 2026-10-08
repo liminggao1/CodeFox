@@ -59,6 +59,11 @@ SUB_HANDLERS = {
 
 
 def extract_text(content) -> str:
+    """提取 SDK 内容块中的文本。
+
+    输入：content 为 SDK 对象列表，或可转为字符串的其他内容。
+    返回：列表内文本块用换行连接并去掉首尾空白；非列表直接转为字符串。
+    """
     if not isinstance(content, list):
         return str(content)
     return "\n".join(
@@ -68,12 +73,24 @@ def extract_text(content) -> str:
 
 
 def has_tool_use(content) -> bool:
+    """根据实际 SDK 内容块检查是否有工具请求。
+
+    输入：content 为响应内容块列表。
+    返回：存在 type 为 tool_use 的对象时为 True，不依赖 stop_reason。
+    """
     # 不只依赖 stop_reason；主循环以实际的 tool_use 块判断是否继续。
     return any(getattr(block, "type", None) == "tool_use"
                for block in content)
 
 
 def spawn_subagent(description: str) -> str:
+    """同步执行一次独立历史、受限工具池的子 agent 任务。
+
+    输入：description 为任务说明。
+    返回：最近一次非空助手文本，或没有总结的提示。
+        最多调用模型 30 次，文件和 shell 工具经过权限 hooks，不能继续创建 agent。
+        使用启动目录，不管理队友信箱和任务认领；模型请求异常继续抛出。
+    """
     messages = [{"role": "user", "content": description}]
     for _ in range(30):
         response = core.client.messages.create(

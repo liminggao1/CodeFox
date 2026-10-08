@@ -18,17 +18,43 @@ from .tool_registry import ToolDefinition
 # -- Lead 的 worktree 工具 --
 
 def run_create_worktree(name: str, task_id: str) -> str:
+    """处理主模型发出的 ``create_worktree`` 工具请求。
+
+    输入：
+        name: 新工作目录的名称，也用于分支 ``wt/<name>``。
+        task_id: 要绑定的待办任务 ID，必须在任务被认领前创建绑定。
+    返回：
+        ``task_worktrees.create_worktree`` 返回的创建结果或错误文本。
+    """
     return task_worktrees.create_worktree(name, task_id)
 
 # -- 基础工具处理器 --
 
 def run_create_task(subject: str, description: str = "") -> str:
+    """处理 ``create_task`` 请求，将生成的任务 ID 返回给模型。
+
+    输入：
+        subject: 非空任务标题。
+        description: 可选的任务描述。
+    返回：
+        包含已保存待办任务 ID 的确认文本。
+        校验和存储异常继续抛给通用工具执行器处理。
+    """
     task = tasks.create_task(subject, description)
     print(f"  \033[34m[create] {task.subject}\033[0m")
     return f"Created {task.id}: {task.subject}"
 
 
 def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
+    """处理模型为尚未认领的任务添加依赖的工具请求。
+
+    输入：
+        task_id: 要更新的待办任务 ID。
+        addBlockedBy: 必须先完成的现有任务 ID 列表。
+    返回：
+        列出依赖的确认文本；输入不合法或任务缺失时返回错误文本。
+        更新成功时会保存任务记录。
+    """
     try:
         task = tasks.update_task(task_id, addBlockedBy)
     except ValueError as exc:
@@ -41,6 +67,12 @@ def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
 
 
 def run_list_tasks() -> str:
+    """为主模型的 ``list_tasks`` 请求生成任务板文本。
+
+    返回：
+        每个任务一行，包含 ID、标题、状态和可选的 worktree 名称。
+        无任务时返回 ``'No tasks.'``，不修改任务记录。
+    """
     task_list = tasks.list_tasks()
     if not task_list:
         return "No tasks."
@@ -51,6 +83,14 @@ def run_list_tasks() -> str:
 
 
 def run_get_task(task_id: str) -> str:
+    """处理模型读取任务完整字段的工具请求。
+
+    输入：
+        task_id: 要查看的任务 ID。
+    返回：
+        格式化的任务 JSON；记录不合法或不存在时返回错误文本。
+        不修改任务或分配信息。
+    """
     try:
         return tasks.get_task_json(task_id)
     except ValueError as exc:
@@ -59,6 +99,14 @@ def run_get_task(task_id: str) -> str:
         return f"Error: task {task_id} not found"
 
 def run_claim_task(task_id: str) -> str:
+    """以主 agent 的身份 ``'agent'`` 处理 ``claim_task`` 请求。
+
+    输入：
+        task_id: 主 agent 要认领的任务 ID。
+    返回：
+        成功或拒绝原因的字符串；任务不合法或缺失时转为错误文本。
+        成功时保存任务归属，并登记工具工作目录。
+    """
     try:
         return tasks.claim_task(task_id, owner="agent")
     except ValueError as exc:
@@ -67,6 +115,14 @@ def run_claim_task(task_id: str) -> str:
         return f"Error: task {task_id} not found"
 
 def run_complete_task(task_id: str) -> str:
+    """以主 agent 的身份 ``'agent'`` 处理 ``complete_task`` 请求。
+
+    输入：
+        task_id: 主 agent 正在处理的任务 ID。
+    返回：
+        完成结果或拒绝原因；任务不合法或缺失时转为错误文本。
+        成功时保存 ``completed``，分配记录在工作回合结束时另行释放。
+    """
     try:
         return tasks.complete_task(task_id, owner="agent")
     except ValueError as exc:
@@ -77,10 +133,20 @@ def run_complete_task(task_id: str) -> str:
 def run_spawn_teammate(name: str, role: str, prompt: str,
                        task_id: str | None = None,
                        require_plan: bool = False) -> str:
+    """处理主模型创建队友的工具请求。
+
+    输入：name 为队友名称；role 为角色；prompt 为初始指令；task_id 为可选初始任务；
+        require_plan 为是否要求先获得计划批准。
+    返回：队友启动或失败提示；由团队模块登记状态并启动守护线程。
+    """
     return teams.spawn_teammate_thread(name, role, prompt, task_id, require_plan)
 
 
 def run_list_teammates() -> str:
+    """展示当前活跃队友及其运行状态。
+
+    返回：按名称排序的状态文本；无活跃队友时返回提示，不改变队友状态。
+    """
     with teams.team_lock:
         if not teams.active_teammates:
             return "No active teammates."
@@ -91,12 +157,22 @@ def run_list_teammates() -> str:
 
 
 def run_send_message(to: str, content: str) -> str:
+    """以 Lead 身份向活跃队友发送普通消息。
+
+    输入：to 为队友名称；content 为消息正文。
+    返回：投递确认或收件人不活跃的提示；成功时追加到队友信箱。
+    """
     if to not in teams.active_teammates:
         return f"Teammate '{to}' is not active"
     teams.BUS.send("lead", to, content)
     return f"Sent to {to}"
 
 def run_connect_mcp(name: str) -> str:
+    """处理主模型连接模拟 MCP 服务器的请求。
+
+    输入：name 为内置模拟服务器名称。
+    返回：连接结果或错误文本；成功后工具在下一次装配时可见。
+    """
     return mcp_tools.connect_mcp(name)
 
 
@@ -298,5 +374,8 @@ BUILTIN_HANDLERS = {
 
 
 def builtin_definitions() -> list[ToolDefinition]:
-    """Provide builtin schemas and handlers in their existing order."""
+    """提供内置工具的统一定义，供注册器装配。
+
+    返回：保持声明顺序的新列表，元素为已有 ToolDefinition，不执行工具处理器。
+    """
     return list(BUILTIN_DEFINITIONS)

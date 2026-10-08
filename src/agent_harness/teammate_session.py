@@ -8,6 +8,12 @@ from pathlib import Path
 
 class TeammateSession:
     def __init__(self, name, client, model, system, authorize_tool, send_message, submit_plan):
+        """装配队友的模型参数、受限工具列表和执行回调。
+
+        输入：name 为队友名称；client/model/system 为模型请求配置；
+            authorize_tool 检查计划门禁，send_message 发信，submit_plan 提交审批。
+        返回：None。保存配置并创建工具处理器；不请求模型、不启动线程。
+        """
         self.name = name
         self.client = client
         self.model = model
@@ -136,7 +142,12 @@ class TeammateSession:
 
 
     def execute_tool(self, block) -> str:
-        """Apply the current assignment gate and hooks before calling a handler."""
+        """依次检查计划门禁和权限 hooks，再执行队友工具。
+
+        输入：block 为包含 name 和 input 的模型工具请求。
+        返回：拒绝原因、工具结果或执行错误的字符串。
+            放行后调用处理器并触发 PostToolUse；拒绝时不执行处理器或后置 hook。
+        """
         blocked = self.authorize_tool(block)
         if blocked is not None:
             return str(blocked)
@@ -148,7 +159,12 @@ class TeammateSession:
         return str(output)
 
     def run(self, messages: list):
-        """Append a model response and a complete batch of tool results; return it."""
+        """执行一次队友模型请求，并将响应和工具结果写回历史。
+
+        输入：messages 为当前队友历史，会原地追加 assistant 和配对的 tool_result 消息。
+        返回：模型响应对象；线程外层根据是否含工具请求决定继续工作或进入空闲。
+        异常：响应因 max_tokens 截断时抛出 RuntimeError，不保存截断响应或执行其中的工具。
+        """
         response = self.client.messages.create(
             model=self.model, system=self.system, messages=messages,
             tools=self.tools, max_tokens=8000)

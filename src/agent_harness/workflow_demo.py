@@ -23,6 +23,11 @@ class MockAgentRunner:
     """供 demo 和单元测试使用的确定性执行器。"""
 
     def run(self, prompt, schema=None, label=None):
+        """按提示词稳定生成离线步骤结果。
+
+        输入：prompt 为步骤指令；schema 为可选结构；label 为展示标签。
+        返回：RunnerOutput，含模拟值和估算 token 数，不请求网络模型。
+        """
         if schema is None:
             value = f"[mock] {(label or prompt)[:60]}"
             return RunnerOutput(value, self._tokens(prompt, value))
@@ -79,8 +84,12 @@ DEMO_CHANGES = (
 )
 
 async def sample_workflow(ctx, args):
-    """按审查维度执行 pipeline（审计后逐项验证），只保留验证者确认的问题。
-    计划由代码表达，不占用一轮对话。"""
+    """按预设维度审查输入变更，再并发验证发现。
+
+    输入：ctx 为编排上下文；args.changes 为供审查的代码或变更文本。
+    返回：含 confirmed 的字典，只保留验证步骤确认的问题，并按严重程度排序。
+        编排由 Python 脚本固定，步骤执行由安装的真实或模拟 runner 决定。
+    """
     ctx.phase("Review")
     changes = args.get("changes", "")
     if not isinstance(changes, str):
@@ -118,6 +127,12 @@ async def sample_workflow(ctx, args):
     return {"confirmed": confirmed}
 
 async def run_demo(argv):
+    """启动内置审查示例，或恢复最近一次示例运行。
+
+    输入：argv 为 workflow 后的命令参数，首项为 resume 时读取 last_run。
+    返回：None。执行注册工作流并打印结果、状态、消费和 journal 路径。
+        离线能力由 CLI 安装 MockAgentRunner 提供，本函数不自行替换执行器。
+    """
     resume_id = None
     if argv and argv[0] == "resume":
         resume_id = workflow_runtime._read_last_run()
@@ -144,5 +159,8 @@ async def run_demo(argv):
 
 
 def register_workflows() -> None:
-    """Install the shipped workflow explicitly at the application boundary."""
+    """在应用入口显式登记随包提供的审查示例。
+
+    返回：None。将元数据和 sample_workflow 写入 WORKFLOWS，同名登记会替换原项。
+    """
     workflow_runtime.WORKFLOWS[SAMPLE_META["name"]] = (SAMPLE_META, sample_workflow)

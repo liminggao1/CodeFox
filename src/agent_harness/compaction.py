@@ -25,7 +25,12 @@ class CompactionResult:
 
 
 def _history_transaction(messages: list, transform) -> CompactionResult:
-    """Commit a complete candidate history, preserving the caller's list identity."""
+    """在副本上完成历史转换，成功后一次性替换原列表内容。
+
+    输入：messages 为调用方持有的历史；transform 接收深拷贝并返回候选历史。
+    返回：CompactionResult，记录是否替换和失败原因；异常时原历史不变。
+        列表对象身份保持不变，转换过程中已经产生的归档文件不回滚。
+    """
     try:
         candidate = transform(copy.deepcopy(messages))
         if candidate == messages:
@@ -37,7 +42,13 @@ def _history_transaction(messages: list, transform) -> CompactionResult:
 
 
 def prepare_history(messages: list, active_request: str, *, enabled=True) -> CompactionResult:
-    """Apply the layered budget policy atomically, or retain the original history."""
+    """在每次模型调用前按分层字符预算处理历史。
+
+    输入：messages 为可原地替换的历史；active_request 为需保留的当前请求；
+        enabled 为本回合是否允许自动处理。
+    返回：CompactionResult；禁用或无需变化时 applied 为 False，失败时附带 reason。
+        先限制工具输出、归档旧消息，再缩减工具结果，仍超限时请求模型摘要。
+    """
     if not enabled:
         return CompactionResult(False)
 
@@ -208,6 +219,7 @@ def save_output(tool_use_id: str, output: str, *, subdirectory: str | None = Non
     Args:
         tool_use_id: 工具调用 ID，用于生成安全的文件名。
         output: 要保存的完整输出文本。
+        subdirectory: 可选的归档子目录，例如 background。
     Returns:
         已写入文件的路径。
     """
@@ -474,7 +486,7 @@ def summarize_history(messages: list) -> str:
     Args:
         messages: 待摘要的历史，序列化后最多发送前 80000 字符。
     Returns:
-        Complete, non-empty summary text; invalid summaries raise ValueError.
+        完整且非空的摘要文本；停止原因不是 end_turn 或正文为空时抛出 ValueError。
     """
     conversation = json.dumps(messages, default=str)[:80000]
     handoff_system = (
@@ -563,7 +575,12 @@ def _reactive_history(messages: list, active_request: str) -> list:
 
 
 def reactive_compact(messages: list, active_request: str) -> CompactionResult:
-    """Commit an archived summary and intact tail, or report the archive failure."""
+    """输入上下文过长后，尝试提交归档摘要和完整的最近消息尾部。
+
+    输入：messages 为原历史；active_request 为压缩后保留的当前请求。
+    返回：CompactionResult。归档失败时保留原历史并附带原因；摘要失败时
+        使用说明文本保留尾部，成功后原地替换列表内容。
+    """
     return _history_transaction(messages, lambda candidate: _reactive_history(candidate, active_request))
 
 
@@ -595,7 +612,7 @@ class ManualCompaction:
             block: 模型返回的工具调用块。
         Returns:
             非 compact 工具返回 None；否则返回工具结果字典。
-            The first request schedules compaction; repeats report it was requested.
+            首次请求登记待执行压缩并保存结果引用；重复请求只提示已经请求过。
         """
         if block.name != "compact":
             return None
@@ -618,7 +635,8 @@ class ManualCompaction:
             messages: 含完整工具结果的历史，压缩时会就地替换内容。
             active_request: 摘要后需要保留的当前请求。
         Returns:
-            CompactionResult after applying a pending request, otherwise None.
+            有待执行请求时返回 CompactionResult，否则为 None。
+            压缩失败保留原历史，并修改首次工具结果的正文，向模型说明失败原因。
         """
         if self.pending:
             self.pending = False

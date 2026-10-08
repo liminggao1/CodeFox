@@ -65,7 +65,12 @@ def create_run_id(meta) -> str:
 
 
 def reserve_run_id(meta) -> str:
-    """在截断任何 journal 之前先预留新的运行标识。"""
+    """在打开新 journal 前，独占创建快照占位文件以预留运行 ID。
+
+    输入：meta 为工作流元数据。
+    返回：已预留的运行 ID；最多尝试 32 次，仍冲突则抛出 WorkflowInputError。
+        创建 .runtime 和空快照文件，避免重复运行 ID 覆盖旧 journal。
+    """
     store_dir().mkdir(parents=True, exist_ok=True)
     for _ in range(32):
         run_id = validate_run_id(create_run_id(meta))
@@ -109,7 +114,12 @@ def _warn_missing_fcntl():
 
 @contextmanager
 def workflow_run_lock(run_id: str):
-    """在整个生命周期中为同一次运行跨线程、跨 host 进程加锁。"""
+    """在整个工作流运行期间持有同 ID 的独占锁。
+
+    输入：run_id 为已校验的运行 ID。
+    输出：供 with 使用的上下文管理器；当前运行已被占用时立即抛出 WorkflowInputError。
+        使用进程内锁和 POSIX 文件锁，退出时释放；无 fcntl 时仅进程内有效。
+    """
     with _run_locks_guard:
         local_lock = _run_locks.setdefault(run_id, threading.Lock())
     if not local_lock.acquire(blocking=False):
@@ -146,7 +156,11 @@ def workflow_run_lock(run_id: str):
 
 # -- 元数据校验 --
 def validate_meta(meta):
-    """启动前校验名称、描述和可选阶段。"""
+    """校验启动工作流需要的名称、描述和可选阶段。
+
+    输入：meta 为元数据字典，name 为合法名称，description 为字符串。
+    返回：校验通过后原样返回 meta；字段无效时抛出 WorkflowInputError。
+    """
     if not isinstance(meta, dict):
         raise WorkflowInputError("meta must be an object literal")
     if not meta.get("name") or not meta.get("description"):
@@ -166,7 +180,11 @@ def validate_meta(meta):
 
 
 def check_permission(meta, settings=None):
-    """启动工作流前执行允许/拒绝权限检查。"""
+    """检查工作流是否被传入的设置明确拒绝。
+
+    输入：meta 为已校验元数据；settings 为可选设置字典，当前只读取 deny 名单。
+    返回：未被拒绝时为 allow；名称在 deny 中时抛出 WorkflowInputError。
+    """
     settings = settings or {}
     if meta["name"] in settings.get("deny", []):
         raise WorkflowInputError(f"workflow '{meta['name']}' denied by settings")
@@ -182,6 +200,12 @@ class SimpleJsonSchema:
         self.schema = schema
 
     def validate(self, value, schema=None):
+        """递归检查输出值是否满足项目支持的 schema 子集。
+
+        输入：value 为候选结果；schema 为可选局部定义，默认使用实例定义。
+        返回：(是否通过, 错误文本或 None)，检查 enum、类型、required、properties 和 items。
+            不实现完整 JSON Schema；当前 integer 与 number 均按非布尔数值判断。
+        """
         schema = self.schema if schema is None else schema
         if "enum" in schema and value not in schema["enum"]:
             return False, f"expected one of {schema['enum']}"
@@ -270,6 +294,12 @@ class AnthropicAgentRunner:
         self.model = model
 
     def run(self, prompt, schema=None, label=None):
+        """同步请求模型完成一个无直接工具权限的工作流步骤。
+
+        输入：prompt 为步骤指令；schema 为可选输出结构；label 为接口标签，当前不发送。
+        返回：RunnerOutput，含文本或解析值及输入/输出 token 总数。
+            JSON 解析失败时保留文本，让上层校验触发重试；截断响应直接抛出 RuntimeError。
+        """
         request = prompt
         if schema is not None:
             request += (
@@ -313,6 +343,12 @@ class WorkflowJournal:
     直接从缓存重放，不再次执行。"""
 
     def __init__(self, run_id, resume, store=None):
+        """打开运行 journal，并按需恢复缓存和历史用量。
+
+        输入：run_id 为运行 ID；resume 为是否恢复；store 为可选状态目录。
+        返回：None。新运行创建空 journal；恢复逐行校验记录并以追加方式打开。
+            journal 缺失或记录不合法时抛出 WorkflowInputError，不将坏记录当作缓存。
+        """
         store = store_dir() if store is None else store
         store.mkdir(parents=True, exist_ok=True)
         self.path = store / f"{run_id}.journal.jsonl"
@@ -372,14 +408,30 @@ class WorkflowJournal:
             self._f = self.path.open("w", encoding="utf-8")             # 新运行从空文件开始
 
     def key(self, kind, label, prompt, schema):
+        """生成不依赖并发执行顺序的 journal 语义键。
+
+        输入：kind 为调用类型；label 为标签；prompt 为指令；schema 为输出结构。
+        返回：基于以上字段稳定哈希的字符串，用于运行内去重及 resume 重放。
+        """
         # 语义键不依赖并发顺序，parallel/pipeline 调用在恢复时仍能得到相同的键。
         basis = f"{kind}|{label}|{prompt}|{json.dumps(schema, sort_keys=True)}"
         return f"{kind}-{_stable_hash(basis) % 10**10:010d}"
 
     def cached(self, key):
+        """读取已完成步骤的缓存值。
+
+        输入：key 为语义键。
+        返回：已记录结果，未命中返回 MISS；None 也可以是有效缓存值。
+        """
         return self.cache.get(key, MISS)
 
     def record(self, key, value, tokens, cumulative_usage):
+        """追加成功步骤结果并刷新 journal 与内存缓存。
+
+        输入：key 为语义键；value 为结果；tokens 为步骤消费；cumulative_usage 为累计用量。
+        返回：None。写入一行 JSON 并 flush，再更新缓存和历史 token/agent 计数。
+            序列化或写入失败时异常继续抛出。
+        """
         self._f.write(json.dumps({
             "key": key, "value": value, "tokens": tokens,
             "cumulative_tokens": cumulative_usage["tokens"],
@@ -404,6 +456,12 @@ class Budget:
         self._spent = spent
 
     def add(self, n):
+        """在步骤返回后将其 token 消费计入预算。
+
+        输入：n 为新增消费量。
+        返回：None。超出上限时抛出 WorkflowInputError，并保持原计数。
+            校验发生在模型请求完成后，不撤销已经发生的真实 API 消费。
+        """
         if self.total is not None and self._spent + n > self.total:
             raise WorkflowInputError(
                 f"token budget exceeded ({self._spent + n} > {self.total})"
@@ -469,19 +527,31 @@ class ExecutionState:
         self._limits = limits or ExecutionLimits()
 
     def phase(self, title):
-        """开启阶段，后续 agent() 归入该阶段；重复声明同一阶段时不再次播报。"""
+        """设置后续步骤默认所属阶段。
+
+        输入：title 为阶段标题。
+        返回：None。更新当前阶段，同一标题只登记一次 workflow_phase 进度事件。
+        """
         self._phase = title
         if title not in self._phases_seen:
             self._phases_seen.add(title)
             self.task.progress_event("workflow_phase", title=title)
 
     def log(self, message):
-        """发出一条 workflow_log 进度记录。"""
+        """记录工作流脚本的进度说明。
+
+        输入：message 为日志正文。
+        返回：None。追加并打印 workflow_log 进度事件。
+        """
         self.task.progress_event("workflow_log", message=message)
 
     async def agent(self, prompt, schema=None, label=None, phase=None):
-        """启动一个子 agent；提供 schema 时要求结构化输出并校验，最多重试一次。
-        恢复时若命中缓存键，直接返回缓存结果。"""
+        """执行或重放一个工作流 agent 步骤。
+
+        输入：prompt 为步骤指令；schema 为可选输出结构；label 为稳定标签；phase 为可选阶段。
+        返回：步骤结果。申请调用额度并按语义键加锁，缓存命中直接校验后返回；
+            未命中则执行 runner，schema 不合格时最多重试一次，成功结果写入 journal。
+        """
         label = label or (prompt[:24] + "...")
         self._limits.claim_agent()
         key = self.journal.key("agent", label, prompt, schema)
@@ -489,6 +559,12 @@ class ExecutionState:
             return await self._run_agent(prompt, schema, label, phase, key)
 
     async def _run_agent(self, prompt, schema, label, phase, key):
+        """在语义键锁内检查缓存、执行步骤并提交结果和消费量。
+
+        输入：prompt/schema/label/phase 为步骤配置；key 为已加锁的 journal 语义键。
+        返回：缓存或有效执行结果。真实调用在线程中运行；成功后累计预算及用量并写日志。
+            缓存不合格、无剩余额度、重试仍无效或累计超预算时抛出 WorkflowInputError。
+        """
         cached = self.journal.cached(key)
         if cached is not MISS:
             if schema is not None:
@@ -537,12 +613,21 @@ class ExecutionState:
         return result
 
     async def parallel(self, thunks):
-        """同步点：并发执行所有任务，任一任务失败则整体失败。"""
+        """并发启动一组异步任务，并等待全部结果。
+
+        输入：thunks 为无参函数列表，每个调用返回可等待对象。
+        返回：按输入顺序排列的结果列表；任一异常会传播给工作流。
+            使用 asyncio.gather，不在这里主动取消其他已启动任务。
+        """
         return await asyncio.gather(*[thunk() for thunk in thunks])
 
     async def pipeline(self, items, *stages):
-        """逐项执行分阶段流程，阶段间没有同步点：A 可进入第三阶段，B 仍在第一阶段。
-        每个阶段接收（上阶段结果，原始项，索引）；任一阶段抛错则工作流失败。"""
+        """让各输入项并发进入流水线，每项内部依次执行各阶段。
+
+        输入：items 为原始条目；stages 为异步阶段函数，接收 (上阶段结果, 原始项, 索引)。
+        返回：按条目原顺序排列的最终结果；阶段异常向外传播。
+            阶段之间无全局等待点，一个条目进入下一阶段时其他条目可仍在前一阶段。
+        """
         async def run_item(item, idx):
             value = item
             for stage in stages:
@@ -551,8 +636,12 @@ class ExecutionState:
         return await asyncio.gather(*[run_item(it, i) for i, it in enumerate(items)])
 
     async def workflow(self, name, args=None):
-        """以内联子流程运行已保存的工作流（只允许一层），
-        共享本次运行的 journal、预算和 agent 计数器。"""
+        """以内联方式执行注册的子工作流。
+
+        输入：name 为已注册名称；args 为可选子流程参数。
+        返回：子脚本的返回值，共享父运行的任务、journal、runner、预算和限制。
+            只允许一层嵌套，名称不存在或继续嵌套时抛出 WorkflowInputError。
+        """
         if self._depth >= 1:
             raise WorkflowInputError("workflow() nesting is one level only")
         if name not in WORKFLOWS:
@@ -571,6 +660,13 @@ class WorkflowTool:
     并支持 resume。"""
 
     async def call(self, meta, script_fn, args=None, resume_from_run_id=None):
+        """校验工作流输入、预留或恢复运行 ID，并持锁执行完整运行。
+
+        输入：meta 为元数据；script_fn 为可信异步脚本；args 为参数字典；
+            resume_from_run_id 为可选恢复 ID。
+        返回：含 launched、result 和 LocalWorkflowTask 的字典。
+            输入不合法或同一运行已被占用时抛出 WorkflowInputError，不并发写同一 journal。
+        """
         validate_meta(meta)
         check_permission(meta)
         resuming = resume_from_run_id is not None
@@ -584,6 +680,13 @@ class WorkflowTool:
             )
 
     async def _call_locked(self, meta, script_fn, args, run_id, resuming):
+        """在运行锁内创建上下文、执行脚本并保存最终状态。
+
+        输入：meta/script_fn/args 为运行配置；run_id 为已锁定 ID；resuming 为恢复标志。
+        返回：launched、result 和任务对象。恢复时校验名称与原参数并加载历史预算。
+            脚本异常记录为 failed 结果；关闭 journal 后保存输出、快照和 last_run。
+            初始化或文件保存错误仍可向外抛出。
+        """
         if resuming:
             snapshot = _read_snapshot(run_id)
             if snapshot.get("workflowName") != meta["name"]:
@@ -655,6 +758,11 @@ def _write_json(path, value):
 
 
 def _read_snapshot(run_id):
+    """读取恢复运行所需的快照字典。
+
+    输入：run_id 为已校验运行 ID。
+    返回：快照字典；文件缺失、JSON 不合法或不是对象时抛出 WorkflowInputError。
+    """
     path = store_dir() / f"{run_id}.json"
     if not path.exists():
         raise WorkflowInputError(f"resume snapshot not found for {run_id}")
@@ -703,6 +811,11 @@ WORKFLOW_TOOL = {
 
 
 def serialize_task(task):
+    """将工作流任务转换为工具返回和快照保存使用的字典。
+
+    输入：task 为 LocalWorkflowTask。
+    返回：包含标识、名称、状态、本次/累计用量和进度的新字典，复制可变容器。
+    """
     return {
         "taskId": task.task_id,
         "taskType": "local_workflow",
@@ -716,7 +829,13 @@ def serialize_task(task):
 
 
 async def run_workflow(name, args=None, resume_from_run_id=None):
-    """面向模型的适配器：从 host 注册表定位可信代码。"""
+    """按注册名称运行工作流，并把任务对象转换为工具返回字段。
+
+    输入：name 为 WORKFLOWS 中的名称；args 为可选参数字典；
+        resume_from_run_id 为可选恢复运行 ID。
+    返回：含 launched、result 和序列化 task 的字典；不接受模型提供的任意脚本代码。
+        名称或参数无效时抛出 WorkflowInputError。
+    """
     if not isinstance(name, str):
         raise WorkflowInputError("workflow name must be a string")
     if name not in WORKFLOWS:
@@ -741,9 +860,12 @@ WORKFLOW_HANDLERS = {"Workflow": run_workflow}
 
 
 def run_workflow_sync(**tool_input):
-    """连接同步 host 分发器与异步工作流运行时。"""
+    """将同步工具分发连接到异步工作流入口，并等待运行结果。
+
+    输入：tool_input 为 name、args 和可选 resume_from_run_id 关键字参数。
+    返回：工作流结果的 JSON 字符串；WorkflowInputError 转成错误文本，其他异常继续抛出。
+    """
     try:
         return json.dumps(asyncio.run(run_workflow(**tool_input)), default=str)
     except WorkflowInputError as exc:
         return f"Error: {exc}"
-

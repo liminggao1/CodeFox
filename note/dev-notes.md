@@ -219,297 +219,345 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 1. 一轮对话的完整流程
 
-在 [host.agent_loop](../src/agent_harness/host.py#L262) 下断点。选择「端到端自检（离线）」，
-无需改配置；脚本化模型会先请求工具，再收到工具结果后完成回复。
+入口是 `agent_loop`，实现位于 [src/agent_harness/host.py:275](../src/agent_harness/host.py#L275)。
+选择「端到端自检（离线）」，在 [host.py:327](../src/agent_harness/host.py#L327) 下断点，按下面的主要调用顺序单步查看。
 
-这里是一次交互的总入口。进入循环后看 `messages`、`active_request`、`tools` 和新建的 `context` 快照，
-可以沿下面的顺序找实现：
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `prepare_history` | [host.py:327](../src/agent_harness/host.py#L327) | [compaction.py:44](../src/agent_harness/compaction.py#L44) | 按预算整理或压缩历史 |
+| 2 | `build_context` | [host.py:333](../src/agent_harness/host.py#L333) | [runtime_context.py:31](../src/agent_harness/runtime_context.py#L31) | 刷新记忆、MCP 和队友信息，见第 2 节 |
+| 3 | `assemble_tool_pool` | [host.py:335](../src/agent_harness/host.py#L335) | [host.py:119](../src/agent_harness/host.py#L119) | 装配本轮工具；内部调用注册器 [snapshot](../src/agent_harness/tool_registry.py#L36) |
+| 4 | `call_llm` | [host.py:341](../src/agent_harness/host.py#L341) | [host.py:225](../src/agent_harness/host.py#L225) | 拼接系统提示词并请求模型 |
+| 5 | `has_tool_use` | [host.py:393](../src/agent_harness/host.py#L393) | [subagent.py:75](../src/agent_harness/subagent.py#L75) | 判断模型是否请求工具，决定进入下面哪个分支 |
 
-1. [prepare_history](../src/agent_harness/compaction.py) 按字符预算处理候选历史，成功后提交，失败保留原值。
-2. [build_context](../src/agent_harness/runtime_context.py) 构造记忆、MCP 和队友的只读快照，随后
-   [ToolRegistry.snapshot](../src/agent_harness/tool_registry.py) 获取工具描述、handler 和权限。
-3. [call_llm](../src/agent_harness/host.py#L213) 组装系统提示词并发起模型请求；返回工具调用后，
-   [call_tool_handler](../src/agent_harness/file_tools.py#L217) 执行 handler。
-4. 工具结果由 `build_user_content` 配对写回 `messages`，循环再次进入 `call_llm`；模型返回文本
-   后依次经过 `Stop` hooks、目标判定和记忆整理。
+**有普通同步工具请求时：**
 
-成功判据是模型调用恰好两次，历史里依次出现 user、assistant 工具调用、user 工具结果和 assistant 文本。
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 6 | `trigger_hooks` | [host.py:447](../src/agent_harness/host.py#L447) | [hooks.py:30](../src/agent_harness/hooks.py#L30) | 触发 `PreToolUse`，检查能否执行 |
+| 7 | `call_tool_handler` | [host.py:481](../src/agent_harness/host.py#L481) | [file_tools.py:285](../src/agent_harness/file_tools.py#L285) | 执行工具 |
+| 8 | `trigger_hooks` | [host.py:483](../src/agent_harness/host.py#L483) | [hooks.py:30](../src/agent_harness/hooks.py#L30) | 触发 `PostToolUse` |
+| 9 | `build_user_content` | [host.py:501](../src/agent_harness/host.py#L501) | [host.py:185](../src/agent_harness/host.py#L185) | 把工具结果和后台通知写回历史 |
+| 10 | `apply_after_results` | [host.py:503](../src/agent_harness/host.py#L503) | [compaction.py:631](../src/agent_harness/compaction.py#L631) | 有手动压缩请求时执行压缩 |
+
+然后回到循环顶部，再次请求模型。自检会演示：`请求写文件 → 执行 write_file → 回填结果 → 模型回答`。
+
+**没有工具请求时：**
+
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 6 | `trigger_hooks` | [host.py:395](../src/agent_harness/host.py#L395) | [hooks.py:30](../src/agent_harness/hooks.py#L30) | 触发 `Stop` |
+| 7 | `evaluate_goal` | [host.py:397](../src/agent_harness/host.py#L397) | [host.py:249](../src/agent_harness/host.py#L249) | 检查目标；判定为 `block` 就继续循环 |
+| 8 | `remember_after_turn` | [host.py:420](../src/agent_harness/host.py#L420) | [host.py:166](../src/agent_harness/host.py#L166) | 提取并整理记忆 |
+| 9 | `release_completed_assignment` | [host.py:422](../src/agent_harness/host.py#L422) | [tasks.py:484](../src/agent_harness/tasks.py#L484) | 释放已完成任务的分配记录，随后结束本轮 |
 
 #### 2. 上下文如何刷新
 
-在 [runtime_context.build_context](../src/agent_harness/runtime_context.py#L27) 下断点。
-选择「端到端自检（离线）」，无需改配置；在模型调用前观察每轮新建的快照。
+主循环在 [src/agent_harness/host.py:333](../src/agent_harness/host.py#L333) 调用 `build_context`，
+实现位于 [src/agent_harness/runtime_context.py:31](../src/agent_harness/runtime_context.py#L31)。
+进入函数后，按下面的顺序查看：
 
-这里返回新的四项上下文：`memory_catalog`、`memories`、`connected_mcp` 和 `active_teammates`。
-可以沿下面的顺序找实现：
+| 顺序 | 函数或数据 | 使用位置 | 实现或定义位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `teams.active_teammates` | [runtime_context.py:39](../src/agent_harness/runtime_context.py#L39) | [teams.py:113](../src/agent_harness/teams.py#L113) | 加锁读取活跃队友名称 |
+| 2 | `read_memory_index` | [runtime_context.py:41](../src/agent_harness/runtime_context.py#L41) | [memory_runtime.py:192](../src/agent_harness/memory_runtime.py#L192) | 读取记忆索引 |
+| 3 | `load_memories` | [runtime_context.py:42](../src/agent_harness/runtime_context.py#L42) | [memory_runtime.py:366](../src/agent_harness/memory_runtime.py#L366) | 加载相关记忆 |
+| 3.1 | `select_relevant_memories` | [memory_runtime.py:381](../src/agent_harness/memory_runtime.py#L381) | [memory_runtime.py:309](../src/agent_harness/memory_runtime.py#L309) | 在 `load_memories` 内筛选记忆 |
+| 4 | `mcp_tools.mcp_clients` | [runtime_context.py:43](../src/agent_harness/runtime_context.py#L43) | [mcp_tools.py:54](../src/agent_harness/mcp_tools.py#L54) | 读取已登记的 MCP 名称 |
 
-1. [read_memory_index](../src/agent_harness/memory_runtime.py#L176) 读取记忆目录索引。
-2. [load_memories](../src/agent_harness/memory_runtime.py#L335) 根据 `messages` 的最近用户文本
-   选取并加载相关记录。
-3. [mcp_clients](../src/agent_harness/mcp_tools.py) 和 [active_teammates](../src/agent_harness/teams.py)
-   提供当前连接与队友名称。
-4. `agent_loop` 每次模型调用前构造只读 RuntimeContext，再由 `call_llm` 通过
-   `prompt_values()` 交给 [assemble_system_prompt](../src/agent_harness/prompts.py#L67)。
-   CLI 和后台循环只传历史与请求，不保存或修改上下文快照。
+上下文构造完成后，主循环进入 `call_llm`，再按下面的顺序使用它：
 
-先看空历史时四项是否为空，再在工具结果写回后看 `messages` 如何影响记忆选取；运行中新增 MCP
-或队友后，下一轮应能在对应字段和系统提示词中看到它们。
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 5 | `prompt_values` | [host.py:238](../src/agent_harness/host.py#L238) | [runtime_context.py:17](../src/agent_harness/runtime_context.py#L17) | 将上下文字段交给提示词组装函数 |
+| 6 | `assemble_system_prompt` | [host.py:238](../src/agent_harness/host.py#L238) | [prompts.py:67](../src/agent_harness/prompts.py#L67) | 把记忆、MCP 和队友信息拼进系统提示词 |
+
+每次循环都会重新构造上下文。上一轮新增的 MCP 或队友，会在下一次构造时读到。
+要观察刷新前后的区别，选择「pytest（当前文件）」，将 `"${file}"` 替换为 `"tests/test_runtime_context.py"`。
 
 #### 3. goal 的 Stop 判定
 
-在 [host.evaluate_goal](../src/agent_harness/host.py#L237) 和
-[GoalController.evaluate_after_turn](../src/agent_harness/goal.py#L329) 下断点。
-选择「pytest（当前文件）」，把 `"${file}"` 改为
-`"tests/test_goal.py::test_unmet_goal_continues_automatically_until_achieved"`；测试模拟先阻止、再放行。
+选择「pytest（当前文件）」，将 `"${file}"` 替换为
+`"tests/test_goal.py::test_unmet_goal_continues_automatically_until_achieved"`。
+测试会替换评估器；下面后两步是实际评估器的路径。
 
-这里负责把 Stop hook 的结果交给目标控制器，并决定本轮是否结束。可以沿下面的顺序找实现：
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `evaluate_goal` | [host.py:397](../src/agent_harness/host.py#L397) | [host.py:249](../src/agent_harness/host.py#L249) | 主模型不再请求工具时检查目标 |
+| 2 | `GoalController.evaluate_after_turn` | [host.py:263](../src/agent_harness/host.py#L263) | [goal.py:356](../src/agent_harness/goal.py#L356) | 根据活动目标决定是否评估 |
+| 3 | `PromptGoalEvaluator.evaluate` | [goal.py:384](../src/agent_harness/goal.py#L384) | [goal.py:184](../src/agent_harness/goal.py#L184) | 启动独立目标评估 |
+| 4 | `_evaluate_sync` | [goal.py:199](../src/agent_harness/goal.py#L199)（to_thread 目标） | [goal.py:202](../src/agent_harness/goal.py#L202) | 在线程中请求评估模型并解析判断 |
 
-1. `agent_loop` 在没有工具调用的 assistant 回复后进入 [evaluate_goal](../src/agent_harness/host.py#L237)。
-2. `evaluate_goal` 调用 [GoalController.evaluate_after_turn](../src/agent_harness/goal.py#L329)，
-   评估器返回 `allow`、`block` 或其他动作。
-3. 返回 `block` 时，主循环把条件和 `decision.reason` 写成 `[Goal still active]` 用户消息，
-   再次调用模型；返回 `allow` 时控制器清空 `GOAL.active` 并记录 `last_status`。
-
-第一次评估停住时重点看 `decision.reason`、`GOAL.active.condition` 和新增历史消息。测试成功判据是
-模型调用两次、评估器看到两份完整历史，且目标最终为已完成。
+判定为 `block` 时，主循环在 [host.py:406](../src/agent_harness/host.py#L406) 追加继续提示；判定为 `achieved` 时，在 [goal.py:416](../src/agent_harness/goal.py#L416) 清空活动目标。
 
 #### 4. 系统提示词怎么拼出来
 
-在 [prompts.assemble_system_prompt](../src/agent_harness/prompts.py#L67) 下断点。
-选择「端到端自检（离线）」，无需改配置；检查传入的 `context` 和返回值。
+选择「端到端自检（离线）」，在 [host.py:238](../src/agent_harness/host.py#L238) 下断点。
 
-这里把实时上下文拼成一次模型请求的 system prompt。可以沿下面的顺序找实现：
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `prompt_values` | [host.py:238](../src/agent_harness/host.py#L238) | [runtime_context.py:17](../src/agent_harness/runtime_context.py#L17) | 取出本轮上下文字段 |
+| 2 | `assemble_system_prompt` | [host.py:238](../src/agent_harness/host.py#L238) | [prompts.py:67](../src/agent_harness/prompts.py#L67) | 拼接固定规则和本轮上下文 |
+| 3 | `list_skills` | [prompts.py:83](../src/agent_harness/prompts.py#L83) | [skills.py:80](../src/agent_harness/skills.py#L80) | 加入可用 skill 目录 |
 
-1. `assemble_system_prompt` 读取 `context` 的 `memory_catalog`、`memories`、`connected_mcp` 和
-   `active_teammates`，并先放入 [PROMPT_SECTIONS](../src/agent_harness/prompts.py) 的身份、工具、
-   任务、团队、记忆和压缩规则。
-2. 它追加工作目录和当前时间，再调用 [list_skills](../src/agent_harness/skills.py#L75) 生成 skills
-   目录；有记忆时追加记忆索引与召回记录。
-3. 它从 [mcp_clients](../src/agent_harness/mcp_tools.py) 读取连接中的 MCP 服务名，追加
-   `Connected MCP servers` 段落。
-4. 函数返回完整字符串，由 `call_llm` 传给 `core.client.messages.create(system=...)`。
-
-断点处先对照 `context` 和返回字符串的各段；改变 MCP、队友或记忆后重新执行，确认提示词每轮
-重新组装，而不是沿用上一轮字符串。
+拼接完成后，在 [host.py:240](../src/agent_harness/host.py#L240) 发起模型请求。
 
 #### 5. 工具调用与结果
 
-在 [file_tools.call_tool_handler](../src/agent_harness/file_tools.py#L217) 下断点。
-选择「端到端自检（离线）」，无需改配置；会依次经过写文件、编辑和路径拒绝。
+选择「端到端自检（离线）」，在 [host.py:481](../src/agent_harness/host.py#L481) 下断点。以 `write_file` 为例：
 
-这里是同步工具的统一执行边界。可以沿下面的顺序找实现：
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `call_tool_handler` | [host.py:481](../src/agent_harness/host.py#L481) | [file_tools.py:285](../src/agent_harness/file_tools.py#L285) | 按工具名称取得的处理函数执行工具 |
+| 2 | `run_agent_write` | 登记 [registrations.py:201](../src/agent_harness/registrations.py#L201) → [file_tools.py:295](../src/agent_harness/file_tools.py#L295)（handler） | [file_tools.py:255](../src/agent_harness/file_tools.py#L255) | 根据 write_file 映射进入写文件处理器 |
+| 3 | `_agent_cwd` | [file_tools.py:261](../src/agent_harness/file_tools.py#L261) | [file_tools.py:223](../src/agent_harness/file_tools.py#L223) | 确定当前任务的工作目录 |
+| 4 | `assignment_cwd` | [file_tools.py:229](../src/agent_harness/file_tools.py#L229) | [tasks.py:449](../src/agent_harness/tasks.py#L449) | 读取任务分配及 worktree 目录 |
+| 5 | `run_write` | [file_tools.py:262](../src/agent_harness/file_tools.py#L262) | [file_tools.py:167](../src/agent_harness/file_tools.py#L167) | 执行文件写入 |
+| 6 | `safe_path` | [file_tools.py:174](../src/agent_harness/file_tools.py#L174) | [file_tools.py:26](../src/agent_harness/file_tools.py#L26) | 检查文件路径是否在允许目录内 |
+| 7 | `build_user_content` | [host.py:501](../src/agent_harness/host.py#L501) | [host.py:185](../src/agent_harness/host.py#L185) | 把执行结果写回历史，供下一次模型调用读取 |
 
-1. `agent_loop` 从工具池的 `handlers` 按 `block.name` 取出 handler，并把 `block.input` 传给
-   `call_tool_handler`。
-2. `call_tool_handler` 处理未知工具和异常，把正常返回值统一转成字符串；以文件工具为例，
-   [run_agent_write](../src/agent_harness/file_tools.py#L202) 先确定任务工作目录，再调用
-   [run_write](../src/agent_harness/file_tools.py#L144)。
-3. 执行前由 [trigger_hooks](../src/agent_harness/hooks.py#L25) 运行 `PreToolUse`，权限拒绝时
-   不进入 handler；执行后运行 `PostToolUse`。
-4. `agent_loop` 用原工具调用 ID 生成 `tool_result`，写回 `messages` 后再次请求模型。
-
-断点处重点看 `handler`、`args` 和 `name`。成功判据是文件写入、编辑和路径拒绝三条路径都各自只执行一次。
+执行前后的权限与 hooks 见第 10 节。
 
 #### 6. 工具池装配
 
-在 [mcp_tools.assemble_tool_pool](../src/agent_harness/mcp_tools.py) 下断点。
-选择「端到端自检（离线）」，无需改配置；对照工具 schema 与 handler 表。
+选择「端到端自检（离线）」，在 [host.py:335](../src/agent_harness/host.py#L335) 下断点。
+启动时在 [host.py:111](../src/agent_harness/host.py#L111) 登记工具来源，之后每次循环按顺序装配。
+表中“登记 → 执行”表示通过变量间接调用。
 
-这里返回两张表：`tools` 是发给模型的工具名称、说明和参数格式；`handlers` 是工具名称到 Python
-函数的映射。以 `write_file` 为例，可以沿下面的路径找实现：
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `assemble_tool_pool` | [host.py:335](../src/agent_harness/host.py#L335) | [host.py:119](../src/agent_harness/host.py#L119) | 装配本轮工具 |
+| 2 | `ToolRegistry.snapshot` | [host.py:123](../src/agent_harness/host.py#L123) | [tool_registry.py:36](../src/agent_harness/tool_registry.py#L36) | 统一收集工具描述、处理函数和权限 |
+| 3 | `builtin_definitions` | 登记 [host.py:112](../src/agent_harness/host.py#L112) → [tool_registry.py:44](../src/agent_harness/tool_registry.py#L44)（source） | [registrations.py:376](../src/agent_harness/registrations.py#L376) | 读取内置工具定义 |
+| 4 | `discover_tools` | 登记 [host.py:113](../src/agent_harness/host.py#L113) → [tool_registry.py:44](../src/agent_harness/tool_registry.py#L44)（source） | [mcp_tools.py:147](../src/agent_harness/mcp_tools.py#L147) | 读取已连接 MCP 的工具定义 |
 
-1. [工具 schema](../src/agent_harness/registrations.py) 告诉模型可以调用 `write_file`，以及需要哪些参数。
-2. [处理函数映射](../src/agent_harness/registrations.py) 把 `write_file` 指向 `file_tools.run_agent_write`。
-3. [run_agent_write](../src/agent_harness/file_tools.py#L202) 确定工作目录，再调用实际写文件的
-   [run_write](../src/agent_harness/file_tools.py#L144)。
-4. 模型发回 `write_file` 调用后，[host.agent_loop](../src/agent_harness/host.py#L262) 从 `handlers`
-   取出函数，交给 [call_tool_handler](../src/agent_harness/file_tools.py#L217) 执行。
-
-每轮重新装配工具池，是为了纳入运行中连接的 [MCP 工具](../src/agent_harness/mcp_tools.py)。
-`compact` 的特殊处理见下方[运行相关](#运行相关)。
+注册器在同一调用位置依次执行各来源；Workflow 来源定义在 [host.py:114](../src/agent_harness/host.py#L114)。
+`compact` 由主循环单独处理，见[运行相关](#运行相关)。
 
 #### 7. 任务生命周期
 
-在 [tasks.create_task](../src/agent_harness/tasks.py#L96)、
-[claim_task](../src/agent_harness/tasks.py#L241)、
-[complete_task](../src/agent_harness/tasks.py#L271) 下断点。
-选择「pytest（当前文件）」，把 `"${file}"` 改为
-`"tests/test_agent_teams.py::test_task_lifecycle_and_assignment_release"`；状态写入测试临时目录。
+选择「pytest（当前文件）」，将 `"${file}"` 替换为
+`"tests/test_agent_teams.py::test_task_lifecycle_and_assignment_release"`。
 
-这里观察任务从创建到释放分配的状态变化，可以沿下面的顺序找实现：
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `create_task` | [registrations.py:43](../src/agent_harness/registrations.py#L43) | [tasks.py:128](../src/agent_harness/tasks.py#L128) | 创建 pending 任务 |
+| 2 | `claim_task` | [registrations.py:111](../src/agent_harness/registrations.py#L111) | [tasks.py:357](../src/agent_harness/tasks.py#L357) | 认领任务，登记 owner 和工作目录 |
+| 3 | `complete_task` | [registrations.py:127](../src/agent_harness/registrations.py#L127) | [tasks.py:396](../src/agent_harness/tasks.py#L396) | 把任务标记为 completed |
+| 4 | `release_completed_assignment` | [host.py:422](../src/agent_harness/host.py#L422) | [tasks.py:484](../src/agent_harness/tasks.py#L484) | 本轮结束时释放已完成任务的分配记录 |
 
-1. [create_task](../src/agent_harness/tasks.py#L96) 生成运行时 ID，写入 `.tasks/<id>.json`，初始状态为 `pending`。
-2. [claim_task](../src/agent_harness/tasks.py#L241) 校验 owner 和依赖，把任务改成 `in_progress`，
-   同时登记 `teammate_assignments` 和工作目录。
-3. [complete_task](../src/agent_harness/tasks.py#L271) 校验认领者，把状态改成 `completed`，保留任务文件。
-4. `release_completed_assignment` 清理 owner 的分配记录，让工作目录不再被占用。
-
-依次看任务 JSON 的 `status`、`owner`、`worktree` 和 `teammate_assignments`。成功判据是任务保留为
-已完成状态，但 owner 的分配记录已经释放。
+前三步由模型请求对应工具触发；测试会直接调用这些函数。
 
 #### 8. 任务与 worktree 绑定
 
-在 [task_worktrees.create_worktree](../src/agent_harness/task_worktrees.py#L13)、
-[remove_worktree](../src/agent_harness/task_worktrees.py#L92) 下断点。
-选择「pytest（当前文件）」，把 `"${file}"` 改为
+选择「pytest（当前文件）」，将 `"${file}"` 替换为
 `"tests/test_agent_teams.py::test_cross_process_claim_waits_for_worktree_binding"`。
-测试会在临时 Git 仓库操作；跨进程认领在子进程内，默认只调试父进程的绑定与移除。
+测试使用临时 Git 仓库，子进程中的认领默认不进入父进程断点。
 
-这里观察任务和 Git worktree 的双向绑定，可以沿下面的顺序找实现：
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `create_worktree` | [registrations.py:29](../src/agent_harness/registrations.py#L29) | [task_worktrees.py:13](../src/agent_harness/task_worktrees.py#L13) | 检查任务处于 pending 且未认领 |
+| 2 | `run_git` | [task_worktrees.py:66](../src/agent_harness/task_worktrees.py#L66) | [worktrees.py:107](../src/agent_harness/worktrees.py#L107) | 执行 git worktree add，创建目录和分支 |
+| 3 | `save_task` | [task_worktrees.py:93](../src/agent_harness/task_worktrees.py#L93) | [tasks.py:230](../src/agent_harness/tasks.py#L230) | 把 worktree 名称绑定到任务 |
+| 4 | `claim_task` | [registrations.py:111](../src/agent_harness/registrations.py#L111) | [tasks.py:357](../src/agent_harness/tasks.py#L357) | 认领已绑定任务，采用对应工作目录 |
 
-1. [create_worktree](../src/agent_harness/task_worktrees.py#L13) 校验任务仍是 `pending` 且无 owner，
-   检查 Git 根目录、分支名和注册表，然后执行 `git worktree add`。
-2. 创建成功后把 `task.worktree` 写回任务文件；子进程的 [claim_task](../src/agent_harness/tasks.py#L241)
-   会等待同一任务锁，再认领这个已绑定任务。
-3. 任务完成并释放 owner 后，[remove_worktree](../src/agent_harness/task_worktrees.py#L92)
-   检查任务、租约、后台命令和工作区状态。
-4. 检查通过后执行 `git worktree remove`；工作目录删除，`wt/<name>` 分支保留。
+任务完成并释放分配记录后，再移除 worktree。该函数未登记为模型工具，下面标出测试中的直接调用：
 
-断点处重点看任务的 `worktree`、`.worktrees/<name>`、Git 注册表和 owner 租约。未完成、仍被占用或
-有运行中的后台命令时，移除应返回错误。
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `remove_worktree` | [test_agent_teams.py:137](../tests/test_agent_teams.py#L137)（测试调用） | [task_worktrees.py:103](../src/agent_harness/task_worktrees.py#L103) | 检查任务、占用和未提交改动 |
+| 2 | `run_git` | [task_worktrees.py:158](../src/agent_harness/task_worktrees.py#L158) | [worktrees.py:107](../src/agent_harness/worktrees.py#L107) | 执行 git worktree remove，保留分支 |
+| 3 | `save_task` | [task_worktrees.py:165](../src/agent_harness/task_worktrees.py#L165) | [tasks.py:230](../src/agent_harness/tasks.py#L230) | 清除任务中的 worktree 绑定 |
 
 #### 9. 队友线程与协议
 
-在 [teams.spawn_teammate_thread](../src/agent_harness/teams.py#L320)、
-[apply_plan_response](../src/agent_harness/teams.py#L255) 下断点。
-选择「pytest（当前文件）」，分别把 `"${file}"` 改为
+离线检查选择「pytest（当前文件）」，分别运行
 `"tests/test_agent_teams.py::test_reserved_teammate_names_do_not_shadow_runtime_identities"` 和
 `"tests/test_agent_teams.py::test_plan_rejection_requires_a_new_submission"`。
-这只覆盖启动前校验与计划协议；真实队友线程要用「Agent 交互（真实 API）」并提出协作任务。
+实际队友线程需选择「Agent 交互（真实 API）」并提出协作任务。
 
-这里观察队友登记、计划审批和消息协议，可以沿下面的顺序找实现：
+**启动与执行：**
 
-1. [spawn_teammate_thread](../src/agent_harness/teams.py#L320) 校验名称，登记 `active_teammates`、
-   `plan_gates` 和 `assignment_versions`；任务认领失败时回滚这些登记。
-2. 队友提交计划后写入 `pending_requests`，Lead 通过 `run_review_plan` 设置 approved 或 rejected。
-3. [apply_plan_response](../src/agent_harness/teams.py#L255) 校验 sender、target、request_id、任务版本
-   和状态，只有匹配当前计划才更新 `plan_gates`。
-4. 计划被拒绝时队友保持等待，新计划必须生成新的 `request_id`；旧回复不能解锁工具。
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `spawn_teammate_thread` | [registrations.py:142](../src/agent_harness/registrations.py#L142) | [teams.py:381](../src/agent_harness/teams.py#L381) | 校验名称并登记队友 |
+| 2 | `claim_task` | [teams.py:409](../src/agent_harness/teams.py#L409) | [tasks.py:357](../src/agent_harness/tasks.py#L357) | 有初始任务时由队友认领 |
+| 3 | `run` | [teams.py:587](../src/agent_harness/teams.py#L587)（线程启动） | [teams.py:554](../src/agent_harness/teams.py#L554) | 启动队友线程，退出时清理登记 |
+| 4 | `run_loop` | [teams.py:562](../src/agent_harness/teams.py#L562) | [teams.py:468](../src/agent_harness/teams.py#L468) | 持续处理队友消息和任务 |
+| 5 | `create_teammate_session` | [teams.py:486](../src/agent_harness/teams.py#L486) | [teams.py:290](../src/agent_harness/teams.py#L290) | 装配队友的模型执行器 |
+| 6 | `TeammateSession.run` | [teams.py:499](../src/agent_harness/teams.py#L499) | [teammate_session.py:161](../src/agent_harness/teammate_session.py#L161) | 请求模型并处理工具调用 |
 
-先用两个 pytest 用例观察保留名称和计划拒绝，再用「Agent 交互（真实 API）」提出协作任务查看真实
-队友线程的收件箱与最终回复。
+**计划审批：**
+
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `_teammate_submit_plan` | [teams.py:301](../src/agent_harness/teams.py#L301)（回调内调用） | [teams.py:596](../src/agent_harness/teams.py#L596) | 队友通过提交回调发送计划并生成 request_id |
+| 2 | `run_review_plan` | 登记 [registrations.py:347](../src/agent_harness/registrations.py#L347) → [file_tools.py:295](../src/agent_harness/file_tools.py#L295)（handler） | [teams.py:666](../src/agent_harness/teams.py#L666) | Lead 通过工具分发批准或拒绝计划 |
+| 3 | `apply_plan_response` | [teams.py:457](../src/agent_harness/teams.py#L457) | [teams.py:305](../src/agent_harness/teams.py#L305) | 队友收信后校验请求和任务版本，更新门禁 |
+
+计划被拒绝后必须重新提交；旧审批回复不能解锁新任务。
 
 #### 10. 权限与 hooks
 
-在 [hooks.permission_hook](../src/agent_harness/hooks.py#L34)、
-[trigger_hooks](../src/agent_harness/hooks.py#L25) 下断点。
-选择「pytest（当前文件）」，分别把 `"${file}"` 改为
+选择「pytest（当前文件）」，分别运行
 `"tests/test_permissions.py::test_file_paths_must_stay_inside_the_workspace"` 和
 `"tests/test_permissions.py::test_hooks_return_the_first_non_none_result"`。
 
-这里观察工具执行前后的 hook 链，可以沿下面的顺序找实现：
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `trigger_hooks（UserPromptSubmit）` | [cli.py:91](../src/agent_harness/cli.py#L91) | [hooks.py:30](../src/agent_harness/hooks.py#L30) | 用户提交问题时触发 |
+| 2 | `trigger_hooks（PreToolUse）` | [host.py:447](../src/agent_harness/host.py#L447) | [hooks.py:30](../src/agent_harness/hooks.py#L30) | 执行工具前按登记顺序检查 |
+| 3 | `permission_hook` | 登记 [hooks.py:118](../src/agent_harness/hooks.py#L118) → [hooks.py:38](../src/agent_harness/hooks.py#L38)（callback） | [hooks.py:45](../src/agent_harness/hooks.py#L45) | 检查命令、文件路径和 MCP 权限 |
+| 4 | `call_tool_handler` | [host.py:481](../src/agent_harness/host.py#L481) | [file_tools.py:285](../src/agent_harness/file_tools.py#L285) | 权限通过后执行工具 |
+| 5 | `trigger_hooks（PostToolUse）` | [host.py:483](../src/agent_harness/host.py#L483) | [hooks.py:30](../src/agent_harness/hooks.py#L30) | 工具执行后触发 |
+| 6 | `trigger_hooks（Stop）` | [host.py:395](../src/agent_harness/host.py#L395) | [hooks.py:30](../src/agent_harness/hooks.py#L30) | 后续模型回复不再请求工具时触发 |
 
-1. [trigger_hooks](../src/agent_harness/hooks.py#L25) 按注册顺序调用某个事件的回调，遇到第一个
-   非 `None` 返回值就停止。
-2. [permission_hook](../src/agent_harness/hooks.py#L34) 检查 shell deny list、工作区路径、MCP 策略
-   和是否处于主线程；返回拒绝文本时，`agent_loop` 不再调用工具 handler。
-3. 权限通过后执行工具，再触发 `PostToolUse`；`Stop` 和 `UserPromptSubmit` 也复用同一分发函数。
-4. 测试中的第三个回调不会执行，因为第二个回调已经返回 `stop here`。
-
-断点处分别观察 `event`、回调列表和 `block`。路径越界、异步确认和回调短路应分别落到对应分支。
+钩子拒绝时停止后续检查，也不执行工具。队友执行器采用相同的工具 hooks。
 
 #### 11. 后台任务 / cron
 
-在 [scheduler.start_background_task](../src/agent_harness/scheduler.py#L42)、
-[run_schedule_cron](../src/agent_harness/scheduler.py#L381) 下断点。
-选择「pytest（当前文件）」，分别把 `"${file}"` 改为
+选择「pytest（当前文件）」，分别运行
 `"tests/test_scheduler.py::test_completed_result_is_collected_once"` 和
 `"tests/test_scheduler.py::test_cron_tools_schedule_list_and_cancel"`。
-这两个测试不触发真实时钟；要看 [cron_scheduler_loop](../src/agent_harness/scheduler.py#L326)，
-需用「Agent 交互（真实 API）」创建定时任务并等待。
+真实时钟触发需在交互会话中创建定时任务并等待。
 
-这里包含两条独立路径，可以沿下面的顺序找实现：
+**后台 bash：**
 
-1. 后台 bash 由 [start_background_task](../src/agent_harness/scheduler.py#L42) 创建 `bg_id`，登记
-   `background_tasks` 后启动 worker；worker 把输出放进 `background_results` 并更新状态。
-2. [collect_background_results](../src/agent_harness/scheduler.py#L96) 先保存长输出全文并构造整批
-   `task_notification`，成功后移除记录；保存失败整批保持待交付。下一轮由
-   `inject_background_notifications` 写入历史，长通知的 `full_output` 可用于读取全文。
-3. cron 工具 [run_schedule_cron](../src/agent_harness/scheduler.py#L381) 校验表达式并写入
-   `scheduled_jobs`；durable 任务同时写 `.scheduled_tasks.json`。
-4. `run_list_crons` 展示当前任务，`run_cancel_cron` 删除任务；真实时钟场景再由
-   `cron_scheduler_loop` 把到期任务放进 `cron_queue`。
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `should_run_background` | [host.py:458](../src/agent_harness/host.py#L458) | [scheduler.py:35](../src/agent_harness/scheduler.py#L35) | 检查 bash 的后台标志 |
+| 2 | `start_background_task` | [host.py:462](../src/agent_harness/host.py#L462) | [scheduler.py:47](../src/agent_harness/scheduler.py#L47) | 登记后台任务并启动线程 |
+| 3 | `worker` | [scheduler.py:101](../src/agent_harness/scheduler.py#L101)（线程目标）→ [scheduler.py:103](../src/agent_harness/scheduler.py#L103)（启动） | [scheduler.py:57](../src/agent_harness/scheduler.py#L57) | 在线程中执行命令，保存状态和输出 |
+| 4 | `inject_background_notifications` | [host.py:316](../src/agent_harness/host.py#L316) | [host.py:206](../src/agent_harness/host.py#L206) | 后续循环中收取已完成通知 |
+| 5 | `collect_background_results` | [host.py:216](../src/agent_harness/host.py#L216) | [scheduler.py:113](../src/agent_harness/scheduler.py#L113) | 保存长输出并交付通知，成功后清理记录 |
 
-后台测试应看到 `running → completed → 已收集并删除`，cron 测试应看到 schedule、list、cancel 的
-状态变化；两类通知都要在模型下一轮请求中出现。
+**cron 创建：**
+
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `run_schedule_cron` | 登记 [registrations.py:294](../src/agent_harness/registrations.py#L294) → [file_tools.py:295](../src/agent_harness/file_tools.py#L295)（handler） | [scheduler.py:459](../src/agent_harness/scheduler.py#L459) | 通过工具分发接收定时请求 |
+| 2 | `schedule_job` | [scheduler.py:466](../src/agent_harness/scheduler.py#L466) | [scheduler.py:315](../src/agent_harness/scheduler.py#L315) | 登记任务，按 durable 设置持久化 |
+| 3 | `validate_cron` | [scheduler.py:324](../src/agent_harness/scheduler.py#L324) | [scheduler.py:261](../src/agent_harness/scheduler.py#L261) | 校验时间表达式 |
+
+**cron 到期触发：**
+
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `cron_scheduler_loop` | [scheduler.py:511](../src/agent_harness/scheduler.py#L511)（线程启动） | [scheduler.py:386](../src/agent_harness/scheduler.py#L386) | 服务启动后在线程中持续检查到期任务 |
+| 2 | `cron_matches` | [scheduler.py:401](../src/agent_harness/scheduler.py#L401) | [scheduler.py:201](../src/agent_harness/scheduler.py#L201) | 检查当前时间是否匹配 |
+| 3 | `_enqueue_due_job` | [scheduler.py:402](../src/agent_harness/scheduler.py#L402) | [scheduler.py:368](../src/agent_harness/scheduler.py#L368) | 把到期任务放入队列 |
+| 4 | `consume_cron_queue` | [host.py:295](../src/agent_harness/host.py#L295) | [scheduler.py:408](../src/agent_harness/scheduler.py#L408) | 主循环取出到期任务并注入历史 |
+| 5 | `call_llm` | [host.py:341](../src/agent_harness/host.py#L341) | [host.py:225](../src/agent_harness/host.py#L225) | 把定时提示词交给模型 |
+| 6 | `acknowledge_cron_jobs` | [host.py:365](../src/agent_harness/host.py#L365) | [scheduler.py:419](../src/agent_harness/scheduler.py#L419) | 模型响应成功后确认交付 |
+
+**查看与取消是另外两个工具入口：**
+
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `run_list_crons` | 登记 [registrations.py:297](../src/agent_harness/registrations.py#L297) → [file_tools.py:295](../src/agent_harness/file_tools.py#L295)（handler） | [scheduler.py:472](../src/agent_harness/scheduler.py#L472) | 查看当前定时任务 |
+| 2 | `run_cancel_cron` | 登记 [registrations.py:302](../src/agent_harness/registrations.py#L302) → [file_tools.py:295](../src/agent_harness/file_tools.py#L295)（handler） | [scheduler.py:488](../src/agent_harness/scheduler.py#L488) | 接收取消请求 |
+| 3 | `cancel_job` | [scheduler.py:494](../src/agent_harness/scheduler.py#L494) | [scheduler.py:346](../src/agent_harness/scheduler.py#L346) | 删除对应任务 |
 
 #### 12. 工作流单次 agent 调用
 
-在 [ExecutionState.agent](../src/agent_harness/workflow_runtime.py#L480) 下断点。
-选择「Workflow demo（离线，不联网）」，无需改配置；使用 mock runner，但会在启动目录写入 `.runtime/`。
+选择「Workflow demo（离线，不联网）」。demo 使用 mock runner，运行记录写入启动目录的 `.runtime/`。
 
-这里观察一次 workflow 子 agent 的预算、校验和落盘，可以沿下面的顺序找实现：
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `ExecutionState.agent` | [workflow_demo.py:100](../src/agent_harness/workflow_demo.py#L100) | [workflow_runtime.py:548](../src/agent_harness/workflow_runtime.py#L548) | 执行一个工作流步骤 |
+| 2 | `WorkflowJournal.key` | [workflow_runtime.py:557](../src/agent_harness/workflow_runtime.py#L557) | [workflow_runtime.py:410](../src/agent_harness/workflow_runtime.py#L410) | 生成步骤缓存键 |
+| 3 | `_run_agent` | [workflow_runtime.py:559](../src/agent_harness/workflow_runtime.py#L559) | [workflow_runtime.py:561](../src/agent_harness/workflow_runtime.py#L561) | 进入缓存检查与执行流程 |
+| 4 | `WorkflowJournal.cached` | [workflow_runtime.py:568](../src/agent_harness/workflow_runtime.py#L568) | [workflow_runtime.py:420](../src/agent_harness/workflow_runtime.py#L420) | 先检查已有结果，命中则跳过 runner |
+| 5 | `Budget.remaining` | [workflow_runtime.py:580](../src/agent_harness/workflow_runtime.py#L580) | [workflow_runtime.py:474](../src/agent_harness/workflow_runtime.py#L474) | 未命中时检查剩余预算 |
+| 6 | `MockAgentRunner.run` | 绑定 [cli.py:114](../src/agent_harness/cli.py#L114) → [workflow_runtime.py:585](../src/agent_harness/workflow_runtime.py#L585)（to_thread 目标） | [workflow_demo.py:25](../src/agent_harness/workflow_demo.py#L25) | 在线程中执行离线步骤 |
+| 7 | `SimpleJsonSchema.validate` | [workflow_runtime.py:591](../src/agent_harness/workflow_runtime.py#L591) | [workflow_runtime.py:202](../src/agent_harness/workflow_runtime.py#L202) | 检查结果格式，不合格时最多重试一次 |
+| 8 | `Budget.add` | [workflow_runtime.py:605](../src/agent_harness/workflow_runtime.py#L605) | [workflow_runtime.py:458](../src/agent_harness/workflow_runtime.py#L458) | 累计本次消费 |
+| 9 | `WorkflowJournal.record` | [workflow_runtime.py:610](../src/agent_harness/workflow_runtime.py#L610) | [workflow_runtime.py:428](../src/agent_harness/workflow_runtime.py#L428) | 记录步骤结果和累计用量 |
 
-1. [ExecutionState.agent](../src/agent_harness/workflow_runtime.py#L480) 生成 label 和 journal key，检查缓存，
-   再检查 `Budget.remaining()` 与共享 agent 上限。
-2. 缓存未命中时，通过 `asyncio.to_thread` 调用 mock runner；返回的 `value/tokens` 先校验 schema，
-   再累计到 `task.usage` 和 `task.cumulative_usage`。
-3. [WorkflowJournal.record](../src/agent_harness/workflow_runtime.py#L380) 把 key、结果和累计用量追加到 journal，
-   同时更新内存 cache。
-4. [run_workflow](../src/agent_harness/workflow_runtime.py#L716) 保存 task/output 快照并把状态打印到终端。
-
-断点处重点看 `prompt`、`schema`、`label`、`Budget` 和 journal key。成功判据是 demo 完成、`.runtime/`
-位于启动目录，且没有真实 API 请求；把预算调小可观察超预算异常。
+整个工作流结束后，在 [workflow_runtime.py:739](../src/agent_harness/workflow_runtime.py#L739) 保存输出，在 [workflow_runtime.py:740](../src/agent_harness/workflow_runtime.py#L740) 保存任务快照。
 
 #### 13. journal 读写与 resume
 
-在 [WorkflowJournal.__init__](../src/agent_harness/workflow_runtime.py#L313)、
-[record](../src/agent_harness/workflow_runtime.py#L380)、
-[cached](../src/agent_harness/workflow_runtime.py#L377) 下断点。
-选择「pytest（当前文件）」，把 `"${file}"` 改为
-`"tests/test_workflow.py::test_resume_replays_at_budget_limit_without_spending_again"`；
-写入与恢复都在同一个调试进程中。
+选择「pytest（当前文件）」，将 `"${file}"` 替换为
+`"tests/test_workflow.py::test_resume_replays_at_budget_limit_without_spending_again"`。
 
-这里观察 journal 如何把一次运行变成可恢复的缓存，可以沿下面的顺序找实现：
+**首次运行：**
 
-1. [WorkflowJournal.__init__](../src/agent_harness/workflow_runtime.py#L313) 在新运行中创建空文件，在 resume
-   中逐行读取 JSON，恢复 `cache`、`historical_tokens` 和 `historical_agents`。
-2. [record](../src/agent_harness/workflow_runtime.py#L380) 写入 key、value、tokens 和累计用量，并立即 flush。
-3. [cached](../src/agent_harness/workflow_runtime.py#L377) 用相同语义 key 查找结果；命中时 `ExecutionState.agent`
-   直接返回缓存，不调用 runner，也不增加本次运行用量。
-4. 恢复第二个调用时，`Budget` 根据历史用量判断是否还能消费；超出上限会在真正调用 runner 前抛错。
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `WorkflowJournal.__init__` | [workflow_runtime.py:702](../src/agent_harness/workflow_runtime.py#L702)（构造） | [workflow_runtime.py:345](../src/agent_harness/workflow_runtime.py#L345) | 创建新的 journal 文件 |
+| 2 | `WorkflowJournal.cached` | [workflow_runtime.py:568](../src/agent_harness/workflow_runtime.py#L568) | [workflow_runtime.py:420](../src/agent_harness/workflow_runtime.py#L420) | 检查本步骤是否已有记录 |
+| 3 | `WorkflowJournal.record` | [workflow_runtime.py:610](../src/agent_harness/workflow_runtime.py#L610) | [workflow_runtime.py:428](../src/agent_harness/workflow_runtime.py#L428) | 步骤成功后追加记录并 flush |
 
-断点处对照 journal 文件和 `cache`。成功判据是恢复命中返回缓存结果，报告 `agents=0 tokens=0`，
-累计用量仍保持第一次运行的数值。
+**恢复运行：**
+
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `_read_snapshot` | [workflow_runtime.py:691](../src/agent_harness/workflow_runtime.py#L691) | [workflow_runtime.py:760](../src/agent_harness/workflow_runtime.py#L760) | 读取原运行的任务和参数 |
+| 2 | `WorkflowJournal.__init__` | [workflow_runtime.py:699](../src/agent_harness/workflow_runtime.py#L699)（构造） | [workflow_runtime.py:345](../src/agent_harness/workflow_runtime.py#L345) | 读取 journal，恢复缓存和历史消费 |
+| 3 | `WorkflowJournal.key` | [workflow_runtime.py:557](../src/agent_harness/workflow_runtime.py#L557) | [workflow_runtime.py:410](../src/agent_harness/workflow_runtime.py#L410) | 生成与原步骤对应的缓存键 |
+| 4 | `WorkflowJournal.cached` | [workflow_runtime.py:568](../src/agent_harness/workflow_runtime.py#L568) | [workflow_runtime.py:420](../src/agent_harness/workflow_runtime.py#L420) | 命中后复用结果，不再执行 runner |
+
+缓存未命中时，在 [workflow_runtime.py:580](../src/agent_harness/workflow_runtime.py#L580) 检查包含历史消费的剩余预算。
 
 #### 14. memory 选取 / 抽取
 
-在 [memory_runtime.select_relevant_memories](../src/agent_harness/memory_runtime.py#L278)、
-[extract_memories](../src/agent_harness/memory_runtime.py#L401) 下断点。
-选择「Agent 交互（真实 API）」，无需改配置，输入普通问题。
-没有已有 `.memory/` 记录时，选取会提前返回；抽取仍会调用模型。
+选择「Agent 交互（真实 API）」。没有已有记忆时跳过选取，正常回答结束后仍会进入抽取。
 
-这里观察记忆的“先选取、后抽取、再合并”顺序，可以沿下面的顺序找实现：
+**请求模型前选取记忆：**
 
-1. [list_memory_files](../src/agent_harness/memory_runtime.py#L197) 读取 `.memory/` 记录；没有记录或
-   没有最近用户文本时，`select_relevant_memories` 直接返回空列表。
-2. 有记录时，`select_relevant_memories` 把目录做成索引 prompt，解析模型返回的 JSON 下标；调用失败
-   时退回关键词排序，结果交给 `load_memories` 按字符预算读取正文。
-3. 一轮结束后，[extract_memories](../src/agent_harness/memory_runtime.py#L401) 把最近对话送给模型，
-   对每条候选执行 type、scope、description 和 body 校验。
-4. 校验通过的记录写入文件，再由 `consolidate_memories` 合并重复记录；未经校验的模型内容不会落盘。
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `select_relevant_memories` | [memory_runtime.py:381](../src/agent_harness/memory_runtime.py#L381) | [memory_runtime.py:309](../src/agent_harness/memory_runtime.py#L309) | 从当前记忆库筛选相关记录 |
+| 2 | `list_memory_files` | [memory_runtime.py:318](../src/agent_harness/memory_runtime.py#L318) | [memory_runtime.py:223](../src/agent_harness/memory_runtime.py#L223) | 读取记忆目录 |
+| 3 | `recent_user_text` | [memory_runtime.py:320](../src/agent_harness/memory_runtime.py#L320) | [memory_runtime.py:281](../src/agent_harness/memory_runtime.py#L281) | 取得最近用户文本作为查询 |
+| 4 | `extract_json_array` | [memory_runtime.py:345](../src/agent_harness/memory_runtime.py#L345) | [memory_runtime.py:268](../src/agent_harness/memory_runtime.py#L268) | 解析模型选中的记录下标 |
+| 5 | `read_memory_file` | [memory_runtime.py:383](../src/agent_harness/memory_runtime.py#L383) | [memory_runtime.py:211](../src/agent_harness/memory_runtime.py#L211) | 回到 load_memories 后读取选中正文 |
 
-先在 `.memory/` 放一条记录观察选取，再观察抽取 prompt、JSON 校验和合并结果；没有已有记录时，
-选取会提前返回，但抽取仍会调用模型。
+筛选请求失败时，在 [memory_runtime.py:363](../src/agent_harness/memory_runtime.py#L363) 调用关键词匹配，实现位于 [memory_runtime.py:293](../src/agent_harness/memory_runtime.py#L293)。
+
+**回答结束后抽取并整理记忆：**
+
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `extract_memories` | [host.py:175](../src/agent_harness/host.py#L175) | [memory_runtime.py:438](../src/agent_harness/memory_runtime.py#L438) | 从最近对话中抽取候选记忆 |
+| 2 | `validate_memory_record` | [memory_runtime.py:482](../src/agent_harness/memory_runtime.py#L482) | [memory_runtime.py:407](../src/agent_harness/memory_runtime.py#L407) | 检查候选记录是否合法 |
+| 3 | `should_store_memory` | [memory_runtime.py:490](../src/agent_harness/memory_runtime.py#L490) | [memory_runtime.py:98](../src/agent_harness/memory_runtime.py#L98) | 检查是否值得保存及是否重复 |
+| 4 | `write_memory_file` | [memory_runtime.py:492](../src/agent_harness/memory_runtime.py#L492) | [memory_runtime.py:144](../src/agent_harness/memory_runtime.py#L144) | 写入通过检查的记忆 |
+| 5 | `rebuild_memory_index` | [memory_runtime.py:163](../src/agent_harness/memory_runtime.py#L163) | [memory_runtime.py:166](../src/agent_harness/memory_runtime.py#L166) | 更新索引 |
+| 6 | `consolidate_memories` | [host.py:176](../src/agent_harness/host.py#L176) | [memory_runtime.py:508](../src/agent_harness/memory_runtime.py#L508) | 有新记忆写入时合并重复记录 |
 
 #### 15. 启动与 `/goal` 拦截
 
-在 [cli.run_cli](../src/agent_harness/cli.py#L45)、
-[handle_goal_command](../src/agent_harness/cli.py#L22) 下断点。
-选择「Agent 交互（真实 API）」，无需改配置。只输入 `/goal` 或 `/goal clear` 再输入
-`q`，即可离线看入口；输入普通问题或 `/goal <条件>` 才会发送真实请求。
+选择「Agent 交互（真实 API）」。仅输入 `/goal`、`/goal clear` 和 `q` 可观察本地命令；
+普通问题或 `/goal <条件>` 会继续进入模型调用。
 
-这里观察 CLI 从输入到主循环的分流，可以沿下面的顺序找实现：
+**启动与读取输入：**
 
-1. [run_cli](../src/agent_harness/cli.py#L45) 设置 `core.CLI_ACTIVE`，启动 runtime services，创建
-   `history`、`context` 和后台 `async_event_loop`。
-2. 每次读取输入后先调用 [handle_goal_command](../src/agent_harness/cli.py#L22)，判断是否为 `/goal`。
-3. `/goal` 只打印状态，`/goal clear` 清除目标；两者返回 `handled=True`，不会进入 `agent_loop`。
-4. `/goal <条件>` 设置目标，返回 `handled=False` 和去掉命令前缀的条件文本；普通问题也返回
-   `handled=False`，随后触发 `UserPromptSubmit`、追加历史并调用 `host.agent_loop`。
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `run_cli` | [cli.py:120](../src/agent_harness/cli.py#L120) | [cli.py:50](../src/agent_harness/cli.py#L50) | 启动交互会话 |
+| 2 | `start_runtime_services` | [cli.py:58](../src/agent_harness/cli.py#L58) | [scheduler.py:501](../src/agent_harness/scheduler.py#L501) | 恢复定时任务并启动调度线程 |
+| 3 | `async_event_loop` | [cli.py:70](../src/agent_harness/cli.py#L70)（线程目标）→ [cli.py:73](../src/agent_harness/cli.py#L73)（启动） | [host.py:520](../src/agent_harness/host.py#L520) | 后台线程轮询事件并唤醒主 agent |
+| 4 | `handle_goal_command` | [cli.py:85](../src/agent_harness/cli.py#L85) | [cli.py:22](../src/agent_harness/cli.py#L22) | 读取输入后识别 /goal 命令 |
 
-断点处重点看 `handled`、替换后的 `query`、`history` 和 `session_state`。成功判据是本地命令不产生
-API 调用，普通问题和带条件目标各只进入一次正常主循环。
+**`/goal` 的三个分支：**
+
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `GoalController.status` | [cli.py:37](../src/agent_harness/cli.py#L37) | [goal.py:326](../src/agent_harness/goal.py#L326) | /goal 查看状态，跳过主循环 |
+| 2 | `GoalController.clear` | [cli.py:41](../src/agent_harness/cli.py#L41) | [goal.py:307](../src/agent_harness/goal.py#L307) | /goal clear 清除目标，跳过主循环 |
+| 3 | `GoalController.set_goal` | [cli.py:44](../src/agent_harness/cli.py#L44) | [goal.py:275](../src/agent_harness/goal.py#L275) | /goal <条件> 设置目标，随后进入主循环 |
+
+**普通问题或设置目标后：**
+
+| 顺序 | 函数 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| 1 | `trigger_hooks` | [cli.py:91](../src/agent_harness/cli.py#L91) | [hooks.py:30](../src/agent_harness/hooks.py#L30) | 触发 UserPromptSubmit |
+| 2 | `agent_loop` | [cli.py:95](../src/agent_harness/cli.py#L95) | [host.py:275](../src/agent_harness/host.py#L275) | 处理已写入历史的用户请求 |
+| 3 | `print_turn_assistants` | [cli.py:96](../src/agent_harness/cli.py#L96) | [host.py:506](../src/agent_harness/host.py#L506) | 展示本轮助手回复 |
+
+`async_event_loop` 是在线程中运行的普通函数，不是 asyncio 协程。
 
 行号会随源码变化；链接不对时按函数名搜索。
 
@@ -530,7 +578,7 @@ Remote-WSL 已让断点自动生效，一般不需要。真要 attach：在 WSL 
 ### 运行相关
 
 - **`compact` 没有 handler**。它是 `BUILTIN_TOOLS` 里的 schema，由
-  [ManualCompaction.handle_tool_use](../src/agent_harness/compaction.py#L591) 处理，不进 handler 表。
+  [ManualCompaction.handle_tool_use](../src/agent_harness/compaction.py#L608) 处理，不进 handler 表。
   所以"27 工具 / 26 handler"是正常的。
 - **主动压缩每轮只执行一次**。压缩后本轮不再向模型提供 `compact`；下一条用户请求可以再次主动
   压缩。上下文超限触发的自动压缩不受此限制。

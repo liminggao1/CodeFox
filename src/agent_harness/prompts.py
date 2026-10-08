@@ -65,6 +65,12 @@ PROMPT_SECTIONS = {
 
 
 def assemble_system_prompt(context: dict) -> str:
+    """将固定规则、环境信息和当前上下文拼成系统提示词。
+
+    输入：context 含 memory_catalog、memories、connected_mcp 和 active_teammates。
+    返回：完整 system 字符串，包含启动目录、当前时间和 skill 目录；
+        空的记忆、MCP 和队友段落不添加。这里只组装文本，不请求模型。
+    """
     # 每轮根据实时上下文重建系统提示词，让 memory、skills、MCP 状态和队友可见。
     sections = [PROMPT_SECTIONS["identity"],
                 PROMPT_SECTIONS["tools"],

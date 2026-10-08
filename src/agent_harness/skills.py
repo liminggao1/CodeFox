@@ -42,6 +42,11 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def scan_skills():
+    """扫描随包分发的 skill 目录并重建内存索引。
+
+    返回：None。清空并填充 SKILL_REGISTRY；目录不存在时索引为空。
+        读取直接子目录中的 SKILL.md，保存名称、描述和全文，跳过越界路径。
+    """
     SKILL_REGISTRY.clear()
     if not core.SKILLS_DIR.exists():
         return
@@ -73,6 +78,10 @@ scan_skills()
 
 
 def list_skills() -> str:
+    """生成可放入系统提示词的 skill 名称与描述目录。
+
+    返回：每项一行的字符串；索引为空时返回无 skill 提示，不读取正文或请求模型。
+    """
     if not SKILL_REGISTRY:
         return "(no skills found)"
     return "\n".join(
@@ -81,6 +90,11 @@ def list_skills() -> str:
 
 
 def load_skill(name: str) -> str:
+    """按已扫描名称加载 skill 全文，作为工具结果返回模型。
+
+    输入：name 为 SKILL_REGISTRY 中的名称。
+    返回：SKILL.md 原文；未找到时返回错误及可用名称，不重新扫描目录。
+    """
     skill = SKILL_REGISTRY.get(name)
     if not skill:
         available = ", ".join(SKILL_REGISTRY.keys()) or "(none)"

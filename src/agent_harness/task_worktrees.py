@@ -11,6 +11,17 @@ from . import worktrees
 
 
 def create_worktree(name: str, task_id: str) -> str:
+    """从当前 HEAD 创建独立 Git 工作目录，并绑定到尚未认领的任务。
+
+    输入：
+        name: 唯一 worktree 名称，用于目录 ``.worktrees/<name>`` 和新分支
+            ``wt/<name>``。
+        task_id: 已存在、状态为 pending、无 owner 且未绑定 worktree 的任务 ID。
+    返回：
+        成功、拒绝原因、Git 错误或部分操作结果的字符串。
+        成功时创建目录和分支，再保存 ``task.worktree``；全过程使用与任务认领
+        相同的存储锁。部分失败时保留已产生的 Git 数据，供人工恢复。
+    """
     error = worktrees.validate_worktree_name(name)
     if error:
         return f"Error: {error}"
@@ -90,6 +101,18 @@ def create_worktree(name: str, task_id: str) -> str:
 
 
 def remove_worktree(name: str, discard_changes: bool = False) -> str:
+    """移除已完成任务不再占用的工作目录，并清除任务中的绑定信息。
+
+    输入：
+        name: 已注册且绑定了任务的 worktree 名称。
+        discard_changes: 是否允许 Git 丢弃未提交文件，包括未跟踪和被忽略的文件。
+            默认为 False，目录存在这些文件或改动时拒绝移除。
+    返回：
+        成功、拒绝原因、Git 错误或部分成功结果的字符串。
+        要求绑定任务均已完成、分配记录不再占用目录，且目录内没有运行中的后台命令。
+        成功时删除目录并清空 ``task.worktree``，保留分支和任务记录。
+        Git 已移除目录但保存解绑信息失败时，会返回部分成功提示。
+    """
     error = worktrees.validate_worktree_name(name)
     if error:
         return f"Error: {error}"

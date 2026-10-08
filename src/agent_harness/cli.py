@@ -20,7 +20,12 @@ from . import core, host, workflow_runtime, workflow_demo
 
 
 def handle_goal_command(query: str) -> tuple[bool, str]:
-    """在本地处理 /goal，返回（是否已处理，替换后的输入）。"""
+    """在本地拦截目标状态查询、清除和设置命令。
+
+    输入：query 为用户输入。
+    返回：(handled, 后续输入)。查询或清除返回 (True, '')，不请求模型；
+        设置目标返回 (False, 条件文本)，让条件继续进入主循环；普通输入原样返回。
+    """
     stripped = query.strip()
     # 非 /goal 命令：原样返回，交给正常问答流程
     if not (stripped == "/goal" or stripped.startswith("/goal ")):
@@ -43,7 +48,12 @@ def handle_goal_command(query: str) -> tuple[bool, str]:
 
 
 def run_cli() -> None:
-    """交互式命令行主循环：读用户输入，驱动 agent 回答，直到退出。"""
+    """启动交互会话，读取用户输入并驱动主 agent。
+
+    返回：None。启动运行时服务和后台事件线程，共享历史与当前请求状态；
+        本地目标命令直接处理，其他输入在 agent_lock 内进入主循环并显示回复。
+        空输入、q、exit、EOF 或键盘中断会结束交互。
+    """
     core.CLI_ACTIVE = True              # 标记当前处于 CLI 模式（供其他模块判断）
     host.start_runtime_services()       # 启动运行时服务（只做一次）
 
@@ -89,7 +99,11 @@ def run_cli() -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """程序总入口：根据命令行参数决定跑 demo 还是交互模式。"""
+    """根据命令行参数选择离线工作流示例或交互会话。
+
+    输入：argv 为不含程序名的参数列表；None 时读取 sys.argv[1:]。
+    返回：None。workflow 子命令安装模拟 runner 并运行 demo/resume，否则运行 CLI。
+    """
     # argv 没传（是 None）时，从系统命令行参数读取（去掉程序名）
     if argv is None:
         argv = sys.argv[1:]

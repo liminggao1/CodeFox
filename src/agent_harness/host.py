@@ -117,7 +117,10 @@ tool_registry.REGISTRY.configure(
 
 
 def assemble_tool_pool() -> tuple[list[dict], dict]:
-    """Return the model tools and handlers from the single registry snapshot."""
+    """从同一个注册器快照取得模型工具描述和处理器映射。
+
+    返回：(tools, handlers)，分别为新列表和新字典；装配或名称冲突异常继续抛出。
+    """
     snapshot = tool_registry.REGISTRY.snapshot()
     return list(snapshot.tools), dict(snapshot.handlers)
 
@@ -125,7 +128,11 @@ GOAL = None
 
 
 def configure_goal(evaluator_model: str | None = None):
-    """创建 Stop 边界使用的会话目标控制器。"""
+    """创建并替换会话级目标控制器。
+
+    输入：evaluator_model 为可选评估模型；未指定时按环境变量和 core.MODEL 选择。
+    返回：新 GoalController，同时写入全局 GOAL；这里只配置评估器，不请求模型。
+    """
     global GOAL
     import os
     model = (evaluator_model
@@ -145,6 +152,12 @@ configure_goal()
 def spawn_teammate(name: str, role: str, prompt: str,
                    task_id: str | None = None,
                    require_plan: bool = False) -> str:
+    """将队友启动请求转交给团队运行时。
+
+    输入：name/role/prompt 为队友名称、角色和初始指令；task_id 为可选初始任务；
+        require_plan 为是否要求计划获批。
+    返回：团队模块的启动确认或错误文本，不等待队友完成。
+    """
     return teams.spawn_teammate_thread(name, role, prompt, task_id, require_plan)
 
 
@@ -239,7 +252,8 @@ def evaluate_goal(messages: list):
     Args:
         messages: 当前完整对话历史，供目标评估器判断完成条件。
     Returns:
-        ``StopDecision`` 目标决定；没有活动目标或评估失败时返回 ``None``。
+        ``StopDecision``，其 action 表示继续、完成、延迟或错误等结果。
+        无活动目标或外层执行异常时返回 None；评估器内部失败通常返回 error 决定。
     """
     # 没有创建目标控制器，或控制器当前没有活动目标时，不需要评估。
     if GOAL is None or GOAL.active is None:
@@ -267,7 +281,6 @@ def agent_loop(messages: list, active_request: str):
     Returns:
         ``None``。执行结果通过更新 ``messages`` 和相关运行时状态交付。
     """
-    # TODO 提醒计数在多轮调用之间共享。
     global rounds_since_todo
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
@@ -492,6 +505,11 @@ def agent_loop(messages: list, active_request: str):
 
 
 def print_turn_assistants(messages: list, turn_start: int):
+    """向终端输出本轮新产生的助手文本块。
+
+    输入：messages 为历史；turn_start 为本轮开始前的历史长度。
+    返回：None。只打印新增 assistant 消息的文本，不打印工具请求或修改历史。
+    """
     for msg in messages[turn_start:]:
         if msg.get("role") != "assistant":
             continue
@@ -501,6 +519,13 @@ def print_turn_assistants(messages: list, turn_start: int):
 
 
 def async_event_loop(history: list, session_state: dict):
+    """在后台线程轮询运行时事件，并串行唤醒主 agent。
+
+    输入：history 为与 CLI 共享的历史；session_state 保存当前 active_user_request。
+    返回：正常情况下持续循环。每秒检查 cron、Lead 信箱和后台任务，
+        有事件时在 agent_lock 内追加团队消息、执行 agent_loop 并打印新增回复。
+        这是普通同步函数，函数名中的 async 不表示 asyncio 协程。
+    """
     while True:
         time.sleep(1)
         with agent_lock:

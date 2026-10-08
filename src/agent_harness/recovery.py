@@ -39,7 +39,12 @@ class RecoveryState:
         return self._recovery_count
 
     def accept_response(self, stop_reason: str) -> str:
-        """Return retry, continue, stop or accept without changing conversation history."""
+        """根据停止原因更新恢复额度并决定如何处理响应。
+
+        输入：stop_reason 为模型停止原因。
+        返回：首次 max_tokens 提高额度并返回 retry；后续按额度返回 continue 或 stop；
+            正常响应重置输出额度和升级标志，返回 accept。不直接修改对话历史。
+        """
         if stop_reason == "max_tokens":
             if not self._has_escalated:
                 self._has_escalated = True
@@ -54,7 +59,10 @@ class RecoveryState:
         return "accept"
 
     def claim_reactive_compaction(self) -> bool:
-        """Consume this turn's single reactive compaction opportunity."""
+        """申请本回合唯一一次上下文过长后的压缩机会。
+
+        返回：首次申请记录已使用并返回 True，后续申请返回 False。
+        """
         if self._reactive_compaction_claimed:
             return False
         self._reactive_compaction_claimed = True
@@ -67,7 +75,10 @@ class RecoveryState:
         self._consecutive_529 = 0
 
     def note_overload(self) -> bool:
-        """Count consecutive overloads and report whether the model was switched."""
+        """累计连续过载，并在达到阈值时切换备用模型。
+
+        返回：发生切换时为 True，并清零过载次数；未满足切换条件时为 False。
+        """
         self._consecutive_529 += 1
         if self._consecutive_529 >= core.MAX_CONSECUTIVE_529 and core.FALLBACK_MODEL:
             self._current_model = core.FALLBACK_MODEL
@@ -133,6 +144,12 @@ def with_retry(fn, state: RecoveryState):
 
 
 def is_prompt_too_long_error(e: Exception) -> bool:
+    """根据异常文本识别输入上下文过长错误。
+
+    输入：e 为模型调用异常。
+    返回：匹配 prompt/long、context_length_exceeded 或 max_context_window 时为 True；
+        协议响应错误始终为 False，避免误触发压缩。
+    """
     if isinstance(e, ProtocolResponseError):
         return False
     msg = str(e).lower()

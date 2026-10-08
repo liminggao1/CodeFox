@@ -37,6 +37,11 @@ class MCPClient:
         self._handlers = dict(handlers)
 
     def call_tool(self, tool_name: str, args: dict) -> str:
+        """按原始工具名称执行模拟 MCP 处理器。
+
+        输入：tool_name 为服务器内部名称；args 为展开成关键字参数的字典。
+        返回：字符串结果；未知工具或处理器异常转换成 MCP 错误文本。
+        """
         handler = self._handlers.get(tool_name)
         if not handler:
             return f"MCP error: unknown tool '{tool_name}'"
@@ -119,6 +124,12 @@ MOCK_SERVERS = {
 
 
 def connect_mcp(name: str) -> str:
+    """连接项目内置的模拟 MCP 服务器并登记客户端。
+
+    输入：name 为 MOCK_SERVERS 中的服务器名称。
+    返回：连接及发现工具的提示，或重复连接、未知服务器的提示。
+        成功时写入 mcp_clients，下次工具池装配可见；当前实现不连接外部服务器。
+    """
     if name in mcp_clients:
         return f"MCP server '{name}' already connected"
     factory = MOCK_SERVERS.get(name)
@@ -134,7 +145,11 @@ def connect_mcp(name: str) -> str:
 
 
 def discover_tools() -> list[ToolDefinition]:
-    """Return normalized MCP definitions; registry handles cross-source collisions."""
+    """将已连接 MCP 工具转换为统一注册器接收的定义。
+
+    返回：ToolDefinition 列表，包含 mcp__ 前缀名称、schema、绑定处理器和 host 权限。
+        名称过长或 schema 不是对象时抛出 ValueError；跨来源重名由注册器检查。
+    """
     entries = []
     for server_name, mcp_client in mcp_clients.items():
         safe_server = normalize_mcp_name(server_name)

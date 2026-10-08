@@ -33,6 +33,11 @@ background_lock = threading.Lock()
 
 
 def should_run_background(tool_name: str, tool_input: dict) -> bool:
+    """判断工具请求是否应由后台线程执行。
+
+    输入：tool_name 为工具名；tool_input 为参数字典。
+    返回：仅 bash 且 run_in_background 明确为 True 时返回 True。
+    """
     return (
         tool_name == "bash"
         and tool_input.get("run_in_background") is True
@@ -40,10 +45,22 @@ def should_run_background(tool_name: str, tool_input: dict) -> bool:
 
 
 def start_background_task(block, handlers: dict) -> str:
+    """登记后台命令并启动守护线程，立即向主循环返回任务 ID。
+
+    输入：block 为 bash 工具请求；handlers 为分发表，当前实现直接执行共享 shell 函数。
+    返回：bg_ 前缀的 ID。启动时固定当前任务目录，结果稍后由收集器交付。
+        启动线程失败会撤销登记并抛出异常；权限须由调用方提前检查。
+    """
     global _bg_counter
     command = block.input.get("command", block.name)
 
     def worker():
+        """在固定的任务目录执行后台命令，并登记最终结果。
+
+        输入：使用外层捕获的 block、cwd、cwd_error 和 bg_id。
+        返回：None。执行命令和 PostToolUse，写入 completed/failed 及文本结果；
+            执行或 hook 错误会转换成失败结果，已被移除的登记不再写回。
+        """
         try:
             if block.name != "bash":
                 raise ValueError("only bash can run in the background")
@@ -94,7 +111,12 @@ def start_background_task(block, handlers: dict) -> str:
 
 
 def collect_background_results() -> list[str]:
-    """Save full long outputs and publish the ready batch atomically."""
+    """收集已结束后台任务，先保存长输出，再一次性交付整批通知。
+
+    返回：task_notification 文本列表，包含摘要和可选 full_output 路径。
+        超过 200 字符的结果保存全文；整批构造成功后删除内存登记。
+        文件保存失败会抛出异常，整批仍保持待交付，重试可复用已经保存的路径。
+    """
     with background_lock:
         ready = [bg_id for bg_id, task in background_tasks.items()
                  if task["status"] in {"completed", "failed"}]
@@ -177,6 +199,12 @@ def _cron_field_matches(field: str, value: int) -> bool:
 
 
 def cron_matches(cron_expr: str, dt: datetime) -> bool:
+    """判断五字段 cron 表达式是否匹配指定本地时间。
+
+    输入：cron_expr 为分、时、日、月、星期表达式；dt 为待判断时间。
+    返回：是否匹配。星期日记为 0；日和星期同时受限时满足其一即可。
+        字段数错误返回 False，字段内容应先通过 validate_cron 校验。
+    """
     fields = cron_expr.strip().split()
     if len(fields) != 5:
         return False
@@ -231,6 +259,11 @@ def _validate_cron_field(field: str, lo: int, hi: int) -> str | None:
 
 
 def validate_cron(cron_expr: str) -> str | None:
+    """校验项目支持的五字段 cron 表达式。
+
+    输入：cron_expr 为分、时、日、月、星期表达式。
+    返回：合法时为 None，否则为带字段名称的错误文本；星期范围为 0–6。
+    """
     fields = cron_expr.strip().split()
     if len(fields) != 5:
         return f"Expected 5 fields, got {len(fields)}"
@@ -244,6 +277,11 @@ def validate_cron(cron_expr: str) -> str | None:
 
 
 def save_durable_jobs():
+    """将内存中的 durable cron 任务原子地写入持久化文件。
+
+    返回：None。持有 cron 锁，写临时文件后替换正式文件；非持久化任务不写入。
+        写入错误继续抛出，临时文件在 finally 中清理。
+    """
     with cron_lock:
         durable = [asdict(job) for job in scheduled_jobs.values() if job.durable]
         durable_path = _durable_path()
@@ -256,6 +294,11 @@ def save_durable_jobs():
 
 
 def load_durable_jobs():
+    """启动时从文件恢复持久化 cron 及尚未确认交付的任务。
+
+    返回：None。有效记录加入 scheduled_jobs；pending_delivery 记录同时加入队列。
+        文件缺失时不操作，读取或解析异常忽略；调用方保证只初始化一次。
+    """
     if not _durable_path().exists():
         return
     try:
@@ -271,6 +314,13 @@ def load_durable_jobs():
 
 def schedule_job(cron: str, prompt: str,
                  recurring: bool = True, durable: bool = True) -> CronJob | str:
+    """校验并登记一个周期或一次性定时提示词任务。
+
+    输入：cron 为时间表达式；prompt 为到期注入的文本；recurring 为是否重复；
+        durable 为是否跨进程启动保留。
+    返回：已登记的 CronJob，或 cron 校验错误文本。
+        持久化失败时恢复之前的登记并抛出异常。
+    """
     err = validate_cron(cron)
     if err:
         return err
@@ -294,6 +344,11 @@ def schedule_job(cron: str, prompt: str,
 
 
 def cancel_job(job_id: str) -> str:
+    """取消已登记的 cron，并移除队列中尚未消费的同 ID 投递。
+
+    输入：job_id 为 cron 任务 ID。
+    返回：取消确认或未找到提示；持久化写入失败时恢复登记和队列，再抛出异常。
+    """
     with cron_lock:
         previous_queue = list(cron_queue)
         job = scheduled_jobs.pop(job_id, None)
@@ -311,7 +366,12 @@ def cancel_job(job_id: str) -> str:
 
 
 def _enqueue_due_job(job: CronJob):
-    """先持久化一次性投递，再通过队列公开。"""
+    """将到期任务入队，一次性任务先记录待交付状态。
+
+    输入：job 为到期的 CronJob，调用方持有 cron 锁。
+    返回：None。一次性 durable 任务先保存 pending_delivery，再加入 cron_queue；
+        保存失败时撤销待交付标志并抛出异常，不发布队列项。
+    """
     if not job.recurring:
         job.pending_delivery = True
         try:
@@ -324,6 +384,11 @@ def _enqueue_due_job(job: CronJob):
 
 
 def cron_scheduler_loop():
+    """每秒检查到期 cron，并在同一分钟内避免重复入队。
+
+    返回：正常情况下持续循环。按本地时间匹配，跳过等待交付的一次性任务；
+        单个任务出错时打印原因并继续处理其他任务，不在这里请求模型。
+    """
     while True:
         time.sleep(1)
         now = datetime.now()
@@ -341,6 +406,10 @@ def cron_scheduler_loop():
 
 
 def consume_cron_queue() -> list[CronJob]:
+    """取出本批到期任务，交给主循环注入模型历史。
+
+    返回：队列快照并清空原队列；不确认交付、不删除 scheduled_jobs 中的任务。
+    """
     with cron_lock:
         fired = list(cron_queue)
         cron_queue.clear()
@@ -348,7 +417,12 @@ def consume_cron_queue() -> list[CronJob]:
 
 
 def acknowledge_cron_jobs(jobs: list[CronJob]):
-    """模型调用接收提示词后，删除对应的一次性任务。"""
+    """模型成功响应后确认本批提示词已交付。
+
+    输入：jobs 为已经消费并发送给模型的任务列表。
+    返回：None。删除匹配的一次性 pending_delivery 任务，周期任务保留。
+        持久化失败时恢复任务登记并重新入队，然后抛出异常。
+    """
     durable_changed = False
     with cron_lock:
         previous_jobs = dict(scheduled_jobs)
@@ -368,7 +442,11 @@ def acknowledge_cron_jobs(jobs: list[CronJob]):
 
 
 def restore_cron_jobs(jobs: list[CronJob]):
-    """模型调用失败后，将未确认的投递重新入队。"""
+    """将未确认交付且仍存在的 cron 任务放回队列。
+
+    输入：jobs 为需要恢复的任务列表。
+    返回：None。按 ID 去重，不重新加入已经取消或删除的任务。
+    """
     with cron_lock:
         queued_ids = {job.id for job in cron_queue}
         for job in jobs:
@@ -380,6 +458,11 @@ def restore_cron_jobs(jobs: list[CronJob]):
 
 def run_schedule_cron(cron: str, prompt: str,
                       recurring: bool = True, durable: bool = True) -> str:
+    """处理模型创建 cron 的工具请求。
+
+    输入：cron/prompt 为时间表达式和提示词；recurring/durable 为重复和持久化开关。
+    返回：包含任务 ID 的确认或校验错误文本；实际登记由 schedule_job 执行。
+    """
     result = schedule_job(cron, prompt, recurring, durable)
     if isinstance(result, str):
         return f"Error: {result}"
@@ -387,6 +470,10 @@ def run_schedule_cron(cron: str, prompt: str,
 
 
 def run_list_crons() -> str:
+    """生成当前定时任务列表。
+
+    返回：任务 ID、表达式、提示词预览及重复/持久化标志的文本；无任务时给出提示。
+    """
     with cron_lock:
         jobs = list(scheduled_jobs.values())
     if not jobs:
@@ -399,6 +486,11 @@ def run_list_crons() -> str:
 
 
 def run_cancel_cron(job_id: str) -> str:
+    """处理模型取消 cron 的工具请求。
+
+    输入：job_id 为要取消的定时任务 ID。
+    返回：cancel_job 的取消结果文本，存储异常继续抛出。
+    """
     return cancel_job(job_id)
 
 
@@ -407,7 +499,10 @@ _runtime_services_lock = threading.Lock()
 
 
 def start_runtime_services():
-    """CLI host 启动时只初始化一次持久化调度。"""
+    """在当前进程内只初始化一次 cron 服务。
+
+    返回：None。恢复持久化任务并启动调度守护线程，之后的调用直接返回。
+    """
     global _runtime_services_started
     with _runtime_services_lock:
         if _runtime_services_started:

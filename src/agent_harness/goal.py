@@ -97,7 +97,11 @@ def _plain_content(content: Any) -> str:
 def transcript_text(
     messages: list[dict[str, Any]], max_characters: int = 24000
 ) -> str:
-    """保留最近的完整消息，仅裁剪过大的最新消息。"""
+    """在字符预算内保留最近的完整消息，并处理单条过大消息。
+
+    输入：messages 为历史；max_characters 为评估记录的字符预算，默认 24,000。
+    返回：带角色标签的纯文本；最新消息本身超限时保留其头尾并标记省略的中间部分。
+    """
 
     rendered = [
         f"{message.get('role', 'unknown').upper()}:\n"
@@ -126,6 +130,12 @@ def transcript_text(
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
+    """解析评估器 JSON 并检查完成状态字段。
+
+    输入：text 为模型文本，可包在 Markdown 代码围栏中。
+    返回：含布尔 ok、非空 reason 和布尔 impossible 的字典。
+        JSON、字段类型或状态组合不合法时抛出 GoalError。
+    """
     stripped = text.strip()
     if stripped.startswith("```"):
         lines = stripped.splitlines()
@@ -263,6 +273,13 @@ class GoalController:
         self.consecutive_blocks = 0
 
     def set_goal(self, condition: str, tokens_at_start: int = 0) -> GoalState:
+        """设置新的会话完成条件，并记录目标开始事件。
+
+        输入：condition 为非空条件，去掉首尾空白后最多 4,000 字符；
+            tokens_at_start 为开始时的 token 计数。
+        返回：新 GoalState，同时替换 active 并清零连续阻止次数。
+            已有目标会记录被替换事件；条件不合法时抛出 GoalError。
+        """
         condition = condition.strip()
         if not condition:
             raise GoalError("goal condition cannot be empty")
@@ -288,6 +305,11 @@ class GoalController:
         return self.active
 
     def clear(self, reason: str = "cleared") -> str:
+        """主动清除当前活动目标。
+
+        输入：reason 为清除原因。
+        返回：清除确认或无目标提示；记录事件并重置连续阻止计数，不调用评估器。
+        """
         if self.active is None:
             return "No goal set"
         condition = self.active.condition
@@ -302,6 +324,11 @@ class GoalController:
         return f"Goal cleared: {condition}"
 
     def status(self, current_tokens: int = 0) -> str:
+        """生成可展示的目标状态文本。
+
+        输入：current_tokens 为当前 token 计数，用于计算目标设置后的消费。
+        返回：活动条件、耗时、评估次数和原因，或最近完成/失败状态；不更新目标。
+        """
         if self.active is None:
             if self.last_status and self.last_status.get("met"):
                 return (
@@ -334,9 +361,12 @@ class GoalController:
         """评估本轮对话是否满足活动目标，并返回停止决定。
         Args:
             messages: 当前完整对话历史。
-            background_running: 是否仍有后台任务等待结果。
+            background_running: 调用方是否要求延迟评估；host 传入已结束但尚未交付的
+                后台结果是否存在，不代表仍有命令运行。
         Returns:
-            ``StopDecision``，其 ``action`` 表示允许结束、继续、延迟或失败。
+            StopDecision：无目标为 allow，需延迟为 defer；否则调用评估器。
+            完成为 achieved、不可完成为 failed，并清空活动目标；未完成为 block，
+            超过连续阻止上限为 limit；异常为 error，保留目标并记录原因。
         """
         # 没有活动目标时，不需要调用评估器，可以直接允许本轮结束。
         if self.active is None:

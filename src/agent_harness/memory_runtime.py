@@ -96,7 +96,12 @@ def _normalized_memory_text(value: str) -> str:
     return " ".join(value.lower().split())
 
 def should_store_memory(candidate: dict, existing: list[dict]) -> bool:
-    """仅接受非临时且未存储过的持久化记录。"""
+    """判断候选记忆是否符合持久化规则且尚未存储。
+
+    输入：candidate 为候选字典；existing 为现有记忆列表。
+    返回：scope 为 persistent、类型和字段有效、没有临时标记且无名称或正文等重复时
+        返回 True，否则为 False。这里只判断，不写文件。
+    """
     if not isinstance(candidate, dict):
         return False
     if candidate.get("scope") != "persistent":
@@ -137,6 +142,12 @@ def memory_document(name: str, mem_type: str, description: str, body: str) -> st
     return f"---\n{metadata}\n---\n\n{body.strip()}\n"
 
 def write_memory_file(name: str, mem_type: str, description: str, body: str) -> Path:
+    """校验并写入一条记忆，然后重建索引。
+
+    输入：name/mem_type/description/body 为名称、允许的类型、描述和正文。
+    返回：已写入 Markdown 的路径；同名 slug 会覆盖原文件。
+        必填文本为空或类型错误时抛出 ValueError，文件操作错误继续抛出。
+    """
     if not name.strip():
         raise ValueError("Memory name cannot be empty")
     if mem_type not in MEMORY_TYPES:
@@ -153,6 +164,11 @@ def write_memory_file(name: str, mem_type: str, description: str, body: str) -> 
     return path
 
 def rebuild_memory_index() -> None:
+    """根据现有记忆文件重建名称、描述和链接索引。
+
+    返回：None。创建记忆目录并覆盖 MEMORY.md，跳过索引本身及越界文件。
+        文件读取或写入错误继续抛出。
+    """
     memory_dir().mkdir(parents=True, exist_ok=True)
     lines = []
     for path in sorted(memory_dir().glob("*.md")):
@@ -174,6 +190,11 @@ def rebuild_memory_index() -> None:
     )
 
 def read_memory_index() -> str:
+    """读取记忆索引供系统提示词展示。
+
+    返回：去掉首尾空白的索引文本；路径不合法或文件不存在时为空字符串。
+        文件存在但读取失败时异常继续抛出。
+    """
     # 函数签名：返回记忆索引文件的文本内容；读不到就返回 ""（空字符串）
     try:
         # 尝试定位记忆索引文件的路径（allow_index=True 表示允许走索引文件）
@@ -188,6 +209,11 @@ def read_memory_index() -> str:
 
 
 def read_memory_file(filename: str) -> str | None:
+    """读取单条记忆的完整 Markdown。
+
+    输入：filename 为不含目录的记忆文件名。
+    返回：文件全文；路径不合法或文件不存在时为 None，其他读取异常继续抛出。
+    """
     try:
         path = memory_path(filename)
     except ValueError:
@@ -195,6 +221,11 @@ def read_memory_file(filename: str) -> str | None:
     return path.read_text(encoding="utf-8") if path.is_file() else None
 
 def list_memory_files() -> list[dict]:
+    """读取并整理记忆目录中的全部记录。
+
+    返回：按文件名排序的字典列表，含 filename、name、description、type 和 body。
+        跳过索引与越界文件；目录不存在时为空，合法路径上的读取错误继续抛出。
+    """
     records = []
     if not memory_dir().exists():
         return records
@@ -376,6 +407,12 @@ def dialogue_text(messages: list, max_messages: int = 12) -> str:
 def validate_memory_record(
     record, require_scope: bool = False
 ) -> dict | None:
+    """校验模型候选记忆并规范化字段。
+
+    输入：record 为候选记录；require_scope 为是否要求合法 scope 字段。
+    返回：含名称、类型、描述和正文的字典，存在 scope 时保留；无效记录返回 None。
+        此处接受合法的 current_task scope，是否持久化由 should_store_memory 决定。
+    """
     if not isinstance(record, dict):
         return None
     name = str(record.get("name", "")).strip()
@@ -399,6 +436,12 @@ def validate_memory_record(
     return validated
 
 def extract_memories(messages: list) -> int:
+    """请求模型从最近对话抽取可跨会话保存的新知识。
+
+    输入：messages 为已处理的对话历史。
+    返回：本次保存数量，无对话、无合格候选或处理异常时返回 0。
+        校验后仅写入非临时且不重复的持久化记录，并更新索引；异常打印跳过原因。
+    """
     dialogue = dialogue_text(messages)
     if not dialogue:
         return 0
@@ -463,6 +506,12 @@ def extract_memories(messages: list) -> int:
         return 0
 
 def consolidate_memories() -> int:
+    """达到数量阈值时，请求模型整理重复或过时记忆。
+
+    返回：整理后保留的记录数；不足阈值、结果无效或失败时返回 0。
+        校验完整输出后替换原记录并重建索引，写入失败时尝试按快照恢复原文件。
+        输入目录过大时跳过本轮，避免把未发送的记忆覆盖丢失。
+    """
     records = list_memory_files()
     if len(records) < CONSOLIDATE_THRESHOLD:
         return 0

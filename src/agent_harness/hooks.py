@@ -19,10 +19,21 @@ HOOKS = {"UserPromptSubmit": [], "PreToolUse": [],
 
 
 def register_hook(event: str, callback):
+    """按顺序登记某个事件的回调。
+
+    输入：event 为 HOOKS 中的事件名；callback 为接受该事件参数的函数。
+    返回：None。将回调追加到事件列表，不去重；未知事件名抛出 KeyError。
+    """
     HOOKS[event].append(callback)
 
 
 def trigger_hooks(event: str, *args):
+    """按注册顺序执行事件回调，并在第一个非 None 结果处停止。
+
+    输入：event 为事件名；args 为原样传给各回调的位置参数。
+    返回：第一个非 None 的回调结果；全部放行时返回 None。
+        回调异常继续抛出。工具执行入口将拒绝结果转为工具结果文本。
+    """
     for callback in HOOKS[event]:
         result = callback(*args)
         if result is not None:
@@ -32,6 +43,14 @@ def trigger_hooks(event: str, *args):
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
 def permission_hook(block):
+    """在工具执行前检查命令、文件路径和 MCP 工具权限。
+
+    输入：block 为工具请求，包含 name 和 input。
+    返回：放行时为 None，拒绝时为原因字符串。
+        bash 先按子串检查拒绝列表，再在主线程询问用户；文件路径必须在启动目录内。
+        未明确允许的 MCP 工具也需主线程确认；其他线程无法交互确认，因此拒绝。
+        任务目录的进一步限制由文件工具执行器检查。
+    """
     # 权限层在分发前检查原始 tool_use，可拒绝、询问用户或放行。
     if block.name == "bash":
         command = block.input.get("command", "")
