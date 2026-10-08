@@ -84,6 +84,7 @@ python -m agent_harness
 - **goal 状态只在内存**：重启后需要重新 `/goal`。
 - **响应有效性**：Responses 失败状态和非法、截断的工具调用会交付明确错误；不执行部分工具。
 - **历史压缩**：失败保留原历史，自动或手动失败后继续主请求；真正超限时只尝试一次被动恢复。
+- **后台结果**：超过 200 字符的通知保留全文路径，全文随启动目录保存；保存失败后整批等待重试。
 - **workflow resume**：相同调用键回放 journal，不再次调用模型；预算包含该 run 的历史 token，
   返回的 `usage` 是本次新增用量，`cumulativeUsage` 是整个 run 的累计用量。旧格式 journal
   缺少 `tokens` 时会报错；重新运行 `workflow demo` 可生成新格式记录。

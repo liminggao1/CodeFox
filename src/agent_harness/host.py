@@ -181,7 +181,12 @@ def build_user_content(results: list[dict]) -> list[dict]:
     """
     # 工具结果和已完成的后台通知都作为 user 侧内容返回模型，沿用 tool_result 反馈流程。
     content = list(results)
-    for note in scheduler.collect_background_results():
+    try:
+        notes = scheduler.collect_background_results()
+    except OSError as exc:
+        core.terminal_print(f"[background error] Could not save results: {exc}")
+        notes = []
+    for note in notes:
         content.append({"type": "text", "text": note})
     return content
 
@@ -195,7 +200,11 @@ def inject_background_notifications(messages: list):
     Returns:
         ``None``。
     """
-    notes = scheduler.collect_background_results()
+    try:
+        notes = scheduler.collect_background_results()
+    except OSError as exc:
+        core.terminal_print(f"[background error] Could not save results: {exc}")
+        return
     if notes:
         messages.append({"role": "user", "content": [
             {"type": "text", "text": note} for note in notes]})

@@ -49,7 +49,9 @@ prompts = sys.modules[__name__]
 import copy
 subagent = sys.modules[__name__]
 from agent_harness.llm_client import ProtocolResponseError
+import uuid
 from dataclasses import asdict, dataclass
+compaction = sys.modules[__name__]
 scheduler = sys.modules[__name__]
 task_worktrees = sys.modules[__name__]
 teams = sys.modules[__name__]
@@ -59,7 +61,6 @@ import asyncio
 from typing import Any
 import hashlib
 workflow_runtime = sys.modules[__name__]
-compaction = sys.modules[__name__]
 recovery = sys.modules[__name__]
 registrations = sys.modules[__name__]
 runtime_context = sys.modules[__name__]
@@ -2165,7 +2166,7 @@ def persisted_output_path(output: str) -> str | None:
 
 
 
-def save_output(tool_use_id: str, output: str) -> Path:
+def save_output(tool_use_id: str, output: str, *, subdirectory: str | None = None) -> Path:
     """按工具调用 ID 命名，将完整输出写入工具结果目录。
 
     Args:
@@ -2174,9 +2175,12 @@ def save_output(tool_use_id: str, output: str) -> Path:
     Returns:
         已写入文件的路径。
     """
-    core.tool_results_dir().mkdir(parents=True, exist_ok=True)
+    directory = core.tool_results_dir()
+    if subdirectory is not None:
+        directory = directory / subdirectory
+    directory.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(tool_use_id))[:120] or "unknown"
-    path = core.tool_results_dir() / f"{safe_id}.txt"
+    path = directory / f"{safe_id}.txt"
     path.write_text(output, encoding="utf-8")
     return path
 
@@ -2727,6 +2731,7 @@ def start_background_task(block, handlers: dict) -> str:
                 "command": command,
                 "status": "running",
                 "cwd": str(cwd) if cwd else None,
+                "output_id": "background_" + uuid.uuid4().hex,
             }
     thread = threading.Thread(target=worker, daemon=True)
     try:
@@ -2741,25 +2746,34 @@ def start_background_task(block, handlers: dict) -> str:
 
 
 def collect_background_results() -> list[str]:
+    """Save full long outputs and publish the ready batch atomically."""
     with background_lock:
         ready = [bg_id for bg_id, task in background_tasks.items()
                  if task["status"] in {"completed", "failed"}]
-        completed = [
-            (bg_id, background_tasks.pop(bg_id),
-             background_results.pop(bg_id, ""))
-            for bg_id in ready
-        ]
-    notifications = []
-    for bg_id, task, output in completed:
-        summary = output[:200] if len(output) > 200 else output
-        notifications.append(
-            f"<task_notification>\n"
-            f"  <task_id>{bg_id}</task_id>\n"
-            f"  <status>{task['status']}</status>\n"
-            f"  <command>{task['command']}</command>\n"
-            f"  <summary>{summary}</summary>\n"
-            f"</task_notification>")
-    return notifications
+        notifications = []
+        for bg_id in ready:
+            task = background_tasks[bg_id]
+            output = background_results.get(bg_id, "")
+            full_output = ""
+            if len(output) > 200:
+                saved_path = task.get("saved_output_path")
+                if not saved_path or not Path(saved_path).is_file():
+                    path = compaction.save_output(task["output_id"], output, subdirectory="background")
+                    saved_path = task["saved_output_path"] = str(path)
+                full_output = f"  <full_output>{saved_path}</full_output>\n"
+            notifications.append(
+                f"<task_notification>\n"
+                f"  <task_id>{bg_id}</task_id>\n"
+                f"  <status>{task['status']}</status>\n"
+                f"  <command>{task['command']}</command>\n"
+                f"  <summary>{output[:200]}</summary>\n"
+                f"{full_output}"
+                f"</task_notification>")
+        # A failed save leaves the entire batch ready for a later collection.
+        for bg_id in ready:
+            background_tasks.pop(bg_id)
+            background_results.pop(bg_id, None)
+        return notifications
 
 
 def has_pending_background() -> bool:
@@ -5652,7 +5666,12 @@ def build_user_content(results: list[dict]) -> list[dict]:
     """
     # 工具结果和已完成的后台通知都作为 user 侧内容返回模型，沿用 tool_result 反馈流程。
     content = list(results)
-    for note in scheduler.collect_background_results():
+    try:
+        notes = scheduler.collect_background_results()
+    except OSError as exc:
+        core.terminal_print(f"[background error] Could not save results: {exc}")
+        notes = []
+    for note in notes:
         content.append({"type": "text", "text": note})
     return content
 
@@ -5666,7 +5685,11 @@ def inject_background_notifications(messages: list):
     Returns:
         ``None``。
     """
-    notes = scheduler.collect_background_results()
+    try:
+        notes = scheduler.collect_background_results()
+    except OSError as exc:
+        core.terminal_print(f"[background error] Could not save results: {exc}")
+        return
     if notes:
         messages.append({"role": "user", "content": [
             {"type": "text", "text": note} for note in notes]})

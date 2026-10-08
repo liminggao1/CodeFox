@@ -12,6 +12,7 @@ import random
 import re
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from . import core
 from . import file_tools
 from . import hooks
 from . import tasks
+from . import compaction
 
 # -- 后台任务 --
 
@@ -77,6 +79,7 @@ def start_background_task(block, handlers: dict) -> str:
                 "command": command,
                 "status": "running",
                 "cwd": str(cwd) if cwd else None,
+                "output_id": "background_" + uuid.uuid4().hex,
             }
     thread = threading.Thread(target=worker, daemon=True)
     try:
@@ -91,25 +94,34 @@ def start_background_task(block, handlers: dict) -> str:
 
 
 def collect_background_results() -> list[str]:
+    """Save full long outputs and publish the ready batch atomically."""
     with background_lock:
         ready = [bg_id for bg_id, task in background_tasks.items()
                  if task["status"] in {"completed", "failed"}]
-        completed = [
-            (bg_id, background_tasks.pop(bg_id),
-             background_results.pop(bg_id, ""))
-            for bg_id in ready
-        ]
-    notifications = []
-    for bg_id, task, output in completed:
-        summary = output[:200] if len(output) > 200 else output
-        notifications.append(
-            f"<task_notification>\n"
-            f"  <task_id>{bg_id}</task_id>\n"
-            f"  <status>{task['status']}</status>\n"
-            f"  <command>{task['command']}</command>\n"
-            f"  <summary>{summary}</summary>\n"
-            f"</task_notification>")
-    return notifications
+        notifications = []
+        for bg_id in ready:
+            task = background_tasks[bg_id]
+            output = background_results.get(bg_id, "")
+            full_output = ""
+            if len(output) > 200:
+                saved_path = task.get("saved_output_path")
+                if not saved_path or not Path(saved_path).is_file():
+                    path = compaction.save_output(task["output_id"], output, subdirectory="background")
+                    saved_path = task["saved_output_path"] = str(path)
+                full_output = f"  <full_output>{saved_path}</full_output>\n"
+            notifications.append(
+                f"<task_notification>\n"
+                f"  <task_id>{bg_id}</task_id>\n"
+                f"  <status>{task['status']}</status>\n"
+                f"  <command>{task['command']}</command>\n"
+                f"  <summary>{output[:200]}</summary>\n"
+                f"{full_output}"
+                f"</task_notification>")
+        # A failed save leaves the entire batch ready for a later collection.
+        for bg_id in ready:
+            background_tasks.pop(bg_id)
+            background_results.pop(bg_id, None)
+        return notifications
 
 
 def has_pending_background() -> bool:

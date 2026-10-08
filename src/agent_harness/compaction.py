@@ -202,7 +202,7 @@ def persisted_output_path(output: str) -> str | None:
 
 
 
-def save_output(tool_use_id: str, output: str) -> Path:
+def save_output(tool_use_id: str, output: str, *, subdirectory: str | None = None) -> Path:
     """按工具调用 ID 命名，将完整输出写入工具结果目录。
 
     Args:
@@ -211,9 +211,12 @@ def save_output(tool_use_id: str, output: str) -> Path:
     Returns:
         已写入文件的路径。
     """
-    core.tool_results_dir().mkdir(parents=True, exist_ok=True)
+    directory = core.tool_results_dir()
+    if subdirectory is not None:
+        directory = directory / subdirectory
+    directory.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(tool_use_id))[:120] or "unknown"
-    path = core.tool_results_dir() / f"{safe_id}.txt"
+    path = directory / f"{safe_id}.txt"
     path.write_text(output, encoding="utf-8")
     return path
 
