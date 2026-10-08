@@ -30,9 +30,6 @@ SECTIONS = [
 # Flat 构建把所有模块合并到同一命名空间，所以 "from . import X" 变为本模块的别名。
 RELATIVE_IMPORT_REPLACEMENTS = {
     "from .llm_client import Anthropic": "from agent_harness.llm_client import Anthropic",
-    "from . import memory_runtime as MEMORY_RUNTIME": (
-        "MEMORY_RUNTIME = sys.modules[__name__]"
-    ),
     "from . import goal as goal_module": "goal_module = sys.modules[__name__]",
     "from . import workflow as workflow_runtime": (
         "workflow_runtime = sys.modules[__name__]"
