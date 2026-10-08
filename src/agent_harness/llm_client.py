@@ -22,7 +22,7 @@ import os
 import urllib.error
 import urllib.request
 
-__all__ = ["Anthropic"]
+__all__ = ["Anthropic", "ProtocolResponseError"]
 
 DEFAULT_TIMEOUT = 300.0
 USER_AGENT = "learncc-llm-client/1.0"
@@ -68,6 +68,17 @@ class LLMClientError(Exception):
 
 class APIConnectionError(LLMClientError):
     """无法连接端点。"""
+
+
+class ProtocolResponseError(LLMClientError):
+    """The response cannot be consumed as a completed model result."""
+
+    def __init__(self, status, reason, tool_name=None, tool_call_id=None):
+        super().__init__(f"Invalid model response ({status}): {reason}")
+        self.status = status
+        self.reason = reason
+        self.tool_name = tool_name
+        self.tool_call_id = tool_call_id
 
 
 class APIStatusError(LLMClientError):
@@ -233,44 +244,66 @@ def _to_responses_request(model, messages, system, tools, max_tokens) -> dict:
 # 响应转换：Responses -> Messages
 # ---------------------------------------------------------------------------
 
-def _parse_arguments(raw):
+def _parse_arguments(raw, *, status, tool_name, tool_call_id):
     if isinstance(raw, dict):
         return raw
-    if not raw:
-        return {}
     try:
         parsed = json.loads(raw)
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError) as exc:
+        raise ProtocolResponseError(status, "invalid function arguments", tool_name, tool_call_id) from exc
+    if not isinstance(parsed, dict):
+        raise ProtocolResponseError(status, "function arguments must be an object", tool_name, tool_call_id)
+    return parsed
 
 
 def _stop_reason(response: dict, has_tool_call: bool) -> str:
     if has_tool_call:
         return "tool_use"
-    details = response.get("incomplete_details") or {}
-    if (response.get("status") == "incomplete"
-            and details.get("reason") == "max_output_tokens"):
+    if response.get("status") == "incomplete":
         return "max_tokens"
     return "end_turn"
 
 
 def _to_message(response: dict, fallback_model) -> Message:
+    if not isinstance(response, dict):
+        raise ProtocolResponseError(None, "response must be an object")
+    status = response.get("status")
+    details = response.get("incomplete_details") or {}
+    reason = details.get("reason") if isinstance(details, dict) else None
+    if not isinstance(status, str) or status not in {"completed", "incomplete"}:
+        error = response.get("error") or {}
+        reason = error.get("message") if isinstance(error, dict) else str(error)
+        raise ProtocolResponseError(status, reason or "response did not complete")
+    output = response.get("output") or []
+    if not isinstance(output, list) or any(not isinstance(item, dict) for item in output):
+        raise ProtocolResponseError(status, "output must be a list of objects")
+    if status == "incomplete":
+        if reason != "max_output_tokens":
+            raise ProtocolResponseError(status, reason or "missing incomplete reason")
+        if any(item.get("type") == "function_call" for item in output):
+            raise ProtocolResponseError(status, "incomplete function call batch")
     blocks = []
     has_tool_call = False
-    for item in response.get("output") or []:
+    for item in output:
         kind = item.get("type")
         if kind == "message":
             for part in item.get("content") or []:
                 if part.get("type") in ("output_text", "text"):
                     blocks.append(Block(type="text", text=part.get("text", "")))
         elif kind == "function_call":
+            name = item.get("name")
+            call_id = item.get("call_id") or item.get("id")
+            if not isinstance(name, str) or not name.strip():
+                raise ProtocolResponseError(status, "missing function name", name, call_id)
+            if not isinstance(call_id, str) or not call_id.strip():
+                raise ProtocolResponseError(status, "missing function call identity", name, call_id)
             has_tool_call = True
             blocks.append(Block(
                 type="tool_use",
-                id=item.get("call_id") or item.get("id"),
-                name=item.get("name"),
-                input=_parse_arguments(item.get("arguments")),
+                id=call_id,
+                name=name,
+                input=_parse_arguments(item.get("arguments"), status=status,
+                                       tool_name=name, tool_call_id=call_id),
             ))
     usage = response.get("usage") or {}
     return Message(

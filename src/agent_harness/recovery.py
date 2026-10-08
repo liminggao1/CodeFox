@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 
 from . import core
+from .llm_client import ProtocolResponseError
 
 # -- 错误恢复 --
 
@@ -50,6 +51,8 @@ def with_retry(fn, state: RecoveryState):
             state.consecutive_529 = 0
             return result
         except Exception as e:
+            if isinstance(e, ProtocolResponseError):
+                raise
             name = type(e).__name__.lower()
             msg = str(e).lower()
             # 捕获429限流错误，延时后重试
@@ -79,6 +82,8 @@ def with_retry(fn, state: RecoveryState):
 
 
 def is_prompt_too_long_error(e: Exception) -> bool:
+    if isinstance(e, ProtocolResponseError):
+        return False
     msg = str(e).lower()
     return (("prompt" in msg and "long" in msg)
             or "context_length_exceeded" in msg

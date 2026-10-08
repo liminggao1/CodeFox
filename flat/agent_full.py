@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 tool_registry = sys.modules[__name__]
 prompts = sys.modules[__name__]
 subagent = sys.modules[__name__]
+from agent_harness.llm_client import ProtocolResponseError
 from dataclasses import asdict, dataclass
 scheduler = sys.modules[__name__]
 task_worktrees = sys.modules[__name__]
@@ -2577,6 +2578,8 @@ def with_retry(fn, state: RecoveryState):
             state.consecutive_529 = 0
             return result
         except Exception as e:
+            if isinstance(e, ProtocolResponseError):
+                raise
             name = type(e).__name__.lower()
             msg = str(e).lower()
             # 捕获429限流错误，延时后重试
@@ -2606,6 +2609,8 @@ def with_retry(fn, state: RecoveryState):
 
 
 def is_prompt_too_long_error(e: Exception) -> bool:
+    if isinstance(e, ProtocolResponseError):
+        return False
     msg = str(e).lower()
     return (("prompt" in msg and "long" in msg)
             or "context_length_exceeded" in msg
