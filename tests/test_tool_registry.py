@@ -33,3 +33,15 @@ def test_failed_assembly_does_not_publish_partial_policies():
     with pytest.raises(ValueError, match="collision"):
         registry.snapshot()
     assert registry.policy_for("mcp__x__read") == "allow"
+
+
+@pytest.mark.parametrize("actor", ["lead", "teammate"])
+def test_task_listing_runs_through_actual_tool_handler(host_factory, actor):
+    host = host_factory()
+    handler = (tool_registry.REGISTRY.snapshot().handlers["list_tasks"] if actor == "lead"
+               else host.teams.create_teammate_session("alice").handlers["list_tasks"])
+    assert handler() == "No tasks."
+    task = host.tasks.create_task("List this task")
+    listed = handler()
+    assert task.id in listed
+    assert "List this task [pending]" in listed

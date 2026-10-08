@@ -41,13 +41,13 @@ def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
 
 
 def run_list_tasks() -> str:
-    tasks = tasks.list_tasks()
-    if not tasks:
+    task_list = tasks.list_tasks()
+    if not task_list:
         return "No tasks."
     return "\n".join(
         f"  {t.id}: {t.subject} [{t.status}]"
         + (f" (wt:{t.worktree})" if t.worktree else "")
-        for t in tasks)
+        for t in task_list)
 
 
 def run_get_task(task_id: str) -> str:

@@ -292,7 +292,8 @@ def _to_message(response: dict, fallback_model) -> Message:
                     blocks.append(Block(type="text", text=part.get("text", "")))
         elif kind == "function_call":
             name = item.get("name")
-            call_id = item.get("call_id") or item.get("id")
+            call_id = next((value for value in (item.get("call_id"), item.get("id"))
+                            if isinstance(value, str) and value.strip()), None)
             if not isinstance(name, str) or not name.strip():
                 raise ProtocolResponseError(status, "missing function name", name, call_id)
             if not isinstance(call_id, str) or not call_id.strip():

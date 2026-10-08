@@ -219,16 +219,16 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 1. 一轮对话的完整流程
 
-在 [host.agent_loop](../src/agent_harness/host.py#L225) 下断点。选择「端到端自检（离线）」，
+在 [host.agent_loop](../src/agent_harness/host.py#L262) 下断点。选择「端到端自检（离线）」，
 无需改配置；脚本化模型会先请求工具，再收到工具结果后完成回复。
 
-这里是一次交互的总入口。第一次停住时看 `messages`、`context`、`active_request` 和 `tools`，
+这里是一次交互的总入口。进入循环后看 `messages`、`active_request`、`tools` 和新建的 `context` 快照，
 可以沿下面的顺序找实现：
 
 1. [prepare_history](../src/agent_harness/compaction.py) 按字符预算处理候选历史，成功后提交，失败保留原值。
 2. [build_context](../src/agent_harness/runtime_context.py) 构造记忆、MCP 和队友的只读快照，随后
    [ToolRegistry.snapshot](../src/agent_harness/tool_registry.py) 获取工具描述、handler 和权限。
-3. [call_llm](../src/agent_harness/host.py#L198) 组装系统提示词并发起模型请求；返回工具调用后，
+3. [call_llm](../src/agent_harness/host.py#L213) 组装系统提示词并发起模型请求；返回工具调用后，
    [call_tool_handler](../src/agent_harness/file_tools.py#L217) 执行 handler。
 4. 工具结果由 `build_user_content` 配对写回 `messages`，循环再次进入 `call_llm`；模型返回文本
    后依次经过 `Stop` hooks、目标判定和记忆整理。
@@ -237,34 +237,35 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 2. 上下文如何刷新
 
-在 [host.update_context](../src/agent_harness/host.py#L138) 下断点。选择「端到端自检（离线）」，
-无需改配置；先看空历史，再看主循环中的刷新。
+在 [runtime_context.build_context](../src/agent_harness/runtime_context.py#L27) 下断点。
+选择「端到端自检（离线）」，无需改配置；在模型调用前观察每轮新建的快照。
 
 这里返回新的四项上下文：`memory_catalog`、`memories`、`connected_mcp` 和 `active_teammates`。
 可以沿下面的顺序找实现：
 
-1. [read_memory_index](../src/agent_harness/memory_runtime.py#L192) 读取记忆目录索引。
-2. [load_memories](../src/agent_harness/memory_runtime.py#L351) 根据 `messages` 的最近用户文本
+1. [read_memory_index](../src/agent_harness/memory_runtime.py#L176) 读取记忆目录索引。
+2. [load_memories](../src/agent_harness/memory_runtime.py#L335) 根据 `messages` 的最近用户文本
    选取并加载相关记录。
-3. [mcp_clients](../src/agent_harness/mcp_tools.py#L49) 和 [active_teammates](../src/agent_harness/teams.py#L98)
+3. [mcp_clients](../src/agent_harness/mcp_tools.py) 和 [active_teammates](../src/agent_harness/teams.py)
    提供当前连接与队友名称。
-4. `agent_loop` 或 `run_cli` 用 `context.update(...)` 接收结果，再交给
-   [assemble_system_prompt](../src/agent_harness/prompts.py#L68) 生成下一次模型请求的提示词。
+4. `agent_loop` 接收只读 RuntimeContext，再通过 `prompt_values()` 交给
+   [assemble_system_prompt](../src/agent_harness/prompts.py#L67) 生成下一次模型请求的提示词。
+   CLI 和后台循环只传历史与请求，不修改旧快照。
 
 先看空历史时四项是否为空，再在工具结果写回后看 `messages` 如何影响记忆选取；运行中新增 MCP
 或队友后，下一轮应能在对应字段和系统提示词中看到它们。
 
 #### 3. goal 的 Stop 判定
 
-在 [host.evaluate_goal](../src/agent_harness/host.py#L211) 和
-[GoalController.evaluate_after_turn](../src/agent_harness/goal.py#L303) 下断点。
+在 [host.evaluate_goal](../src/agent_harness/host.py#L237) 和
+[GoalController.evaluate_after_turn](../src/agent_harness/goal.py#L329) 下断点。
 选择「pytest（当前文件）」，把 `"${file}"` 改为
 `"tests/test_goal.py::test_unmet_goal_continues_automatically_until_achieved"`；测试模拟先阻止、再放行。
 
 这里负责把 Stop hook 的结果交给目标控制器，并决定本轮是否结束。可以沿下面的顺序找实现：
 
-1. `agent_loop` 在没有工具调用的 assistant 回复后进入 [evaluate_goal](../src/agent_harness/host.py#L211)。
-2. `evaluate_goal` 调用 [GoalController.evaluate_after_turn](../src/agent_harness/goal.py#L303)，
+1. `agent_loop` 在没有工具调用的 assistant 回复后进入 [evaluate_goal](../src/agent_harness/host.py#L237)。
+2. `evaluate_goal` 调用 [GoalController.evaluate_after_turn](../src/agent_harness/goal.py#L329)，
    评估器返回 `allow`、`block` 或其他动作。
 3. 返回 `block` 时，主循环把条件和 `decision.reason` 写成 `[Goal still active]` 用户消息，
    再次调用模型；返回 `allow` 时控制器清空 `GOAL.active` 并记录 `last_status`。
@@ -274,17 +275,17 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 4. 系统提示词怎么拼出来
 
-在 [prompts.assemble_system_prompt](../src/agent_harness/prompts.py#L68) 下断点。
+在 [prompts.assemble_system_prompt](../src/agent_harness/prompts.py#L67) 下断点。
 选择「端到端自检（离线）」，无需改配置；检查传入的 `context` 和返回值。
 
 这里把实时上下文拼成一次模型请求的 system prompt。可以沿下面的顺序找实现：
 
 1. `assemble_system_prompt` 读取 `context` 的 `memory_catalog`、`memories`、`connected_mcp` 和
-   `active_teammates`，并先放入 [PROMPT_SECTIONS](../src/agent_harness/prompts.py#L25) 的身份、工具、
+   `active_teammates`，并先放入 [PROMPT_SECTIONS](../src/agent_harness/prompts.py) 的身份、工具、
    任务、团队、记忆和压缩规则。
 2. 它追加工作目录和当前时间，再调用 [list_skills](../src/agent_harness/skills.py#L75) 生成 skills
    目录；有记忆时追加记忆索引与召回记录。
-3. 它从 [mcp_clients](../src/agent_harness/mcp_tools.py#L49) 读取连接中的 MCP 服务名，追加
+3. 它从 [mcp_clients](../src/agent_harness/mcp_tools.py) 读取连接中的 MCP 服务名，追加
    `Connected MCP servers` 段落。
 4. 函数返回完整字符串，由 `call_llm` 传给 `core.client.messages.create(system=...)`。
 
@@ -303,7 +304,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 2. `call_tool_handler` 处理未知工具和异常，把正常返回值统一转成字符串；以文件工具为例，
    [run_agent_write](../src/agent_harness/file_tools.py#L202) 先确定任务工作目录，再调用
    [run_write](../src/agent_harness/file_tools.py#L144)。
-3. 执行前由 [trigger_hooks](../src/agent_harness/hooks.py#L24) 运行 `PreToolUse`，权限拒绝时
+3. 执行前由 [trigger_hooks](../src/agent_harness/hooks.py#L25) 运行 `PreToolUse`，权限拒绝时
    不进入 handler；执行后运行 `PostToolUse`。
 4. `agent_loop` 用原工具调用 ID 生成 `tool_result`，写回 `messages` 后再次请求模型。
 
@@ -311,20 +312,20 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 6. 工具池装配
 
-在 [mcp_tools.assemble_tool_pool](../src/agent_harness/mcp_tools.py#L137) 下断点。
+在 [mcp_tools.assemble_tool_pool](../src/agent_harness/mcp_tools.py) 下断点。
 选择「端到端自检（离线）」，无需改配置；对照工具 schema 与 handler 表。
 
 这里返回两张表：`tools` 是发给模型的工具名称、说明和参数格式；`handlers` 是工具名称到 Python
 函数的映射。以 `write_file` 为例，可以沿下面的路径找实现：
 
-1. [工具 schema](../src/agent_harness/registrations.py#L118) 告诉模型可以调用 `write_file`，以及需要哪些参数。
-2. [处理函数映射](../src/agent_harness/registrations.py#L270) 把 `write_file` 指向 `file_tools.run_agent_write`。
+1. [工具 schema](../src/agent_harness/registrations.py) 告诉模型可以调用 `write_file`，以及需要哪些参数。
+2. [处理函数映射](../src/agent_harness/registrations.py) 把 `write_file` 指向 `file_tools.run_agent_write`。
 3. [run_agent_write](../src/agent_harness/file_tools.py#L202) 确定工作目录，再调用实际写文件的
    [run_write](../src/agent_harness/file_tools.py#L144)。
-4. 模型发回 `write_file` 调用后，[host.agent_loop](../src/agent_harness/host.py#L225) 从 `handlers`
+4. 模型发回 `write_file` 调用后，[host.agent_loop](../src/agent_harness/host.py#L262) 从 `handlers`
    取出函数，交给 [call_tool_handler](../src/agent_harness/file_tools.py#L217) 执行。
 
-每轮重新装配工具池，是为了纳入运行中连接的 [MCP 工具](../src/agent_harness/mcp_tools.py#L146)。
+每轮重新装配工具池，是为了纳入运行中连接的 [MCP 工具](../src/agent_harness/mcp_tools.py)。
 `compact` 的特殊处理见下方[运行相关](#运行相关)。
 
 #### 7. 任务生命周期
@@ -369,8 +370,8 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 9. 队友线程与协议
 
-在 [teams.spawn_teammate_thread](../src/agent_harness/teams.py#L317)、
-[apply_plan_response](../src/agent_harness/teams.py#L252) 下断点。
+在 [teams.spawn_teammate_thread](../src/agent_harness/teams.py#L320)、
+[apply_plan_response](../src/agent_harness/teams.py#L255) 下断点。
 选择「pytest（当前文件）」，分别把 `"${file}"` 改为
 `"tests/test_agent_teams.py::test_reserved_teammate_names_do_not_shadow_runtime_identities"` 和
 `"tests/test_agent_teams.py::test_plan_rejection_requires_a_new_submission"`。
@@ -378,10 +379,10 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 这里观察队友登记、计划审批和消息协议，可以沿下面的顺序找实现：
 
-1. [spawn_teammate_thread](../src/agent_harness/teams.py#L317) 校验名称，登记 `active_teammates`、
+1. [spawn_teammate_thread](../src/agent_harness/teams.py#L320) 校验名称，登记 `active_teammates`、
    `plan_gates` 和 `assignment_versions`；任务认领失败时回滚这些登记。
 2. 队友提交计划后写入 `pending_requests`，Lead 通过 `run_review_plan` 设置 approved 或 rejected。
-3. [apply_plan_response](../src/agent_harness/teams.py#L252) 校验 sender、target、request_id、任务版本
+3. [apply_plan_response](../src/agent_harness/teams.py#L255) 校验 sender、target、request_id、任务版本
    和状态，只有匹配当前计划才更新 `plan_gates`。
 4. 计划被拒绝时队友保持等待，新计划必须生成新的 `request_id`；旧回复不能解锁工具。
 
@@ -390,17 +391,17 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 10. 权限与 hooks
 
-在 [hooks.permission_hook](../src/agent_harness/hooks.py#L33)、
-[trigger_hooks](../src/agent_harness/hooks.py#L24) 下断点。
+在 [hooks.permission_hook](../src/agent_harness/hooks.py#L34)、
+[trigger_hooks](../src/agent_harness/hooks.py#L25) 下断点。
 选择「pytest（当前文件）」，分别把 `"${file}"` 改为
 `"tests/test_permissions.py::test_file_paths_must_stay_inside_the_workspace"` 和
 `"tests/test_permissions.py::test_hooks_return_the_first_non_none_result"`。
 
 这里观察工具执行前后的 hook 链，可以沿下面的顺序找实现：
 
-1. [trigger_hooks](../src/agent_harness/hooks.py#L24) 按注册顺序调用某个事件的回调，遇到第一个
+1. [trigger_hooks](../src/agent_harness/hooks.py#L25) 按注册顺序调用某个事件的回调，遇到第一个
    非 `None` 返回值就停止。
-2. [permission_hook](../src/agent_harness/hooks.py#L33) 检查 shell deny list、工作区路径、MCP 策略
+2. [permission_hook](../src/agent_harness/hooks.py#L34) 检查 shell deny list、工作区路径、MCP 策略
    和是否处于主线程；返回拒绝文本时，`agent_loop` 不再调用工具 handler。
 3. 权限通过后执行工具，再触发 `PostToolUse`；`Stop` 和 `UserPromptSubmit` 也复用同一分发函数。
 4. 测试中的第三个回调不会执行，因为第二个回调已经返回 `stop here`。
@@ -409,21 +410,22 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 11. 后台任务 / cron
 
-在 [scheduler.start_background_task](../src/agent_harness/scheduler.py#L40)、
-[run_schedule_cron](../src/agent_harness/scheduler.py#L363) 下断点。
+在 [scheduler.start_background_task](../src/agent_harness/scheduler.py#L42)、
+[run_schedule_cron](../src/agent_harness/scheduler.py#L381) 下断点。
 选择「pytest（当前文件）」，分别把 `"${file}"` 改为
 `"tests/test_scheduler.py::test_completed_result_is_collected_once"` 和
 `"tests/test_scheduler.py::test_cron_tools_schedule_list_and_cancel"`。
-这两个测试不触发真实时钟；要看 [cron_scheduler_loop](../src/agent_harness/scheduler.py#L308)，
+这两个测试不触发真实时钟；要看 [cron_scheduler_loop](../src/agent_harness/scheduler.py#L326)，
 需用「Agent 交互（真实 API）」创建定时任务并等待。
 
 这里包含两条独立路径，可以沿下面的顺序找实现：
 
-1. 后台 bash 由 [start_background_task](../src/agent_harness/scheduler.py#L40) 创建 `bg_id`，登记
+1. 后台 bash 由 [start_background_task](../src/agent_harness/scheduler.py#L42) 创建 `bg_id`，登记
    `background_tasks` 后启动 worker；worker 把输出放进 `background_results` 并更新状态。
-2. [collect_background_results](../src/agent_harness/scheduler.py#L93) 一次性取出 completed/failed
-   任务，格式化成 `task_notification`；下一轮由 `inject_background_notifications` 写入历史。
-3. cron 工具 [run_schedule_cron](../src/agent_harness/scheduler.py#L363) 校验表达式并写入
+2. [collect_background_results](../src/agent_harness/scheduler.py#L96) 先保存长输出全文并构造整批
+   `task_notification`，成功后移除记录；保存失败整批保持待交付。下一轮由
+   `inject_background_notifications` 写入历史，长通知的 `full_output` 可用于读取全文。
+3. cron 工具 [run_schedule_cron](../src/agent_harness/scheduler.py#L381) 校验表达式并写入
    `scheduled_jobs`；durable 任务同时写 `.scheduled_tasks.json`。
 4. `run_list_crons` 展示当前任务，`run_cancel_cron` 删除任务；真实时钟场景再由
    `cron_scheduler_loop` 把到期任务放进 `cron_queue`。
@@ -433,37 +435,37 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 12. 工作流单次 agent 调用
 
-在 [ExecutionState.agent](../src/agent_harness/workflow_runtime.py#L520) 下断点。
+在 [ExecutionState.agent](../src/agent_harness/workflow_runtime.py#L480) 下断点。
 选择「Workflow demo（离线，不联网）」，无需改配置；使用 mock runner，但会在启动目录写入 `.runtime/`。
 
 这里观察一次 workflow 子 agent 的预算、校验和落盘，可以沿下面的顺序找实现：
 
-1. [ExecutionState.agent](../src/agent_harness/workflow_runtime.py#L520) 生成 label 和 journal key，检查缓存，
+1. [ExecutionState.agent](../src/agent_harness/workflow_runtime.py#L480) 生成 label 和 journal key，检查缓存，
    再检查 `Budget.remaining()` 与共享 agent 上限。
 2. 缓存未命中时，通过 `asyncio.to_thread` 调用 mock runner；返回的 `value/tokens` 先校验 schema，
    再累计到 `task.usage` 和 `task.cumulative_usage`。
-3. [WorkflowJournal.record](../src/agent_harness/workflow_runtime.py#L420) 把 key、结果和累计用量追加到 journal，
+3. [WorkflowJournal.record](../src/agent_harness/workflow_runtime.py#L380) 把 key、结果和累计用量追加到 journal，
    同时更新内存 cache。
-4. [run_workflow](../src/agent_harness/workflow_runtime.py#L820) 保存 task/output 快照并把状态打印到终端。
+4. [run_workflow](../src/agent_harness/workflow_runtime.py#L716) 保存 task/output 快照并把状态打印到终端。
 
 断点处重点看 `prompt`、`schema`、`label`、`Budget` 和 journal key。成功判据是 demo 完成、`.runtime/`
 位于启动目录，且没有真实 API 请求；把预算调小可观察超预算异常。
 
 #### 13. journal 读写与 resume
 
-在 [WorkflowJournal.__init__](../src/agent_harness/workflow_runtime.py#L353)、
-[record](../src/agent_harness/workflow_runtime.py#L420)、
-[cached](../src/agent_harness/workflow_runtime.py#L417) 下断点。
+在 [WorkflowJournal.__init__](../src/agent_harness/workflow_runtime.py#L313)、
+[record](../src/agent_harness/workflow_runtime.py#L380)、
+[cached](../src/agent_harness/workflow_runtime.py#L377) 下断点。
 选择「pytest（当前文件）」，把 `"${file}"` 改为
 `"tests/test_workflow.py::test_resume_replays_at_budget_limit_without_spending_again"`；
 写入与恢复都在同一个调试进程中。
 
 这里观察 journal 如何把一次运行变成可恢复的缓存，可以沿下面的顺序找实现：
 
-1. [WorkflowJournal.__init__](../src/agent_harness/workflow_runtime.py#L353) 在新运行中创建空文件，在 resume
+1. [WorkflowJournal.__init__](../src/agent_harness/workflow_runtime.py#L313) 在新运行中创建空文件，在 resume
    中逐行读取 JSON，恢复 `cache`、`historical_tokens` 和 `historical_agents`。
-2. [record](../src/agent_harness/workflow_runtime.py#L420) 写入 key、value、tokens 和累计用量，并立即 flush。
-3. [cached](../src/agent_harness/workflow_runtime.py#L417) 用相同语义 key 查找结果；命中时 `ExecutionState.agent`
+2. [record](../src/agent_harness/workflow_runtime.py#L380) 写入 key、value、tokens 和累计用量，并立即 flush。
+3. [cached](../src/agent_harness/workflow_runtime.py#L377) 用相同语义 key 查找结果；命中时 `ExecutionState.agent`
    直接返回缓存，不调用 runner，也不增加本次运行用量。
 4. 恢复第二个调用时，`Budget` 根据历史用量判断是否还能消费；超出上限会在真正调用 runner 前抛错。
 
@@ -472,18 +474,18 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 14. memory 选取 / 抽取
 
-在 [memory_runtime.select_relevant_memories](../src/agent_harness/memory_runtime.py#L294)、
-[extract_memories](../src/agent_harness/memory_runtime.py#L437) 下断点。
+在 [memory_runtime.select_relevant_memories](../src/agent_harness/memory_runtime.py#L278)、
+[extract_memories](../src/agent_harness/memory_runtime.py#L401) 下断点。
 选择「Agent 交互（真实 API）」，无需改配置，输入普通问题。
 没有已有 `.memory/` 记录时，选取会提前返回；抽取仍会调用模型。
 
 这里观察记忆的“先选取、后抽取、再合并”顺序，可以沿下面的顺序找实现：
 
-1. [list_memory_files](../src/agent_harness/memory_runtime.py#L213) 读取 `.memory/` 记录；没有记录或
+1. [list_memory_files](../src/agent_harness/memory_runtime.py#L197) 读取 `.memory/` 记录；没有记录或
    没有最近用户文本时，`select_relevant_memories` 直接返回空列表。
 2. 有记录时，`select_relevant_memories` 把目录做成索引 prompt，解析模型返回的 JSON 下标；调用失败
    时退回关键词排序，结果交给 `load_memories` 按字符预算读取正文。
-3. 一轮结束后，[extract_memories](../src/agent_harness/memory_runtime.py#L437) 把最近对话送给模型，
+3. 一轮结束后，[extract_memories](../src/agent_harness/memory_runtime.py#L401) 把最近对话送给模型，
    对每条候选执行 type、scope、description 和 body 校验。
 4. 校验通过的记录写入文件，再由 `consolidate_memories` 合并重复记录；未经校验的模型内容不会落盘。
 
@@ -528,11 +530,11 @@ Remote-WSL 已让断点自动生效，一般不需要。真要 attach：在 WSL 
 ### 运行相关
 
 - **`compact` 没有 handler**。它是 `BUILTIN_TOOLS` 里的 schema，由
-  [ManualCompaction.handle_tool_use](../src/agent_harness/compaction.py#L530) 处理，不进 handler 表。
+  [ManualCompaction.handle_tool_use](../src/agent_harness/compaction.py#L591) 处理，不进 handler 表。
   所以"27 工具 / 26 handler"是正常的。
 - **主动压缩每轮只执行一次**。压缩后本轮不再向模型提供 `compact`；下一条用户请求可以再次主动
   压缩。上下文超限触发的自动压缩不受此限制。
-- **自动压缩按字符预算计算**。修改 [core.CONTEXT_LIMIT](../src/agent_harness/core.py#L65)（默认 50000）后，
+- **自动压缩按字符预算计算**。修改 [core.CONTEXT_LIMIT](../src/agent_harness/core.py)（默认 50000）后，
   触发线 80%（40000）、压缩目标 70%（35000）、最新工具结果批次预算 16%（8000）、单条结果落盘
   阈值 8%（4000）和预览长度 2%（1000）会随之变化。低于触发线就停止，无须强行达到目标；主动
   `compact` 不受这些阈值限制。字符数不等于模型 token 数，系统提示词和工具定义不计入此预算。

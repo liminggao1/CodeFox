@@ -1,6 +1,7 @@
 """Protocol validation through the messages.create consumer interface."""
 
 from types import SimpleNamespace
+import asyncio
 
 import pytest
 
@@ -52,6 +53,13 @@ def test_invalid_arguments_fail_the_entire_tool_batch(monkeypatch, arguments):
 def test_missing_tool_identity(monkeypatch, item):
     with pytest.raises(llm_client.ProtocolResponseError):
         create(client_for(monkeypatch, {"status": "completed", "output": [item]}))
+
+
+def test_valid_id_is_used_when_call_id_is_unusable(monkeypatch):
+    for call_id in (None, "", " ", 1):
+        item = dict(tool(call_id=call_id), id="fallback-id")
+        message = create(client_for(monkeypatch, {"status": "completed", "output": [item]}))
+        assert message.content[0].id == "fallback-id"
 
 
 def test_incomplete_text_can_continue_but_incomplete_tools_cannot(monkeypatch):
@@ -109,3 +117,32 @@ def test_lead_protocol_failure_executes_no_tools_or_stop_and_restores_cron(host_
     assert not (host.core.WORKDIR / "bad.txt").exists()
     assert "ProtocolResponseError" in messages[-1]["content"][0]["text"]
     assert not any("tool_use" in str(msg) for msg in messages)
+
+
+def test_workflow_protocol_failure_writes_no_successful_agent_journal(host_factory, monkeypatch):
+    host = host_factory()
+    client = client_for(monkeypatch, {"status": "failed", "output": []})
+    runtime = host.workflow_runtime
+    monkeypatch.setattr(runtime, "RUNNER_FACTORY", lambda: runtime.AnthropicAgentRunner(client, "test"))
+
+    async def step(ctx, args):
+        return await ctx.agent("one step", label="first")
+
+    out = asyncio.run(runtime.WorkflowTool().call(
+        {"name": "protocol-failure", "description": "test"}, step))
+    assert out["task"].status == "failed"
+    assert "Invalid model response" in out["result"]["error"]
+    journal = runtime.store_dir() / f"{out['task'].run_id}.journal.jsonl"
+    assert journal.read_text(encoding="utf-8") == ""
+
+
+def test_goal_protocol_failure_preserves_active_condition(host_factory, monkeypatch):
+    host = host_factory()
+    client = client_for(monkeypatch, {"status": "failed", "output": []})
+    evaluator = host.goal_module.PromptGoalEvaluator(client=client, model="test")
+    goal = host.goal_module.GoalController(evaluator=evaluator)
+    goal.set_goal("tests pass")
+    result = asyncio.run(goal.evaluate_after_turn([]))
+    assert result.action == "error"
+    assert "ProtocolResponseError" in result.reason
+    assert goal.active.condition == "tests pass"
