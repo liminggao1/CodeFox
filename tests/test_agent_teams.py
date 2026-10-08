@@ -130,14 +130,14 @@ def test_runtime_state_moves_with_workdir(host_factory, tmp_path, monkeypatch) -
     next_dir = tmp_path / "next"
     next_dir.mkdir()
     monkeypatch.setattr(host.core, "WORKDIR", next_dir)
-    monkeypatch.setattr(host.workflow, "RUNNER_FACTORY", host.workflow.MockAgentRunner)
+    monkeypatch.setattr(host.workflow_runtime, "RUNNER_FACTORY", host.workflow_demo.MockAgentRunner)
 
     host.create_task("Moved task")
     host.compaction.save_output("tool-1", "output")
     host.compaction.write_transcript([{"role": "user", "content": "hello"}])
     host.memory_runtime.write_memory_file("note", "project", "Test", "body")
     host.schedule_job("* * * * *", "reminder")
-    asyncio.run(host.workflow.run_workflow("review-changes", {"budget": None}))
+    asyncio.run(host.workflow_runtime.run_workflow("review-changes", {"budget": None}))
     assert f"Working directory: {next_dir}" in host.prompts.assemble_system_prompt({})
     assert f"coding subagent at {next_dir}" in host.subagent.sub_system()
 

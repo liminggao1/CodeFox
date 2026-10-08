@@ -34,7 +34,8 @@ from . import tool_registry
 from . import memory_runtime
 from . import runtime_context
 from . import goal as goal_module
-from . import workflow
+from . import workflow_runtime
+from . import workflow_demo
 
 # 重新导出 cli.py 和 flat 构建依赖的名称。
 from .core import (  # noqa: F401
@@ -94,7 +95,6 @@ from .registrations import (  # noqa: F401
     run_connect_mcp, run_create_worktree,
 )
 from .recovery import RecoveryState  # noqa: F401
-from . import workflow as workflow_runtime  # noqa: F401
 
 scheduler.restore_cron_jobs([])
 try:
@@ -103,15 +103,16 @@ try:
 except Exception:
     pass
 
-workflow.RUNNER_FACTORY = (
-    lambda: workflow.AnthropicAgentRunner(core.client, core.MODEL)
+workflow_demo.register_workflows()
+workflow_runtime.RUNNER_FACTORY = (
+    lambda: workflow_runtime.AnthropicAgentRunner(core.client, core.MODEL)
 )
 
 tool_registry.REGISTRY.configure(
     registrations.builtin_definitions,
     mcp_tools.discover_tools,
     lambda: [tool_registry.ToolDefinition(
-        workflow.WORKFLOW_TOOL, workflow.run_workflow_sync, "Workflow")],
+        workflow_runtime.WORKFLOW_TOOL, workflow_runtime.run_workflow_sync, "Workflow")],
 )
 
 

@@ -433,37 +433,37 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 12. 工作流单次 agent 调用
 
-在 [ExecutionState.agent](../src/agent_harness/workflow.py#L520) 下断点。
+在 [ExecutionState.agent](../src/agent_harness/workflow_runtime.py#L520) 下断点。
 选择「Workflow demo（离线，不联网）」，无需改配置；使用 mock runner，但会在启动目录写入 `.runtime/`。
 
 这里观察一次 workflow 子 agent 的预算、校验和落盘，可以沿下面的顺序找实现：
 
-1. [ExecutionState.agent](../src/agent_harness/workflow.py#L520) 生成 label 和 journal key，检查缓存，
+1. [ExecutionState.agent](../src/agent_harness/workflow_runtime.py#L520) 生成 label 和 journal key，检查缓存，
    再检查 `Budget.remaining()` 与共享 agent 上限。
 2. 缓存未命中时，通过 `asyncio.to_thread` 调用 mock runner；返回的 `value/tokens` 先校验 schema，
    再累计到 `task.usage` 和 `task.cumulative_usage`。
-3. [WorkflowJournal.record](../src/agent_harness/workflow.py#L420) 把 key、结果和累计用量追加到 journal，
+3. [WorkflowJournal.record](../src/agent_harness/workflow_runtime.py#L420) 把 key、结果和累计用量追加到 journal，
    同时更新内存 cache。
-4. [run_workflow](../src/agent_harness/workflow.py#L820) 保存 task/output 快照并把状态打印到终端。
+4. [run_workflow](../src/agent_harness/workflow_runtime.py#L820) 保存 task/output 快照并把状态打印到终端。
 
 断点处重点看 `prompt`、`schema`、`label`、`Budget` 和 journal key。成功判据是 demo 完成、`.runtime/`
 位于启动目录，且没有真实 API 请求；把预算调小可观察超预算异常。
 
 #### 13. journal 读写与 resume
 
-在 [WorkflowJournal.__init__](../src/agent_harness/workflow.py#L353)、
-[record](../src/agent_harness/workflow.py#L420)、
-[cached](../src/agent_harness/workflow.py#L417) 下断点。
+在 [WorkflowJournal.__init__](../src/agent_harness/workflow_runtime.py#L353)、
+[record](../src/agent_harness/workflow_runtime.py#L420)、
+[cached](../src/agent_harness/workflow_runtime.py#L417) 下断点。
 选择「pytest（当前文件）」，把 `"${file}"` 改为
 `"tests/test_workflow.py::test_resume_replays_at_budget_limit_without_spending_again"`；
 写入与恢复都在同一个调试进程中。
 
 这里观察 journal 如何把一次运行变成可恢复的缓存，可以沿下面的顺序找实现：
 
-1. [WorkflowJournal.__init__](../src/agent_harness/workflow.py#L353) 在新运行中创建空文件，在 resume
+1. [WorkflowJournal.__init__](../src/agent_harness/workflow_runtime.py#L353) 在新运行中创建空文件，在 resume
    中逐行读取 JSON，恢复 `cache`、`historical_tokens` 和 `historical_agents`。
-2. [record](../src/agent_harness/workflow.py#L420) 写入 key、value、tokens 和累计用量，并立即 flush。
-3. [cached](../src/agent_harness/workflow.py#L417) 用相同语义 key 查找结果；命中时 `ExecutionState.agent`
+2. [record](../src/agent_harness/workflow_runtime.py#L420) 写入 key、value、tokens 和累计用量，并立即 flush。
+3. [cached](../src/agent_harness/workflow_runtime.py#L417) 用相同语义 key 查找结果；命中时 `ExecutionState.agent`
    直接返回缓存，不调用 runner，也不增加本次运行用量。
 4. 恢复第二个调用时，`Budget` 根据历史用量判断是否还能消费；超出上限会在真正调用 runner 前抛错。
 

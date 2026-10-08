@@ -16,7 +16,7 @@ import sys
 import threading
 
 from . import goal as goal_module
-from . import core, host, workflow
+from . import core, host, workflow_runtime, workflow_demo
 
 
 def handle_goal_command(query: str) -> tuple[bool, str]:
@@ -97,9 +97,9 @@ def main(argv: list[str] | None = None) -> None:
     if argv and argv[0] == "workflow":
         # demo 模式：保持离线，不调用真实 API。
         # 把 RUNNER_FACTORY 替换成"模拟的 Runner"，用于测试/演示
-        workflow.RUNNER_FACTORY = workflow.MockAgentRunner
+        workflow_runtime.RUNNER_FACTORY = workflow_demo.MockAgentRunner
         # 异步运行 demo，把 "workflow" 之后的参数传进去
-        asyncio.run(workflow.run_demo(argv[1:]))
+        asyncio.run(workflow_demo.run_demo(argv[1:]))
         return  # 跑完 demo 就结束，不再走下面的交互模式
 
     # 否则：走命令行交互模式（CLI）

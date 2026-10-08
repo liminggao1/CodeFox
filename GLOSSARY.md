@@ -3,7 +3,7 @@
 ## Glossary
 
 - **host**：`host.py`，把模型能做的事集中在一起；入口在 `cli.py`。
-- **workflow runtime**：`workflow.py`，可 resume 的多 agent 工作流；每次 `agent()` 调用进 journal。
+- **workflow runtime**：`workflow_runtime.py`，可 resume 的多 agent 工作流；每次 `agent()` 调用进 journal。
 - **goal**：`goal.py`，接在 agent 循环的 Stop 边界；模型不再请求工具时决定放行还是继续。
 - **runner**：工作流里执行单次 agent 调用的执行器；`AnthropicAgentRunner` 走真实 API，`MockAgentRunner` 离线。
 - **journal**：workflow 按调用键记录结果与 token 用量；resume 命中缓存时不重复计费。
@@ -44,7 +44,8 @@
 | `src/agent_harness/scheduler.py` | 后台任务与 cron 调度 |
 | `src/agent_harness/mcp_tools.py` | MCP 工具接入 |
 | `src/agent_harness/registrations.py` | 工具 schema 与 handler 表 |
-| `src/agent_harness/workflow.py` | 工作流运行时：定义、journal 缓存、预算、resume、并行 agent |
+| `src/agent_harness/workflow_runtime.py` | 工作流运行时：定义、journal 缓存、预算、resume、并行 agent |
+| `src/agent_harness/workflow_demo.py` | 运行时之外的示例编排和离线 runner |
 | `src/agent_harness/goal.py` | 目标层：GoalController + PromptGoalEvaluator |
 | `src/agent_harness/memory_runtime.py` | memory 运行时：相关记忆选取与抽取 |
 | `src/agent_harness/runtime_context.py` | RuntimeContext：每次模型调用前构造的只读运行时快照 |

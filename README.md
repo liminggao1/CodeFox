@@ -59,7 +59,8 @@ python -m agent_harness
 | `src/agent_harness/runtime_context.py` | 每次模型调用前构造只读上下文快照 |
 | `src/agent_harness/tool_registry.py` | 统一装配工具 schema、handler 和权限快照 |
 | `src/agent_harness/teammate_session.py` | 队友的模型调用、工具执行和当前任务目录绑定 |
-| `src/agent_harness/workflow.py` | 工作流运行时：journal、预算、resume、并行 agent |
+| `src/agent_harness/workflow_runtime.py` | 工作流运行时：journal、预算、resume、并行 agent |
+| `src/agent_harness/workflow_demo.py` | 保存的示例工作流、schema 与离线 mock runner；由 host/CLI 显式接线 |
 | `src/agent_harness/goal.py` | 目标层：GoalController / PromptGoalEvaluator |
 | `src/agent_harness/skills/` | 技能资产（随包分发） |
 | `scripts/build_flat.py` | 拼接生成 `flat/agent_full.py` |

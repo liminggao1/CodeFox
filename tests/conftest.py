@@ -58,6 +58,6 @@ def host_factory(tmp_path, monkeypatch):
 
 @pytest.fixture
 def workflow_module():
-    from agent_harness import workflow
+    from agent_harness import workflow_runtime as workflow
 
     return workflow

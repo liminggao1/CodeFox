@@ -24,16 +24,13 @@ SECTIONS = [
     "core", "tool_registry", "tasks", "worktrees", "skills", "prompts", "file_tools", "teammate_session", "teams",
     "hooks", "subagent", "compaction", "recovery", "scheduler",
     "task_worktrees", "mcp_tools",
-    "registrations", "memory_runtime", "runtime_context", "goal", "workflow", "host",
+    "registrations", "memory_runtime", "runtime_context", "goal", "workflow_runtime", "workflow_demo", "host",
 ]
 
 # Flat 构建把所有模块合并到同一命名空间，所以 "from . import X" 变为本模块的别名。
 RELATIVE_IMPORT_REPLACEMENTS = {
     "from .llm_client import Anthropic": "from agent_harness.llm_client import Anthropic",
     "from . import goal as goal_module": "goal_module = sys.modules[__name__]",
-    "from . import workflow as workflow_runtime": (
-        "workflow_runtime = sys.modules[__name__]"
-    ),
 }
 
 ENTRY = '''
@@ -107,7 +104,7 @@ def main(argv: list) -> None:
     if argv and argv[0] == "workflow":
         # demo 保持离线；只有交互式 host 会调用 API。
         RUNNER_FACTORY = MockAgentRunner
-        asyncio.run(run_demo(argv[1:]))
+        asyncio.run(workflow_demo.run_demo(argv[1:]))
         return
     run_cli()
 

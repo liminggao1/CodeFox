@@ -20,13 +20,15 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-from agent_harness import workflow  # noqa: E402
+from agent_harness import workflow_runtime as workflow  # noqa: E402
+from agent_harness import workflow_demo
 
 
 @pytest.fixture(autouse=True)
 def deterministic_runner(monkeypatch):
     """导入 agent.host 会连接 API runner；这些测试保持离线。"""
-    monkeypatch.setattr(workflow, "RUNNER_FACTORY", workflow.MockAgentRunner)
+    workflow_demo.register_workflows()
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", workflow_demo.MockAgentRunner)
 
 
 def run_cli(*args: str, cwd: Path) -> str:
@@ -48,7 +50,7 @@ def run_cli(*args: str, cwd: Path) -> str:
 
 
 def acquire_lock_in_child(run_id: str, store: str, results) -> None:
-    from agent_harness import workflow as child_workflow
+    from agent_harness import workflow_runtime as child_workflow
 
     child_workflow.store_dir = lambda: Path(store)
     try:
@@ -66,6 +68,22 @@ def test_workflow_runtime_resumes_from_journal(tmp_path: Path) -> None:
     assert "status=cached" in resumed
     assert "status=completed  agents=0  tokens=0" in resumed
     assert (tmp_path / ".runtime" / "last_run.txt").exists()
+
+
+def test_core_runtime_runs_without_importing_demo(tmp_path):
+    env = dict(os.environ, PYTHONPATH=str(PROJECT_ROOT / "src"))
+    code = (
+        "import asyncio, sys; from agent_harness import workflow_runtime as w; "
+        "assert 'agent_harness.workflow_demo' not in sys.modules; "
+        "assert not w.WORKFLOWS; "
+        "w.RUNNER_FACTORY=lambda: None; "
+        "exec('async def sample(ctx, args):\\n    return {\"answer\": 42}'); "
+        "out=asyncio.run(w.WorkflowTool().call({'name':'standalone','description':'test'},sample)); "
+        "assert out['task'].status=='completed'; assert out['result']=={'answer':42}"
+    )
+    result = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
 
 
 def test_resume_replays_at_budget_limit_without_spending_again(
@@ -125,7 +143,7 @@ def test_workflow_runtime_rejects_unsafe_artifact_names() -> None:
         with pytest.raises(workflow.WorkflowInputError):
             workflow.validate_meta({"name": name, "description": "unsafe"})
 
-    severity = workflow.FINDINGS_SCHEMA["properties"]["findings"]["items"][
+    severity = workflow_demo.FINDINGS_SCHEMA["properties"]["findings"]["items"][
         "properties"
     ]["severity"]
     validator = workflow.SimpleJsonSchema(severity)
@@ -146,7 +164,7 @@ def test_workflow_runtime_enforces_budget_and_shared_agent_cap(
     )
     task = workflow.LocalWorkflowTask("task", "wf_limit-test_0001", {})
     state = workflow.ExecutionState(
-        task, journal, workflow.MockAgentRunner(), workflow.Budget(), {}
+        task, journal, workflow_demo.MockAgentRunner(), workflow.Budget(), {}
     )
 
     async def child(child_state, _args):
