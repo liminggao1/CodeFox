@@ -53,13 +53,12 @@ def run_cli() -> None:
     print("Set a completion condition with /goal <condition>.\n")
 
     history: list = []                  # 对话历史（所有 user/assistant 消息）
-    context = host.update_context({}, history)   # 初始化上下文（从空开始）
     session_state = {"active_user_request": "(no active user request)"}  # 会话状态
 
     # 后台守护线程：跑异步事件循环（处理定时任务/异步回调）
     threading.Thread(
         target=host.async_event_loop,   # 在后台线程里执行这个函数
-        args=(history, context, session_state),  # 传给它的参数
+        args=(history, session_state),  # Pass history and the current request.
         daemon=True,                    # 守护线程：主程序退出它也自动结束
     ).start()
 
@@ -83,8 +82,7 @@ def run_cli() -> None:
             turn_start = len(history)                       # 记住本轮开始前的历史长度
             session_state["active_user_request"] = query    # 更新当前活跃请求
             history.append({"role": "user", "content": query})  # 用户消息存入历史
-            host.agent_loop(history, context, query)        # 核心：agent 思考+回复（会往 history 追加 assistant 消息）
-            context = host.update_context(context, history) # 更新长期上下文
+            host.agent_loop(history, query)  # Append responses and tool results.
             host.print_turn_assistants(history, turn_start) # 只打印本轮新增的助手回复
         print()                                             # 空行分隔，方便阅读
 

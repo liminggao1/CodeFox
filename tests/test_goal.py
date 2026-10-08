@@ -74,8 +74,7 @@ def run_host_turn(host_factory, responses, evaluations, condition="tests pass"):
     host.GOAL.set_goal(condition)
 
     messages = [{"role": "user", "content": "Make the tests pass."}]
-    context = host.update_context({}, messages)
-    host.agent_loop(messages, context, "Make the tests pass.")
+    host.agent_loop(messages, "Make the tests pass.")
     return host, client, evaluator, messages
 
 
@@ -275,7 +274,7 @@ def test_goal_is_not_consulted_without_an_active_condition(host_factory):
     host.GOAL = goal_module.GoalController(evaluator=evaluator)
 
     messages = [{"role": "user", "content": "just answer"}]
-    host.agent_loop(messages, host.update_context({}, messages), "just answer")
+    host.agent_loop(messages, "just answer")
 
     assert evaluator.seen == []
     assert len(client.calls) == 1

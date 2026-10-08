@@ -24,7 +24,7 @@ SECTIONS = [
     "core", "tasks", "worktrees", "skills", "prompts", "file_tools", "teams",
     "hooks", "subagent", "compaction", "recovery", "scheduler",
     "task_worktrees", "mcp_tools",
-    "registrations", "memory_runtime", "goal", "workflow", "host",
+    "registrations", "memory_runtime", "runtime_context", "goal", "workflow", "host",
 ]
 
 # Flat 构建把所有模块合并到同一命名空间，所以 "from . import X" 变为本模块的别名。
@@ -71,11 +71,10 @@ def run_cli() -> None:
     print("Set a completion condition with /goal <condition>.\\n")
 
     history: list = []
-    context = update_context({}, history)
     session_state = {"active_user_request": "(no active user request)"}
     threading.Thread(
         target=async_event_loop,
-        args=(history, context, session_state),
+        args=(history, session_state),
         daemon=True,
     ).start()
 
@@ -98,8 +97,7 @@ def run_cli() -> None:
             turn_start = len(history)
             session_state["active_user_request"] = query
             history.append({"role": "user", "content": query})
-            agent_loop(history, context, query)
-            context = update_context(context, history)
+            agent_loop(history, query)
             print_turn_assistants(history, turn_start)
         print()
 

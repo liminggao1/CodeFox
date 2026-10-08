@@ -58,7 +58,7 @@ def test_background_permission_is_checked_before_dispatch(
     host.core.client = SimpleNamespace(
         messages=SimpleNamespace(create=lambda **_: responses.pop(0)))
 
-    host.agent_loop(history, host.update_context({}, history), "delete")
+    host.agent_loop(history, "delete")
 
     assert not host.scheduler.background_tasks
     result = history[2]["content"][0]
@@ -227,7 +227,7 @@ def test_acknowledge_failure_keeps_the_model_response(
     monkeypatch.setattr(host.scheduler.os, "replace", fail_replace)
     history = [{"role": "user", "content": "Continue"}]
 
-    host.agent_loop(history, host.update_context({}, history), "Continue")
+    host.agent_loop(history, "Continue")
 
     assert history[-1]["role"] == "assistant"
     assert history[-1]["content"] == response.content

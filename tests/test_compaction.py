@@ -287,14 +287,14 @@ def test_manual_compact_runs_once_per_user_turn(host_factory, monkeypatch) -> No
     host.core.client = SimpleNamespace(messages=SimpleNamespace(create=create))
     messages = [{"role": "user", "content": "Compress the context"}]
 
-    host.agent_loop(messages, {}, "Compress the context")
+    host.agent_loop(messages, "Compress the context")
 
     assert len(list(host.core.transcript_dir().glob("transcript_*.jsonl"))) == 1
     assert "Compress the context" in messages[0]["content"]
     assert messages[-1]["content"][0].text == "done"
 
     messages.append({"role": "user", "content": "Compress again"})
-    host.agent_loop(messages, {}, "Compress again")
+    host.agent_loop(messages, "Compress again")
 
     assert len(list(host.core.transcript_dir().glob("transcript_*.jsonl"))) == 2
     assert ["compact" in names for names in offered_tools] == [

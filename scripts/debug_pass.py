@@ -120,7 +120,6 @@ def main() -> int:
     from agent_harness import goal as goal_module
 
     host.remember_after_turn = lambda messages: None  # 保持记忆功能离线
-    context = host.update_context({}, [])
 
     def t_tool_pool():
         tools, handlers = host.assemble_tool_pool()
@@ -139,7 +138,7 @@ def main() -> int:
         ])
         host.core.client = client
         messages = [{"role": "user", "content": "write hello.txt"}]
-        host.agent_loop(messages, dict(context), "write hello.txt")
+        host.agent_loop(messages, "write hello.txt")
         assert (workdir / "hello.txt").read_text(encoding="utf-8") == "hi from agent\n"
         assert len(client.calls) == 2, f"expected 2 model calls, got {len(client.calls)}"
         assert client.calls[0]["model"] == host.core.MODEL
@@ -188,7 +187,7 @@ def main() -> int:
         host.GOAL = goal_module.GoalController(evaluator=Evaluator())
         host.GOAL.set_goal("tests pass")
         messages = [{"role": "user", "content": "go"}]
-        host.agent_loop(messages, dict(context), "go")
+        host.agent_loop(messages, "go")
         assert len(client.calls) == 2, f"expected 2 model calls, got {len(client.calls)}"
         injected = [m for m in messages if "[Goal still active]" in str(m.get("content"))]
         assert len(injected) == 1, "block message not injected exactly once"

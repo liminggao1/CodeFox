@@ -31,6 +31,7 @@ from . import scheduler
 from . import mcp_tools
 from . import registrations
 from . import memory_runtime
+from . import runtime_context
 from . import goal as goal_module
 from . import workflow
 
@@ -135,25 +136,6 @@ def spawn_teammate(name: str, role: str, prompt: str,
 # -- 上下文 --
 
 
-def update_context(context: dict, messages: list) -> dict:
-    """刷新 Agent 运行时上下文。
-
-    Args:
-        context: 上一轮上下文；当前实现不直接使用，仅用于保持统一接口。
-        messages: 当前对话历史，用于加载相关记忆。
-
-    Returns:
-        包含记忆、已连接 MCP 服务器和活跃队友信息的新上下文字典。
-    """
-    return {
-        "memory_catalog": memory_runtime.read_memory_index(),     # 记忆索引
-        "memories": memory_runtime.load_memories(messages),       # 相关记忆
-        "connected_mcp": list(mcp_tools.mcp_clients.keys()),      # 已连接的 MCP 服务器
-        "active_teammates": list(teams.active_teammates.keys()),  # 活跃队友
-    }
-
-
-
 def remember_after_turn(messages: list) -> None:
     """从已完成的对话中提取并整理长期记忆。
 
@@ -237,7 +219,7 @@ def inject_background_notifications(messages: list):
             {"type": "text", "text": note} for note in notes]})
 
 
-def call_llm(messages: list, context: dict, tools: list,
+def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: list,
              state: recovery.RecoveryState, max_tokens: int):
     """调用模型并返回响应。
 
@@ -251,7 +233,7 @@ def call_llm(messages: list, context: dict, tools: list,
     Returns:
         模型客户端返回的响应对象。
     """
-    system = prompts.assemble_system_prompt(context)
+    system = prompts.assemble_system_prompt(context.prompt_values())
     return recovery.with_retry(
         lambda: core.client.messages.create(
             model=state.current_model,
@@ -287,11 +269,10 @@ def evaluate_goal(messages: list):
 
 
 # Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
-def agent_loop(messages: list, context: dict, active_request: str):
+def agent_loop(messages: list, active_request: str):
     """执行 Agent 主循环，直到模型完成回答或本轮无法继续。
     Args:
         messages: 当前对话历史，会被原地追加助手响应和工具结果。
-        context: 上一轮运行时上下文，用于生成本轮系统提示词。
         active_request: 当前用户请求，供历史压缩和任务续做使用。
     Returns:
         ``None``。执行结果通过更新 ``messages`` 和相关运行时状态交付。
@@ -343,7 +324,7 @@ def agent_loop(messages: list, context: dict, active_request: str):
         # 按上下文预算裁剪或压缩历史消息。
         prepare_context(messages, active_request)
         # 根据最新消息刷新记忆、MCP 和队友上下文。
-        context = update_context(context, messages)
+        context = runtime_context.build_context(messages)
         # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
         tools, handlers = mcp_tools.assemble_tool_pool()
         # 手动压缩完成后不再向模型提供 compact 工具。
@@ -540,7 +521,7 @@ def print_turn_assistants(messages: list, turn_start: int):
                 core.terminal_print(block["text"] if isinstance(block, dict) else block.text)
 
 
-def async_event_loop(history: list, context: dict, session_state: dict):
+def async_event_loop(history: list, session_state: dict):
     while True:
         time.sleep(1)
         with agent_lock:
@@ -565,6 +546,5 @@ def async_event_loop(history: list, context: dict, session_state: dict):
                 if scheduled_requests
                 else session_state["active_user_request"]
             )
-            agent_loop(history, context, active_request)
-            context.update(update_context(context, history))
+            agent_loop(history, active_request)
             print_turn_assistants(history, turn_start)
