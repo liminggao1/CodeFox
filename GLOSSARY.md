@@ -49,6 +49,7 @@
 | `src/agent_harness/memory_runtime.py` | memory 运行时：相关记忆选取与抽取 |
 | `src/agent_harness/runtime_context.py` | RuntimeContext：每次模型调用前构造的只读运行时快照 |
 | `src/agent_harness/tool_registry.py` | ToolRegistry：内置、MCP 和 Workflow 工具的装配 seam |
+| `src/agent_harness/teammate_session.py` | TeammateSession：不拥有 mailbox 或线程生命周期的执行 adapter |
 | `src/agent_harness/llm_client.py` | 客户端 shim：Anthropic Messages / OpenAI Responses 双协议 |
 | `src/agent_harness/cli.py` | 入口：交互 + `/goal` + workflow demo |
 | `scripts/build_flat.py` | 拼接生成单文件版 |

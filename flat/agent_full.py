@@ -40,10 +40,10 @@ import glob
 import signal
 import time
 tasks = sys.modules[__name__]
-import random
-from dataclasses import dataclass, field
 file_tools = sys.modules[__name__]
 hooks = sys.modules[__name__]
+import random
+from dataclasses import dataclass, field
 tool_registry = sys.modules[__name__]
 prompts = sys.modules[__name__]
 subagent = sys.modules[__name__]
@@ -1058,6 +1058,163 @@ def run_todo_write(todos: list) -> str:
     return f"Updated {len(tasks.CURRENT_TODOS)} todos"
 
 
+# ==== src/agent_harness/teammate_session.py ====
+
+class TeammateSession:
+    def __init__(self, name, client, model, system, authorize_tool, send_message, submit_plan):
+        self.name = name
+        self.client = client
+        self.model = model
+        self.system = system
+        self.authorize_tool = authorize_tool
+        def current_cwd() -> tuple[Path | None, str | None]:
+            if name not in tasks.teammate_assignments:
+                return None, "Error: Claim a Task before using workspace tools."
+            try:
+                return tasks.assignment_cwd(name), None
+            except (FileNotFoundError, ValueError) as exc:
+                return None, f"Error: Invalid task assignment: {exc}"
+
+        def _run_bash(command: str) -> str:
+            cwd, error = current_cwd()
+            return error or file_tools.run_bash(command, cwd=cwd)
+
+        def _run_read(path: str, limit: int | None = None,
+                      offset: int = 0) -> str:
+            cwd, error = current_cwd()
+            return error or file_tools.run_read(path, limit=limit, offset=offset, cwd=cwd)
+
+        def _run_write(path: str, content: str) -> str:
+            cwd, error = current_cwd()
+            return error or file_tools.run_write(path, content, cwd=cwd)
+
+        def _run_edit(path: str, old_text: str, new_text: str) -> str:
+            cwd, error = current_cwd()
+            return error or file_tools.run_edit(path, old_text, new_text, cwd=cwd)
+
+        def _run_glob(pattern: str) -> str:
+            cwd, error = current_cwd()
+            return error or file_tools.run_glob(pattern, cwd=cwd)
+
+        def _run_list_tasks():
+            task_list = tasks.list_tasks()
+            if not task_list:
+                return "No tasks."
+            return "\n".join(
+                f"  {t.id}: {t.subject} [{t.status}]"
+                + (f" (wt:{t.worktree})" if t.worktree else "")
+                for t in task_list)
+
+        def _run_claim_task(task_id: str):
+            try:
+                return tasks.claim_task(task_id, owner=name)
+            except ValueError as exc:
+                return f"Error: {exc}"
+            except FileNotFoundError:
+                return f"Error: Task {task_id} not found"
+
+        def _run_complete_task(task_id: str):
+            try:
+                return tasks.complete_task(task_id, owner=name)
+            except ValueError as exc:
+                return f"Error: {exc}"
+            except FileNotFoundError:
+                return f"Error: Task {task_id} not found"
+
+        self.tools = [
+            {"name": "bash", "description": "Run a shell command.",
+             "input_schema": {"type": "object",
+                              "properties": {"command": {"type": "string"}},
+                              "required": ["command"]}},
+            {"name": "read_file", "description": "Read file.",
+             "input_schema": {"type": "object",
+                              "properties": {
+                                  "path": {"type": "string"},
+                                  "limit": {"type": "integer"},
+                                  "offset": {"type": "integer"}},
+                              "required": ["path"]}},
+            {"name": "write_file", "description": "Write file.",
+             "input_schema": {"type": "object",
+                              "properties": {"path": {"type": "string"},
+                                             "content": {"type": "string"}},
+                              "required": ["path", "content"]}},
+            {"name": "edit_file", "description": "Replace text in a file.",
+             "input_schema": {"type": "object",
+                              "properties": {
+                                  "path": {"type": "string"},
+                                  "old_text": {"type": "string"},
+                                  "new_text": {"type": "string"}},
+                              "required": ["path", "old_text", "new_text"]}},
+            {"name": "glob", "description": "Find files by glob pattern; ** matches recursively.",
+             "input_schema": {"type": "object",
+                              "properties": {
+                                  "pattern": {"type": "string"}},
+                              "required": ["pattern"]}},
+            {"name": "send_message",
+             "description": "Send an intermediate message to 'lead' or an active teammate.",
+             "input_schema": {"type": "object",
+                              "properties": {"to": {"type": "string"},
+                                             "content": {"type": "string"}},
+                              "required": ["to", "content"]}},
+            {"name": "submit_plan",
+             "description": "Submit a plan for Lead approval.",
+             "input_schema": {"type": "object",
+                              "properties": {"plan": {"type": "string"}},
+                              "required": ["plan"]}},
+            {"name": "list_tasks",
+             "description": "List all tasks on the board.",
+             "input_schema": {"type": "object", "properties": {},
+                              "required": []}},
+            {"name": "claim_task",
+             "description": "Claim a pending task.",
+             "input_schema": {"type": "object",
+                              "properties": {"task_id": {"type": "string"}},
+                              "required": ["task_id"]}},
+            {"name": "complete_task",
+             "description": "Mark an in-progress task as completed.",
+             "input_schema": {"type": "object",
+                              "properties": {"task_id": {"type": "string"}},
+                              "required": ["task_id"]}},
+        ]
+
+        self.handlers = {
+            "bash": _run_bash, "read_file": _run_read,
+            "write_file": _run_write, "edit_file": _run_edit,
+            "glob": _run_glob,
+            "send_message": lambda to, content: send_message(to, content),
+            "submit_plan": lambda plan: submit_plan(plan),
+            "list_tasks": _run_list_tasks,
+            "claim_task": _run_claim_task,
+            "complete_task": _run_complete_task,
+        }
+
+
+    def execute_tool(self, block) -> str:
+        """Apply the current assignment gate and hooks before calling a handler."""
+        blocked = self.authorize_tool(block)
+        if blocked is not None:
+            return str(blocked)
+        blocked = hooks.trigger_hooks("PreToolUse", block)
+        if blocked is not None:
+            return str(blocked)
+        output = file_tools.call_tool_handler(self.handlers.get(block.name), block.input, block.name)
+        hooks.trigger_hooks("PostToolUse", block, output)
+        return str(output)
+
+    def run(self, messages: list):
+        """Append a model response and a complete batch of tool results; return it."""
+        response = self.client.messages.create(
+            model=self.model, system=self.system, messages=messages,
+            tools=self.tools, max_tokens=8000)
+        messages.append({"role": "assistant", "content": response.content})
+        calls = [block for block in response.content if block.type == "tool_use"]
+        if calls:
+            results = [{"type": "tool_result", "tool_use_id": block.id,
+                        "content": self.execute_tool(block)} for block in calls]
+            messages.append({"role": "user", "content": results})
+        return response
+
+
 # ==== src/agent_harness/teams.py ====
 
 # -- 消息总线与团队协议 --
@@ -1267,7 +1424,7 @@ def current_work_identity(owner: str) -> tuple[int, str | None]:
         return tasks.assignment_versions.get(owner, 0), task_id
 
 
-def _run_teammate_tool(name: str, block, handlers: dict) -> str:
+def authorize_teammate_tool(name: str, block) -> str | None:
     with tasks.task_lock:
         version = tasks.assignment_versions.get(name, 0)
         with team_lock:
@@ -1280,13 +1437,17 @@ def _run_teammate_tool(name: str, block, handlers: dict) -> str:
     if (block.name in {"bash", "write_file", "edit_file", "complete_task"}
             and gate not in {"not_required", "approved"}):
         return f"Blocked: plan status is {gate}."
-    blocked = hooks.trigger_hooks("PreToolUse", block)
-    if blocked is not None:
-        return str(blocked)
-    handler = handlers.get(block.name)
-    output = file_tools.call_tool_handler(handler, block.input, block.name)
-    hooks.trigger_hooks("PostToolUse", block, output)
-    return str(output)
+    return None
+
+
+def create_teammate_session(name: str, system: str = ""):
+    """Wire a session to live assignment and protocol operations."""
+    return TeammateSession(
+        name, core.client, core.MODEL, system,
+        lambda block: authorize_teammate_tool(name, block),
+        lambda to, content: _teammate_send_message(name, to, content),
+        lambda plan: _teammate_submit_plan(name, plan),
+    )
 
 
 def apply_plan_response(name: str, msg: dict) -> tuple[bool, str]:
@@ -1428,60 +1589,6 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
         return False
 
     def run_loop():
-        def current_cwd() -> tuple[Path | None, str | None]:
-            if name not in tasks.teammate_assignments:
-                return None, "Error: Claim a Task before using workspace tools."
-            try:
-                return tasks.assignment_cwd(name), None
-            except (FileNotFoundError, ValueError) as exc:
-                return None, f"Error: Invalid task assignment: {exc}"
-
-        def _run_bash(command: str) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_bash(command, cwd=cwd)
-
-        def _run_read(path: str, limit: int | None = None,
-                      offset: int = 0) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_read(path, limit=limit, offset=offset, cwd=cwd)
-
-        def _run_write(path: str, content: str) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_write(path, content, cwd=cwd)
-
-        def _run_edit(path: str, old_text: str, new_text: str) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_edit(path, old_text, new_text, cwd=cwd)
-
-        def _run_glob(pattern: str) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_glob(pattern, cwd=cwd)
-
-        def _run_list_tasks():
-            tasks = tasks.list_tasks()
-            if not tasks:
-                return "No tasks."
-            return "\n".join(
-                f"  {t.id}: {t.subject} [{t.status}]"
-                + (f" (wt:{t.worktree})" if t.worktree else "")
-                for t in tasks)
-
-        def _run_claim_task(task_id: str):
-            try:
-                return tasks.claim_task(task_id, owner=name)
-            except ValueError as exc:
-                return f"Error: {exc}"
-            except FileNotFoundError:
-                return f"Error: Task {task_id} not found"
-
-        def _run_complete_task(task_id: str):
-            try:
-                return tasks.complete_task(task_id, owner=name)
-            except ValueError as exc:
-                return f"Error: {exc}"
-            except FileNotFoundError:
-                return f"Error: Task {task_id} not found"
-
         initial_prompt = prompt
         if task_id:
             task = tasks.load_task(task_id)
@@ -1493,73 +1600,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
             initial_prompt += ("\n\n[Plan required] Submit a plan and wait for "
                                "Lead approval before bash, write_file, or edit_file.")
         messages = [{"role": "user", "content": initial_prompt}]
-        sub_tools = [
-            {"name": "bash", "description": "Run a shell command.",
-             "input_schema": {"type": "object",
-                              "properties": {"command": {"type": "string"}},
-                              "required": ["command"]}},
-            {"name": "read_file", "description": "Read file.",
-             "input_schema": {"type": "object",
-                              "properties": {
-                                  "path": {"type": "string"},
-                                  "limit": {"type": "integer"},
-                                  "offset": {"type": "integer"}},
-                              "required": ["path"]}},
-            {"name": "write_file", "description": "Write file.",
-             "input_schema": {"type": "object",
-                              "properties": {"path": {"type": "string"},
-                                             "content": {"type": "string"}},
-                              "required": ["path", "content"]}},
-            {"name": "edit_file", "description": "Replace text in a file.",
-             "input_schema": {"type": "object",
-                              "properties": {
-                                  "path": {"type": "string"},
-                                  "old_text": {"type": "string"},
-                                  "new_text": {"type": "string"}},
-                              "required": ["path", "old_text", "new_text"]}},
-            {"name": "glob", "description": "Find files by glob pattern; ** matches recursively.",
-             "input_schema": {"type": "object",
-                              "properties": {
-                                  "pattern": {"type": "string"}},
-                              "required": ["pattern"]}},
-            {"name": "send_message",
-             "description": "Send an intermediate message to 'lead' or an active teammate.",
-             "input_schema": {"type": "object",
-                              "properties": {"to": {"type": "string"},
-                                             "content": {"type": "string"}},
-                              "required": ["to", "content"]}},
-            {"name": "submit_plan",
-             "description": "Submit a plan for Lead approval.",
-             "input_schema": {"type": "object",
-                              "properties": {"plan": {"type": "string"}},
-                              "required": ["plan"]}},
-            {"name": "list_tasks",
-             "description": "List all tasks on the board.",
-             "input_schema": {"type": "object", "properties": {},
-                              "required": []}},
-            {"name": "claim_task",
-             "description": "Claim a pending task.",
-             "input_schema": {"type": "object",
-                              "properties": {"task_id": {"type": "string"}},
-                              "required": ["task_id"]}},
-            {"name": "complete_task",
-             "description": "Mark an in-progress task as completed.",
-             "input_schema": {"type": "object",
-                              "properties": {"task_id": {"type": "string"}},
-                              "required": ["task_id"]}},
-        ]
-
-        sub_handlers = {
-            "bash": _run_bash, "read_file": _run_read,
-            "write_file": _run_write, "edit_file": _run_edit,
-            "glob": _run_glob,
-            "send_message": lambda to, content: _teammate_send_message(
-                name, to, content),
-            "submit_plan": lambda plan: _teammate_submit_plan(name, plan),
-            "list_tasks": _run_list_tasks,
-            "claim_task": _run_claim_task,
-            "complete_task": _run_complete_task,
-        }
+        session = create_teammate_session(name, system)
 
         should_stop = False
         while not should_stop:
@@ -1572,25 +1613,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
             with team_lock:
                 active_teammates[name] = "working"
             try:
-                response = core.client.messages.create(
-                    model=core.MODEL, system=system, messages=messages,
-                    tools=sub_tools, max_tokens=8000)
+                response = session.run(messages)
             except Exception as exc:
                 BUS.send(name, "lead",
                          f"{type(exc).__name__}: {exc}", "error")
                 break
-            messages.append({"role": "assistant", "content": response.content})
-            tool_calls = [
-                block for block in response.content if block.type == "tool_use"
-            ]
-            if tool_calls:
-                results = []
-                for block in tool_calls:
-                    output = _run_teammate_tool(name, block, sub_handlers)
-                    results.append({"type": "tool_result",
-                                    "tool_use_id": block.id,
-                                    "content": str(output)})
-                messages.append({"role": "user", "content": results})
+            if any(block.type == "tool_use" for block in response.content):
                 continue
 
             summary = _last_assistant_text(response.content)

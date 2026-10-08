@@ -63,7 +63,7 @@ from .teams import (  # noqa: F401
     active_teammates, consume_lead_inbox, format_team_events, plan_gates,
     plan_request_ids, pending_requests, ProtocolState, new_request_id,
     match_response, is_valid_agent_name, scan_unclaimed_tasks, claim_next_task,
-    current_work_identity, _run_teammate_tool, apply_plan_response,
+    current_work_identity, apply_plan_response,
     apply_shutdown_request, _teammate_send_message, _teammate_submit_plan,
     spawn_teammate_thread, run_request_plan, run_request_shutdown,
     run_review_plan, team_lock,

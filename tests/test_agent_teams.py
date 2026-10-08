@@ -249,11 +249,13 @@ def test_plan_gate_blocks_mutating_teammate_tools(host_factory) -> None:
         handlers = {tool_name: lambda **kwargs: calls.append(kwargs) or "done"}
 
         host.plan_gates["alice"] = "pending"
-        assert "Blocked" in host._run_teammate_tool("alice", block, handlers)
+        session = host.teams.create_teammate_session("alice")
+        session.handlers.update(handlers)
+        assert "Blocked" in session.execute_tool(block)
         assert calls == []
 
         host.plan_gates["alice"] = "approved"
-        assert host._run_teammate_tool("alice", block, handlers) == "done"
+        assert session.execute_tool(block) == "done"
         assert len(calls) == 1
 
 
@@ -265,7 +267,9 @@ def test_plan_gate_blocks_teammate_completion_but_not_lead(host_factory) -> None
     block = SimpleNamespace(name="complete_task", input={"task_id": teammate_task.id})
     handlers = {"complete_task": lambda task_id: host.complete_task(task_id, owner="alice")}
 
-    assert "Blocked" in host._run_teammate_tool("alice", block, handlers)
+    session = host.teams.create_teammate_session("alice")
+    session.handlers.update(handlers)
+    assert "Blocked" in session.execute_tool(block)
     assert host.load_task(teammate_task.id).status == "in_progress"
 
     lead_task = host.create_task("Lead task")
@@ -342,7 +346,9 @@ def test_old_approval_cannot_unlock_a_new_assignment(host_factory) -> None:
     assert "Ignored" in notice
     block = SimpleNamespace(name="complete_task", input={"task_id": task.id})
     handlers = {"complete_task": lambda task_id: host.complete_task(task_id, "alice")}
-    assert "Blocked" in host._run_teammate_tool("alice", block, handlers)
+    session = host.teams.create_teammate_session("alice")
+    session.handlers.update(handlers)
+    assert "Blocked" in session.execute_tool(block)
     assert host.load_task(task.id).status == "in_progress"
 
 
