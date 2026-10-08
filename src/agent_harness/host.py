@@ -211,7 +211,7 @@ def inject_background_notifications(messages: list):
 
 
 def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: list,
-             state: recovery.RecoveryState, max_tokens: int):
+             state: recovery.RecoveryState):
     """调用模型并返回响应。
 
     Args:
@@ -219,7 +219,6 @@ def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: lis
         context: 用于生成系统提示词的运行时上下文。
         tools: 本轮可用的工具描述列表。
         state: 本轮模型重试和恢复状态。
-        max_tokens: 本次响应的 token 上限。
 
     Returns:
         模型客户端返回的响应对象。
@@ -231,7 +230,7 @@ def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: lis
             system=system,
             messages=messages,
             tools=tools,
-            max_tokens=max_tokens),
+            max_tokens=state.max_tokens),
         state)
 
 
@@ -274,8 +273,6 @@ def agent_loop(messages: list, active_request: str):
     tools, handlers = assemble_tool_pool()
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
-    # 首次调用使用默认输出 token 上限。
-    max_tokens = core.DEFAULT_MAX_TOKENS
     # 管理本轮手动压缩的工具响应和执行时机。
     manual_compaction = compaction.ManualCompaction()
     automatic_compaction_enabled = True
@@ -329,13 +326,12 @@ def agent_loop(messages: list, active_request: str):
         # 调用模型，并在失败时区分上下文超限与其他错误。
         try:
             # 重试策略和模型降级由 call_llm 内部处理。
-            response = call_llm(messages, context, tools, state, max_tokens)
+            response = call_llm(messages, context, tools, state)
         # 仅在重试策略仍无法完成调用时进入此分支。
         except Exception as e:
             # 首次遇到提示过长错误时压缩历史，再重新调用模型。
-            if recovery.is_prompt_too_long_error(e) and not state.has_attempted_reactive_compact:
+            if recovery.is_prompt_too_long_error(e) and state.claim_reactive_compaction():
                 # 原地替换历史，保留调用方持有的列表引用。
-                state.has_attempted_reactive_compact = True
                 compacted = compaction.reactive_compact(messages, active_request)
                 if compacted.reason is None:
                     continue
@@ -361,26 +357,16 @@ def agent_loop(messages: list, active_request: str):
         # 清空本轮待确认清单。
         unacknowledged_cron_jobs.clear()
 
-        # 输出达到 token 上限时，先提高上限，再尝试续写。
-        if response.stop_reason == "max_tokens":
-            # 尚未提高过上限时，使用更大的上限重试当前调用。
-            if not state.has_escalated:
-                # 设置升级后的输出 token 上限。
-                max_tokens = core.ESCALATED_MAX_TOKENS
-                # 防止下一次超限时重复升级。
-                state.has_escalated = True
-                # 在终端显示本次重试的上限。
-                print(f"  \033[33m[max_tokens] retry with {max_tokens}\033[0m")
-                # 重新调用模型，暂不把截断响应写入历史。
-                continue
-            # 升级后仍截断时，先保存模型已生成的内容。
+        action = state.accept_response(response.stop_reason)
+        if action == "retry":
+            print(f"  \033[33m[max_tokens] retry with {state.max_tokens}\033[0m")
+            continue
+        if action in {"continue", "stop"}:
+            # Preserve partial text only after the upgraded call has returned.
             messages.append({"role": "assistant", "content": response.content})
-            # 在允许的恢复次数内，请求模型从截断处继续。
-            if state.recovery_count < core.MAX_RECOVERY_RETRIES:
+            if action == "continue":
                 # 添加续写提示，作为下一次模型调用的用户消息。
                 messages.append({"role": "user", "content": core.CONTINUATION_PROMPT})
-                # 记录已使用的一次续写机会。
-                state.recovery_count += 1
                 # 返回循环顶部继续调用模型。
                 continue
             # 续写机会耗尽时释放已完成的分配记录。
@@ -388,10 +374,6 @@ def agent_loop(messages: list, active_request: str):
             # 停止本轮交互。
             return
 
-        # 本次响应未截断，下一次调用恢复默认 token 上限。
-        max_tokens = core.DEFAULT_MAX_TOKENS
-        # 清除本轮上限升级标记。
-        state.has_escalated = False
         # 保存模型响应，供工具结果和后续调用引用。
         messages.append({"role": "assistant", "content": response.content})
         # 没有工具请求时，模型已完成当前一轮回答。

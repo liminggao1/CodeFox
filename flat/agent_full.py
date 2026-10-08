@@ -2599,11 +2599,65 @@ class ManualCompaction:
 
 class RecoveryState:
     def __init__(self):
-        self.has_escalated = False
-        self.recovery_count = 0
-        self.consecutive_529 = 0
-        self.has_attempted_reactive_compact = False
-        self.current_model = core.PRIMARY_MODEL
+        self._has_escalated = False
+        self._recovery_count = 0
+        self._consecutive_529 = 0
+        self._reactive_compaction_claimed = False
+        self._current_model = core.PRIMARY_MODEL
+        self._max_tokens = core.DEFAULT_MAX_TOKENS
+
+    @property
+    def current_model(self):
+        return self._current_model
+
+    @property
+    def max_tokens(self):
+        return self._max_tokens
+
+    @property
+    def consecutive_529(self):
+        return self._consecutive_529
+
+    @property
+    def recovery_count(self):
+        return self._recovery_count
+
+    def accept_response(self, stop_reason: str) -> str:
+        """Return retry, continue, stop or accept without changing conversation history."""
+        if stop_reason == "max_tokens":
+            if not self._has_escalated:
+                self._has_escalated = True
+                self._max_tokens = core.ESCALATED_MAX_TOKENS
+                return "retry"
+            if self._recovery_count < core.MAX_RECOVERY_RETRIES:
+                self._recovery_count += 1
+                return "continue"
+            return "stop"
+        self._max_tokens = core.DEFAULT_MAX_TOKENS
+        self._has_escalated = False
+        return "accept"
+
+    def claim_reactive_compaction(self) -> bool:
+        """Consume this turn's single reactive compaction opportunity."""
+        if self._reactive_compaction_claimed:
+            return False
+        self._reactive_compaction_claimed = True
+        return True
+
+    def note_rate_limit(self) -> None:
+        self._consecutive_529 = 0
+
+    def note_call_success(self) -> None:
+        self._consecutive_529 = 0
+
+    def note_overload(self) -> bool:
+        """Count consecutive overloads and report whether the model was switched."""
+        self._consecutive_529 += 1
+        if self._consecutive_529 >= core.MAX_CONSECUTIVE_529 and core.FALLBACK_MODEL:
+            self._current_model = core.FALLBACK_MODEL
+            self._consecutive_529 = 0
+            return True
+        return False
 
 
 def retry_delay(attempt: int) -> float:
@@ -2631,7 +2685,7 @@ def with_retry(fn, state: RecoveryState):
         try:
             result = fn()
             # 执行成功，清空连续529过载计数
-            state.consecutive_529 = 0
+            state.note_call_success()
             return result
         except Exception as e:
             if isinstance(e, ProtocolResponseError):
@@ -2640,6 +2694,7 @@ def with_retry(fn, state: RecoveryState):
             msg = str(e).lower()
             # 捕获429限流错误，延时后重试
             if "ratelimit" in name or "429" in msg:
+                state.note_rate_limit()
                 delay = retry_delay(attempt)
                 print(f"  \033[33m[429] retry {attempt + 1}/{core.MAX_RETRIES} "
                       f"after {delay:.1f}s\033[0m")
@@ -2647,11 +2702,8 @@ def with_retry(fn, state: RecoveryState):
                 continue
             # 捕获529服务过载错误，累计失败次数，达到阈值切换备用模型
             if "overloaded" in name or "529" in msg or "overloaded" in msg:
-                state.consecutive_529 += 1
-                if state.consecutive_529 >= core.MAX_CONSECUTIVE_529 and core.FALLBACK_MODEL:
-                    state.current_model = core.FALLBACK_MODEL
-                    state.consecutive_529 = 0
-                    print(f"  \033[31m[529] switching to {core.FALLBACK_MODEL}\033[0m")
+                if state.note_overload():
+                    print(f"  \033[31m[529] switching to {state.current_model}\033[0m")
                 delay = retry_delay(attempt)
                 print(f"  \033[33m[529] retry {attempt + 1}/{core.MAX_RETRIES} "
                       f"after {delay:.1f}s\033[0m")
@@ -5696,7 +5748,7 @@ def inject_background_notifications(messages: list):
 
 
 def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: list,
-             state: recovery.RecoveryState, max_tokens: int):
+             state: recovery.RecoveryState):
     """调用模型并返回响应。
 
     Args:
@@ -5704,7 +5756,6 @@ def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: lis
         context: 用于生成系统提示词的运行时上下文。
         tools: 本轮可用的工具描述列表。
         state: 本轮模型重试和恢复状态。
-        max_tokens: 本次响应的 token 上限。
 
     Returns:
         模型客户端返回的响应对象。
@@ -5716,7 +5767,7 @@ def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: lis
             system=system,
             messages=messages,
             tools=tools,
-            max_tokens=max_tokens),
+            max_tokens=state.max_tokens),
         state)
 
 
@@ -5759,8 +5810,6 @@ def agent_loop(messages: list, active_request: str):
     tools, handlers = assemble_tool_pool()
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
-    # 首次调用使用默认输出 token 上限。
-    max_tokens = core.DEFAULT_MAX_TOKENS
     # 管理本轮手动压缩的工具响应和执行时机。
     manual_compaction = compaction.ManualCompaction()
     automatic_compaction_enabled = True
@@ -5814,13 +5863,12 @@ def agent_loop(messages: list, active_request: str):
         # 调用模型，并在失败时区分上下文超限与其他错误。
         try:
             # 重试策略和模型降级由 call_llm 内部处理。
-            response = call_llm(messages, context, tools, state, max_tokens)
+            response = call_llm(messages, context, tools, state)
         # 仅在重试策略仍无法完成调用时进入此分支。
         except Exception as e:
             # 首次遇到提示过长错误时压缩历史，再重新调用模型。
-            if recovery.is_prompt_too_long_error(e) and not state.has_attempted_reactive_compact:
+            if recovery.is_prompt_too_long_error(e) and state.claim_reactive_compaction():
                 # 原地替换历史，保留调用方持有的列表引用。
-                state.has_attempted_reactive_compact = True
                 compacted = compaction.reactive_compact(messages, active_request)
                 if compacted.reason is None:
                     continue
@@ -5846,26 +5894,16 @@ def agent_loop(messages: list, active_request: str):
         # 清空本轮待确认清单。
         unacknowledged_cron_jobs.clear()
 
-        # 输出达到 token 上限时，先提高上限，再尝试续写。
-        if response.stop_reason == "max_tokens":
-            # 尚未提高过上限时，使用更大的上限重试当前调用。
-            if not state.has_escalated:
-                # 设置升级后的输出 token 上限。
-                max_tokens = core.ESCALATED_MAX_TOKENS
-                # 防止下一次超限时重复升级。
-                state.has_escalated = True
-                # 在终端显示本次重试的上限。
-                print(f"  \033[33m[max_tokens] retry with {max_tokens}\033[0m")
-                # 重新调用模型，暂不把截断响应写入历史。
-                continue
-            # 升级后仍截断时，先保存模型已生成的内容。
+        action = state.accept_response(response.stop_reason)
+        if action == "retry":
+            print(f"  \033[33m[max_tokens] retry with {state.max_tokens}\033[0m")
+            continue
+        if action in {"continue", "stop"}:
+            # Preserve partial text only after the upgraded call has returned.
             messages.append({"role": "assistant", "content": response.content})
-            # 在允许的恢复次数内，请求模型从截断处继续。
-            if state.recovery_count < core.MAX_RECOVERY_RETRIES:
+            if action == "continue":
                 # 添加续写提示，作为下一次模型调用的用户消息。
                 messages.append({"role": "user", "content": core.CONTINUATION_PROMPT})
-                # 记录已使用的一次续写机会。
-                state.recovery_count += 1
                 # 返回循环顶部继续调用模型。
                 continue
             # 续写机会耗尽时释放已完成的分配记录。
@@ -5873,10 +5911,6 @@ def agent_loop(messages: list, active_request: str):
             # 停止本轮交互。
             return
 
-        # 本次响应未截断，下一次调用恢复默认 token 上限。
-        max_tokens = core.DEFAULT_MAX_TOKENS
-        # 清除本轮上限升级标记。
-        state.has_escalated = False
         # 保存模型响应，供工具结果和后续调用引用。
         messages.append({"role": "assistant", "content": response.content})
         # 没有工具请求时，模型已完成当前一轮回答。

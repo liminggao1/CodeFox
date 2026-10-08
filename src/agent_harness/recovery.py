@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import random
 import time
-from dataclasses import dataclass
 
 from . import core
 from .llm_client import ProtocolResponseError
@@ -16,11 +15,65 @@ from .llm_client import ProtocolResponseError
 
 class RecoveryState:
     def __init__(self):
-        self.has_escalated = False
-        self.recovery_count = 0
-        self.consecutive_529 = 0
-        self.has_attempted_reactive_compact = False
-        self.current_model = core.PRIMARY_MODEL
+        self._has_escalated = False
+        self._recovery_count = 0
+        self._consecutive_529 = 0
+        self._reactive_compaction_claimed = False
+        self._current_model = core.PRIMARY_MODEL
+        self._max_tokens = core.DEFAULT_MAX_TOKENS
+
+    @property
+    def current_model(self):
+        return self._current_model
+
+    @property
+    def max_tokens(self):
+        return self._max_tokens
+
+    @property
+    def consecutive_529(self):
+        return self._consecutive_529
+
+    @property
+    def recovery_count(self):
+        return self._recovery_count
+
+    def accept_response(self, stop_reason: str) -> str:
+        """Return retry, continue, stop or accept without changing conversation history."""
+        if stop_reason == "max_tokens":
+            if not self._has_escalated:
+                self._has_escalated = True
+                self._max_tokens = core.ESCALATED_MAX_TOKENS
+                return "retry"
+            if self._recovery_count < core.MAX_RECOVERY_RETRIES:
+                self._recovery_count += 1
+                return "continue"
+            return "stop"
+        self._max_tokens = core.DEFAULT_MAX_TOKENS
+        self._has_escalated = False
+        return "accept"
+
+    def claim_reactive_compaction(self) -> bool:
+        """Consume this turn's single reactive compaction opportunity."""
+        if self._reactive_compaction_claimed:
+            return False
+        self._reactive_compaction_claimed = True
+        return True
+
+    def note_rate_limit(self) -> None:
+        self._consecutive_529 = 0
+
+    def note_call_success(self) -> None:
+        self._consecutive_529 = 0
+
+    def note_overload(self) -> bool:
+        """Count consecutive overloads and report whether the model was switched."""
+        self._consecutive_529 += 1
+        if self._consecutive_529 >= core.MAX_CONSECUTIVE_529 and core.FALLBACK_MODEL:
+            self._current_model = core.FALLBACK_MODEL
+            self._consecutive_529 = 0
+            return True
+        return False
 
 
 def retry_delay(attempt: int) -> float:
@@ -48,7 +101,7 @@ def with_retry(fn, state: RecoveryState):
         try:
             result = fn()
             # 执行成功，清空连续529过载计数
-            state.consecutive_529 = 0
+            state.note_call_success()
             return result
         except Exception as e:
             if isinstance(e, ProtocolResponseError):
@@ -57,6 +110,7 @@ def with_retry(fn, state: RecoveryState):
             msg = str(e).lower()
             # 捕获429限流错误，延时后重试
             if "ratelimit" in name or "429" in msg:
+                state.note_rate_limit()
                 delay = retry_delay(attempt)
                 print(f"  \033[33m[429] retry {attempt + 1}/{core.MAX_RETRIES} "
                       f"after {delay:.1f}s\033[0m")
@@ -64,11 +118,8 @@ def with_retry(fn, state: RecoveryState):
                 continue
             # 捕获529服务过载错误，累计失败次数，达到阈值切换备用模型
             if "overloaded" in name or "529" in msg or "overloaded" in msg:
-                state.consecutive_529 += 1
-                if state.consecutive_529 >= core.MAX_CONSECUTIVE_529 and core.FALLBACK_MODEL:
-                    state.current_model = core.FALLBACK_MODEL
-                    state.consecutive_529 = 0
-                    print(f"  \033[31m[529] switching to {core.FALLBACK_MODEL}\033[0m")
+                if state.note_overload():
+                    print(f"  \033[31m[529] switching to {state.current_model}\033[0m")
                 delay = retry_delay(attempt)
                 print(f"  \033[33m[529] retry {attempt + 1}/{core.MAX_RETRIES} "
                       f"after {delay:.1f}s\033[0m")
