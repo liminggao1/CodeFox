@@ -190,11 +190,18 @@ def rebuild_memory_index() -> None:
     )
 
 def read_memory_index() -> str:
+    # 函数签名：返回记忆索引文件的文本内容；读不到就返回 ""（空字符串）
     try:
+        # 尝试定位记忆索引文件的路径（allow_index=True 表示允许走索引文件）
+        # memory_path 在找不到/不合法时会抛 ValueError
         path = memory_path(MEMORY_INDEX_NAME, allow_index=True)
     except ValueError:
+        # 没索引文件（或没配置记忆目录）时不报错，直接返回空串
+        # → 上层拿到空字符串就知道"当前没有记忆系统"
         return ""
+    # 文件存在才读内容，读完 strip 去掉首尾空白；不存在就返回空串
     return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
 
 def read_memory_file(filename: str) -> str | None:
     try:
@@ -283,56 +290,94 @@ def keyword_memory_selection(
     ranked.sort(key=lambda item: (-item[0], item[1]))
     return [filename for _, filename in ranked[:max_items]]
 
+##？？?这里后期升级为rag？或者私有知识库?
 def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
+    """从记忆库中挑选和当前用户请求相关的记忆文件，优先使用大模型做相关性筛选；模型调用失败时降级到关键词匹配。
+    Args:
+        messages: 对话历史消息列表，用于提取用户最近提问作为检索query
+        max_items: 最多返回多少条相关记忆文件，默认上限5条
+    Returns:
+        字符串列表，元素是记忆文件的文件名；无匹配记忆返回空列表
+    """
+    # 获取全部记忆文件的元信息（名称、描述、文件路径）
     records = list_memory_files()
+    # 提取对话里最近的用户文本，作为检索query
     query = recent_user_text(messages)
+    # 没有记忆文件，或者没有用户查询文本，直接返回空
     if not records or not query:
         return []
-
+    # 拼接记忆目录文本：把所有记忆条目编号、名称、描述拼成字符串，供模型阅读
     catalog = "\n".join(
         f"{index}: {' '.join(record['name'].split())} - "
         f"{' '.join(record['description'].split())}"
         for index, record in enumerate(records)
     )
+    # 构造提示词，指令模型选出相关记忆，只返回JSON数组格式的索引
     prompt = (
         "Select memory records that are relevant to the current user request. "
         "Return only a JSON array of catalog indices, such as [0, 2]. "
         "Return [] when none are relevant.\n\n"
         f"Current request:\n{query}\n\nMemory catalog:\n{catalog[:12000]}"
     )
-
     try:
+        # 调用大模型，传入prompt，让模型判断哪些记忆条目相关
         response = core.client.messages.create(
             model=core.MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
         )
+        # 从模型返回文本提取JSON数组，得到选中的记忆索引
         indices = extract_json_array(
             message_text({"content": response.content})
         )
         selected = []
+        # 遍历模型返回的索引，校验合法性，收集对应的记忆文件名
         for index in indices:
+            # 校验索引必须是整数，且不越界
             if isinstance(index, int) and 0 <= index < len(records):
                 filename = records[index]["filename"]
+                # 去重，防止重复选中同一个记忆文件
                 if filename not in selected:
                     selected.append(filename)
+                # 达到最大条数上限，停止收集
                 if len(selected) == max_items:
                     break
         return selected
     except Exception:
+        # 模型调用异常（网络/解析报错等），降级使用关键词检索方案
         return keyword_memory_selection(records, query, max_items)
 
+
 def load_memories(messages: list) -> str:
+    """根据当前对话历史检索相关记忆，在字符预算限制下加载记忆内容，返回JSON字符串。
+    Args:
+        messages: 当前对话消息列表，用于筛选相关性记忆
+    Returns:
+        JSON字符串，包含记忆来源文件名与截取后的记忆内容；无匹配记忆时返回空字符串
+    Note:
+        按照记忆相关性顺序依次加载，达到字符上限后停止加载后续记忆；
+        单条记忆会按需截断，保证总记忆字符不超过 RECALL_CHAR_LIMIT。
+    """
+    # 存放成功加载的记忆条目
     loaded = []
+    # 剩余可使用的记忆字符预算
     remaining = RECALL_CHAR_LIMIT
+    # 根据对话筛选相关记忆文件，按相关性顺序遍历
     for filename in select_relevant_memories(messages):
+        # 读取单个记忆文件原文
         content = read_memory_file(filename)
+        # 文件无内容 / 字符预算耗尽，跳过本条记忆
         if not content or remaining <= 0:
             continue
+        # 截取不超过剩余预算长度的记忆文本
         recalled = content[:remaining]
+        # 记录记忆来源和截取后的内容
         loaded.append({"source": filename, "content": recalled})
+        # 扣除已使用字符，更新剩余预算
         remaining -= len(recalled)
+    # 存在记忆则输出格式化JSON；无记忆返回空字符串
     return json.dumps(loaded, ensure_ascii=False, indent=2) if loaded else ""
+
 
 def build_system(relevant_memories: str = "") -> str:
     index = read_memory_index()

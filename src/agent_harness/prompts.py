@@ -11,7 +11,6 @@ from datetime import datetime
 
 from . import core
 from . import skills
-from . import mcp_tools
 
 # -- 提示词组装 --
 
@@ -81,7 +80,10 @@ def assemble_system_prompt(context: dict) -> str:
         sections.append(f"Memory catalog:\n{context['memory_catalog']}")
     if context.get("memories"):
         sections.append(f"Relevant memory records:\n{context['memories']}")
-    mcp_names = list(mcp_tools.mcp_clients.keys())
+    mcp_names = context.get("connected_mcp") or []
     if mcp_names:
         sections.append(f"Connected MCP servers: {', '.join(mcp_names)}")
+    teammate_names = context.get("active_teammates") or []
+    if teammate_names:
+        sections.append(f"Active teammates: {', '.join(teammate_names)}")
     return "\n\n".join(sections)

@@ -136,15 +136,33 @@ def spawn_teammate(name: str, role: str, prompt: str,
 
 
 def update_context(context: dict, messages: list) -> dict:
+    """刷新 Agent 运行时上下文。
+
+    Args:
+        context: 上一轮上下文；当前实现不直接使用，仅用于保持统一接口。
+        messages: 当前对话历史，用于加载相关记忆。
+
+    Returns:
+        包含记忆、已连接 MCP 服务器和活跃队友信息的新上下文字典。
+    """
     return {
-        "memory_catalog": memory_runtime.read_memory_index(),
-        "memories": memory_runtime.load_memories(messages),
-        "connected_mcp": list(mcp_tools.mcp_clients.keys()),
-        "active_teammates": list(teams.active_teammates.keys()),
+        "memory_catalog": memory_runtime.read_memory_index(),     # 记忆索引
+        "memories": memory_runtime.load_memories(messages),       # 相关记忆
+        "connected_mcp": list(mcp_tools.mcp_clients.keys()),      # 已连接的 MCP 服务器
+        "active_teammates": list(teams.active_teammates.keys()),  # 活跃队友
     }
 
 
+
 def remember_after_turn(messages: list) -> None:
+    """从已完成的对话中提取并整理长期记忆。
+
+    Args:
+        messages: 已完成本轮处理的完整对话历史。
+
+    Returns:
+        ``None``。
+    """
     if memory_runtime.extract_memories(messages):
         memory_runtime.consolidate_memories()
 
@@ -155,21 +173,48 @@ rounds_since_todo = 0
 agent_lock = threading.Lock()
 
 
+# 每次调用模型前，按从轻到重的顺序控制对话历史大小。
 def prepare_context(messages: list, active_request: str) -> list:
-    # 每次 LLM 调用都经过同一套上下文预算处理。
+    """压缩对话历史，避免下一次模型调用超出上下文限制。
+
+    Args:
+        messages: 当前对话历史，会被原地压缩。
+        active_request: 当前用户请求，历史摘要会保留该请求。
+
+    Returns:
+        原来的 ``messages`` 列表对象。
+    """
+    # 先缩减最新一批过大的工具结果。
     messages[:] = compaction.tool_result_budget(messages)
+    # 消息数量过多时归档中间的旧消息，保留头尾。
     messages[:] = compaction.snip_compact(messages)
-    if compaction.estimate_size(messages) > core.CONTEXT_LIMIT:
-        target = int(core.CONTEXT_LIMIT * 0.8)
+    # 前两步后超过触发线，才处理更早的工具结果。
+    if compaction.estimate_size(messages) > core.COMPACT_TRIGGER:
+        # 将旧工具结果尽量压到目标值，给后续消息留出空间。
+        target = core.COMPACT_TARGET
+        # 将模型已看过的旧工具结果替换成磁盘路径。
         messages[:] = compaction.micro_compact(messages, target)
-        if compaction.estimate_size(messages) > core.CONTEXT_LIMIT:
+        # 旧结果缩减后仍超过触发线，就继续缩小较大的工具结果。
+        if compaction.estimate_size(messages) > core.COMPACT_TRIGGER:
+            # 为大结果保存完整输出，只在上下文中保留预览。
             messages[:] = compaction.fit_tool_results(messages, target)
-    if compaction.estimate_size(messages) > core.CONTEXT_LIMIT:
+    # 工具结果缩减后仍超过触发线，最后才调用模型生成历史摘要。
+    if compaction.estimate_size(messages) > core.COMPACT_TRIGGER:
+        # 用摘要替换历史，同时保留当前用户请求。
         messages[:] = compaction.compact_history(messages, active_request)
+    # 返回原列表；切片赋值使调用方持有的引用保持有效。
     return messages
 
 
 def build_user_content(results: list[dict]) -> list[dict]:
+    """组合工具结果和后台任务通知。
+
+    Args:
+        results: 当前批次的工具结果列表。
+
+    Returns:
+        可直接放入下一条 ``user`` 消息的新内容列表。
+    """
     # 工具结果和已完成的后台通知都作为 user 侧内容返回模型，沿用 tool_result 反馈流程。
     content = list(results)
     for note in scheduler.collect_background_results():
@@ -178,6 +223,14 @@ def build_user_content(results: list[dict]) -> list[dict]:
 
 
 def inject_background_notifications(messages: list):
+    """把已完成的后台任务通知追加到对话历史。
+
+    Args:
+        messages: 当前对话历史，会在有通知时原地追加消息。
+
+    Returns:
+        ``None``。
+    """
     notes = scheduler.collect_background_results()
     if notes:
         messages.append({"role": "user", "content": [
@@ -186,6 +239,18 @@ def inject_background_notifications(messages: list):
 
 def call_llm(messages: list, context: dict, tools: list,
              state: recovery.RecoveryState, max_tokens: int):
+    """调用模型并返回响应。
+
+    Args:
+        messages: 当前对话历史。
+        context: 用于生成系统提示词的运行时上下文。
+        tools: 本轮可用的工具描述列表。
+        state: 本轮模型重试和恢复状态。
+        max_tokens: 本次响应的 token 上限。
+
+    Returns:
+        模型客户端返回的响应对象。
+    """
     system = prompts.assemble_system_prompt(context)
     return recovery.with_retry(
         lambda: core.client.messages.create(
@@ -198,31 +263,49 @@ def call_llm(messages: list, context: dict, tools: list,
 
 
 def evaluate_goal(messages: list):
-    """询问目标评估器是否允许本轮停止。"""
+    """评估当前会话目标是否满足，并转换为本轮停止决定。
+    Args:
+        messages: 当前完整对话历史，供目标评估器判断完成条件。
+    Returns:
+        ``StopDecision`` 目标决定；没有活动目标或评估失败时返回 ``None``。
+    """
+    # 没有创建目标控制器，或控制器当前没有活动目标时，不需要评估。
     if GOAL is None or GOAL.active is None:
+        # 返回 None，让 agent_loop 按普通回答完成路径继续处理。
         return None
     try:
+        # evaluate_after_turn 是异步函数；这里在同步的 agent_loop 中运行它。
         return asyncio.run(GOAL.evaluate_after_turn(
+            # 传入完整对话，让独立评估器根据对话证据判断目标是否完成。
             messages, background_running=scheduler.has_pending_background()))
     except Exception as exc:
+        # 评估器异常不应中断主循环，先把异常类型和信息打印出来。
         print(f"  \033[31m[goal] evaluator error: "
               f"{type(exc).__name__}: {exc}\033[0m")
+        # 返回 None，使本轮按未设置目标的方式结束。
         return None
 
 
 # Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
 def agent_loop(messages: list, context: dict, active_request: str):
+    """执行 Agent 主循环，直到模型完成回答或本轮无法继续。
+    Args:
+        messages: 当前对话历史，会被原地追加助手响应和工具结果。
+        context: 上一轮运行时上下文，用于生成本轮系统提示词。
+        active_request: 当前用户请求，供历史压缩和任务续做使用。
+    Returns:
+        ``None``。执行结果通过更新 ``messages`` 和相关运行时状态交付。
+    """
     # TODO 提醒计数在多轮调用之间共享。
     global rounds_since_todo
-
     # 取得当前工具描述和工具名对应的处理函数。
     tools, handlers = mcp_tools.assemble_tool_pool()
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
     # 首次调用使用默认输出 token 上限。
     max_tokens = core.DEFAULT_MAX_TOKENS
-    # 同一用户轮次最多执行一次手动压缩。
-    manual_compacted = False
+    # 管理本轮手动压缩的工具响应和执行时机。
+    manual_compaction = compaction.ManualCompaction()
     # 暂存已取出、尚未确认交付的定时任务。
     unacknowledged_cron_jobs: list[scheduler.CronJob] = []
 
@@ -263,10 +346,8 @@ def agent_loop(messages: list, context: dict, active_request: str):
         context = update_context(context, messages)
         # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
         tools, handlers = mcp_tools.assemble_tool_pool()
-        # 手动压缩后不再向模型提供 compact 工具。
-        if manual_compacted:
-            # 过滤工具描述，保留其他工具。
-            tools = [tool for tool in tools if tool["name"] != "compact"]
+        # 手动压缩完成后不再向模型提供 compact 工具。
+        tools = manual_compaction.available_tools(tools)
 
         # 调用模型，并在失败时区分上下文超限与其他错误。
         try:
@@ -372,8 +453,6 @@ def agent_loop(messages: list, context: dict, active_request: str):
 
         # 本次响应包含工具调用，准备收集工具执行结果。
         results = []
-        # 记录是否需要在工具结果回填后压缩上下文。
-        compact_requested = False
         # 按模型返回顺序处理每个内容块。
         for block in response.content:
             # 非工具块保留在助手消息中，无需执行。
@@ -383,25 +462,13 @@ def agent_loop(messages: list, context: dict, active_request: str):
             # 在终端显示当前工具名称。
             print(f"\033[36m> {block.name}\033[0m")
 
-            # compact 只登记压缩请求，稍后统一压缩完整历史。
-            if block.name == "compact":
-                # 返回工具确认信息，满足模型的工具调用协议。
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": (
-                        "[Compaction already completed for this user turn.]"
-                        if manual_compacted else
-                        "[Compaction requested. This completed turn will be summarized.]"
-                    ),
-                })
-                # 同一用户轮次第一次请求 compact 时安排一次压缩。
-                if not manual_compacted:
-                    # 工具结果写入历史后再执行压缩。
-                    compact_requested = True
-                    # 防止后续模型响应重复请求压缩。
-                    manual_compacted = True
-                # compact 不经过普通工具钩子和执行器。
+            # 将手动压缩请求交给压缩模块处理。
+            compact_result = manual_compaction.handle_tool_use(block)
+            # compact 不经过普通工具钩子和执行器。
+            if compact_result is not None:
+                # 保留与模型工具调用对应的结果。
+                results.append(compact_result)
+                # 其他工具继续按原有路径执行。
                 continue
 
             # 执行工具前通知钩子，允许它阻止本次调用。
@@ -460,10 +527,8 @@ def agent_loop(messages: list, context: dict, active_request: str):
 
         # 把所有工具结果及已完成的后台通知写入历史。
         messages.append({"role": "user", "content": build_user_content(results)})
-        # 如本轮请求了手动压缩，现在摘要包含完整工具结果的历史。
-        if compact_requested:
-            # 原地替换历史，下一次模型调用读取压缩后的上下文。
-            messages[:] = compaction.compact_history(messages, active_request)
+        # 如本轮请求了手动压缩，在工具结果回填后生成摘要。
+        manual_compaction.apply_after_results(messages, active_request)
 
 
 def print_turn_assistants(messages: list, turn_start: int):

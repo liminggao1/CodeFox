@@ -62,9 +62,13 @@ MAX_RETRIES = 3                     # API 调用失败最大重试次数
 MAX_CONSECUTIVE_529 = 2             # 连续 529（限流）容忍次数
 MAX_RECOVERY_RETRIES = 2            # 恢复后的最大重试次数
 BASE_DELAY_MS = 500                 # 重试基础退避延迟（毫秒）
-CONTEXT_LIMIT = 50000               # 上下文长度上限（防止超模型窗口）
+CONTEXT_LIMIT = 50000               # 对话历史字符预算，不含系统提示词和工具定义
+COMPACT_TRIGGER = int(CONTEXT_LIMIT * 0.8)       # 自动压缩触发线
+COMPACT_TARGET = int(CONTEXT_LIMIT * 0.7)        # 工具结果压缩的目标值
+TOOL_RESULT_BUDGET = int(CONTEXT_LIMIT * 0.16)  # 最新一批工具结果预算
+TOOL_PREVIEW_CHARS = int(CONTEXT_LIMIT * 0.02)  # 落盘结果的预览长度
 KEEP_RECENT_TOOL_RESULTS = 3        # 历史中保留最近几条工具结果
-PERSIST_THRESHOLD = 30000           # 超过该长度就持久化/截断上下文
+PERSIST_THRESHOLD = int(CONTEXT_LIMIT * 0.08)  # 单条工具结果落盘阈值
 CONTINUATION_PROMPT = "Continue from the previous response. Do not repeat completed work."  # 续写提示词
 
 # ---------- 控制台提示符 ----------

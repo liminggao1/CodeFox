@@ -147,6 +147,18 @@ def test_runtime_state_moves_with_workdir(host_factory, tmp_path, monkeypatch) -
     assert (next_dir / ".scheduled_tasks.json").exists()
 
 
+def test_system_prompt_uses_refreshed_runtime_context(host_factory) -> None:
+    host = host_factory()
+
+    prompt = host.prompts.assemble_system_prompt({
+        "connected_mcp": ["deploy"],
+        "active_teammates": ["alice"],
+    })
+
+    assert "Connected MCP servers: deploy" in prompt
+    assert "Active teammates: alice" in prompt
+
+
 def test_mcp_permission_uses_host_policy(host_factory, monkeypatch) -> None:
     host = host_factory()
     host.connect_mcp("deploy")

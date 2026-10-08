@@ -17,6 +17,60 @@ def tool_result(tool_id: str, text: str) -> dict:
         {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}
 
 
+def test_context_thresholds_follow_the_main_budget(host_factory) -> None:
+    core = host_factory().core
+
+    assert core.CONTEXT_LIMIT > 0
+    assert core.COMPACT_TRIGGER == int(core.CONTEXT_LIMIT * 0.8)
+    assert core.COMPACT_TARGET == int(core.CONTEXT_LIMIT * 0.7)
+    assert core.TOOL_RESULT_BUDGET == int(core.CONTEXT_LIMIT * 0.16)
+    assert core.PERSIST_THRESHOLD == int(core.CONTEXT_LIMIT * 0.08)
+    assert core.TOOL_PREVIEW_CHARS == int(core.CONTEXT_LIMIT * 0.02)
+
+
+def test_prepare_compacts_only_above_trigger(host_factory, monkeypatch) -> None:
+    host = host_factory()
+    requests = []
+
+    def compact_history(messages, active_request):
+        requests.append(active_request)
+        return [{"role": "user", "content": "summary"}]
+
+    monkeypatch.setattr(host.compaction, "compact_history", compact_history)
+    below = [{"role": "user", "content": "x" * (host.core.COMPACT_TRIGGER - 100)}]
+    above = [{"role": "user", "content": "x" * host.core.COMPACT_TRIGGER}]
+
+    host.prepare_context(below, "below")
+    host.prepare_context(above, "above")
+
+    assert requests == ["above"]
+    assert above == [{"role": "user", "content": "summary"}]
+
+
+def test_prepare_stops_below_trigger_without_forcing_target(
+        host_factory, monkeypatch) -> None:
+    host = host_factory()
+    targets = []
+
+    def micro_compact(messages, target_chars):
+        targets.append(target_chars)
+        return [{"role": "user", "content": "x" * (host.core.COMPACT_TRIGGER - 100)}]
+
+    def unexpected(*args):
+        raise AssertionError("already below the compression trigger")
+
+    monkeypatch.setattr(host.compaction, "micro_compact", micro_compact)
+    monkeypatch.setattr(host.compaction, "fit_tool_results", unexpected)
+    monkeypatch.setattr(host.compaction, "compact_history", unexpected)
+    messages = [{"role": "user", "content": "x" * host.core.COMPACT_TRIGGER}]
+
+    host.prepare_context(messages, "go")
+
+    assert targets == [host.core.COMPACT_TARGET]
+    assert host.compaction.estimate_size(messages) > host.core.COMPACT_TARGET
+    assert host.compaction.estimate_size(messages) < host.core.COMPACT_TRIGGER
+
+
 def test_prepare_preserves_results_below_the_pressure_limit(host_factory) -> None:
     host = host_factory()
     messages = [{"role": "user", "content": "go"}, tool_use("t1"),
@@ -32,9 +86,9 @@ def test_prepare_persists_oversized_result_before_trimming(host_factory) -> None
     messages = [
         {"role": "user", "content": "go"},
         tool_use("t1"),
-        tool_result("t1", "y" * (host.core.PERSIST_THRESHOLD + 1000)),
+        tool_result("t1", "y" * (host.core.COMPACT_TRIGGER // 2 + 1000)),
         tool_use("t2"),
-        tool_result("t2", "z" * (host.core.PERSIST_THRESHOLD + 1000)),
+        tool_result("t2", "z" * (host.core.COMPACT_TRIGGER // 2 + 1000)),
         {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
         {"role": "user", "content": "next"},
     ]
@@ -43,6 +97,35 @@ def test_prepare_persists_oversized_result_before_trimming(host_factory) -> None
 
     rendered = json.dumps(prepared, default=str)
     assert "<persisted-output>" in rendered or "[Earlier tool result saved at" in rendered
+
+
+def test_tool_result_budget_persists_a_single_large_result(host_factory) -> None:
+    host = host_factory()
+    output = "x" * (host.core.PERSIST_THRESHOLD + 1)
+    messages = [tool_result("large", output)]
+
+    host.compaction.tool_result_budget(messages)
+
+    result = messages[0]["content"][0]["content"]
+    assert result.startswith("<persisted-output>")
+    assert f"Preview:\n{'x' * host.core.TOOL_PREVIEW_CHARS}\n" in result
+    assert (host.core.tool_results_dir() / "large.txt").read_text(encoding="utf-8") == output
+
+
+def test_tool_result_budget_reduces_batch_below_individual_limit(host_factory) -> None:
+    host = host_factory()
+    output = "x" * (host.core.PERSIST_THRESHOLD - 1000)
+    messages = [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": f"t{index}", "content": output}
+        for index in range(3)
+    ]}]
+
+    host.compaction.tool_result_budget(messages)
+
+    results = [block["content"] for block in messages[0]["content"]]
+    assert results[0].startswith("<persisted-output>")
+    assert results[1:] == [output, output]
+    assert sum(map(len, results)) <= host.core.TOOL_RESULT_BUDGET
 
 
 def test_micro_compact_keeps_unseen_tool_result_batch(host_factory) -> None:
@@ -218,3 +301,33 @@ def test_manual_compact_runs_once_per_user_turn(host_factory, monkeypatch) -> No
         True, False, False, True, False,
     ]
     assert responses == []
+
+
+def test_manual_compact_handles_duplicate_calls_in_one_batch(
+        host_factory, monkeypatch) -> None:
+    host = host_factory()
+    summaries = []
+
+    def compact_history(messages, active_request):
+        summaries.append((list(messages), active_request))
+        return [{"role": "user", "content": "summary"}]
+
+    monkeypatch.setattr(host.compaction, "compact_history", compact_history)
+    manual = host.compaction.ManualCompaction()
+    tools = [{"name": "compact"}, {"name": "bash"}]
+    assert manual.available_tools(tools) == tools
+    assert manual.handle_tool_use(SimpleNamespace(name="bash", id="other")) is None
+
+    first = manual.handle_tool_use(SimpleNamespace(name="compact", id="first"))
+    duplicate = manual.handle_tool_use(SimpleNamespace(name="compact", id="second"))
+    assert first == {"type": "tool_result", "tool_use_id": "first",
+                     "content": "[Compaction requested. This completed turn will be summarized.]"}
+    assert duplicate == {"type": "tool_result", "tool_use_id": "second",
+                         "content": "[Compaction already completed for this user turn.]"}
+    assert manual.available_tools(tools) == [{"name": "bash"}]
+
+    messages = [{"role": "user", "content": [first, duplicate]}]
+    manual.apply_after_results(messages, "ask")
+    manual.apply_after_results(messages, "ask")
+    assert summaries == [([{"role": "user", "content": [first, duplicate]}], "ask")]
+    assert messages == [{"role": "user", "content": "summary"}]

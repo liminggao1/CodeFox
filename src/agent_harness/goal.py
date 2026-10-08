@@ -174,14 +174,36 @@ class PromptGoalEvaluator:
     async def evaluate(
         self, condition: str, messages: list[dict[str, Any]]
     ) -> GoalEvaluation:
+        """异步执行目标评估，并返回结构化评估结果。
+
+        Args:
+            condition: 用户设置的完成条件。
+            messages: 当前对话历史。
+
+        Returns:
+            包含是否完成、原因和是否不可完成的 ``GoalEvaluation``。
+        """
+        # 把同步的模型调用放到线程中，避免阻塞异步事件循环。
         return await asyncio.to_thread(
+            # 在线程中执行完整的提示词组装、模型调用和 JSON 解析。
             self._evaluate_sync, condition, messages
         )
 
     def _evaluate_sync(
         self, condition: str, messages: list[dict[str, Any]]
     ) -> GoalEvaluation:
+        """同步调用评估模型，并把模型返回的 JSON 转为评估对象。
+
+        Args:
+            condition: 用户设置的完成条件。
+            messages: 当前对话历史。
+
+        Returns:
+            解析后的 ``GoalEvaluation``。
+        """
+        # 将对话历史转换为评估模型可以读取的纯文本。
         conversation = transcript_text(messages)
+        # 把完成条件和对话内容编码为 JSON，明确告诉评估器输入是数据。
         payload = json.dumps(
             {
                 "completion_condition": condition,
@@ -189,6 +211,7 @@ class PromptGoalEvaluator:
             },
             ensure_ascii=False,
         )
+        # 规定评估模型只能依据对话证据返回固定格式的 JSON。
         prompt = f"""Input data (JSON):
 {payload}
 
@@ -201,6 +224,7 @@ impossible to true.
 Return only JSON:
 {{"ok": boolean, "reason": string, "impossible": boolean}}"""
 
+        # 调用没有工具权限的独立评估模型，避免它执行被评估对话中的指令。
         response = self.client.messages.create(
             model=self.model,
             system=(
@@ -211,7 +235,9 @@ Return only JSON:
             messages=[{"role": "user", "content": prompt}],
             max_tokens=self.max_tokens,
         )
+        # 提取模型文本，解析并校验 JSON 字段。
         value = _parse_json_object(_extract_text(response.content))
+        # 将校验后的字典转换为不可变的结构化评估结果。
         return GoalEvaluation(**value)
 
 
@@ -305,62 +331,92 @@ class GoalController:
         messages: list[dict[str, Any]],
         background_running: bool = False,
     ) -> StopDecision:
+        """评估本轮对话是否满足活动目标，并返回停止决定。
+        Args:
+            messages: 当前完整对话历史。
+            background_running: 是否仍有后台任务等待结果。
+        Returns:
+            ``StopDecision``，其 ``action`` 表示允许结束、继续、延迟或失败。
+        """
+        # 没有活动目标时，不需要调用评估器，可以直接允许本轮结束。
         if self.active is None:
             return StopDecision("allow")
+        # 后台任务尚未结束时，先延迟判断，避免用不完整的证据作结论。
         if background_running:
             return StopDecision(
                 "defer", "background work is still running"
             )
 
+        # 保存当前目标状态，后续评估和状态记录都使用同一个对象。
         state = self.active
         try:
+            # 调用独立评估器，根据目标条件和对话历史生成判断结果。
             evaluation = await self.evaluator.evaluate(
                 state.condition, messages
             )
         except Exception as error:
+            # 将异常转换为可展示的原因，并保留目标继续活动的状态。
             reason = f"{type(error).__name__}: {error}"
+            # 记录最近一次评估失败原因，供状态查询使用。
             state.last_reason = reason
+            # 写入一条“评估出错但目标仍活动”的事件。
             self._record(
                 active=True,
                 met=False,
                 failed=False,
                 reason=reason,
             )
+            # 告知调用方本次评估出错，但不把目标标记为已完成或失败。
             return StopDecision("error", reason)
 
+        # 评估成功后，累计评估次数并保存评估器给出的说明。
         state.iterations += 1
         state.last_reason = evaluation.reason
 
+        # ok=True 表示目标已经满足，可以关闭活动目标并允许结束。
         if evaluation.ok:
+            # 记录目标已达成的最终事件。
             self._record(
                 active=False,
                 met=True,
                 failed=False,
                 reason=evaluation.reason,
             )
+            # 清除活动目标，避免下一轮重复评估同一个目标。
             self.active = None
+            # 新目标开始前，清空连续阻止次数。
             self.consecutive_blocks = 0
+            # 返回“已达成”，由 host 决定结束当前 Agent 回合。
             return StopDecision("achieved", evaluation.reason)
 
+        # impossible=True 表示目标无法完成，应结束并标记为失败。
         if evaluation.impossible:
+            # 记录目标无法完成的最终事件。
             self._record(
                 active=False,
                 met=False,
                 failed=True,
                 reason=evaluation.reason,
             )
+            # 清除已经失败的活动目标。
             self.active = None
+            # 失败后同样重置连续阻止次数。
             self.consecutive_blocks = 0
+            # 返回“失败”，由 host 结束当前 Agent 回合。
             return StopDecision("failed", evaluation.reason)
 
+        # 目标尚未满足但仍可继续时，累计一次连续阻止。
         self.consecutive_blocks += 1
+        # 记录目标仍活动以及本次缺失的完成证据。
         self._record(
             active=True,
             met=False,
             failed=False,
             reason=evaluation.reason,
         )
+        # 连续阻止超过上限后，不再无限循环等待模型补充证据。
         if self.consecutive_blocks > self.block_cap:
+            # 返回“达到限制”，由 host 结束当前回合。
             return StopDecision(
                 "limit",
                 (
@@ -368,6 +424,7 @@ class GoalController:
                     f"{self.block_cap} consecutive turns"
                 ),
             )
+        # 返回“阻止结束”，由 host 把原因写回对话并继续工作。
         return StopDecision("block", evaluation.reason)
 
     def _record(

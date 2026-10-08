@@ -113,8 +113,14 @@ def collect_background_results() -> list[str]:
 
 
 def has_pending_background() -> bool:
-    """判断是否有已结束但尚未送达的后台任务。"""
+    """判断是否有已结束但尚未送达的后台任务。
+
+    Returns:
+        有待交付的后台任务时返回 ``True``，否则返回 ``False``。
+    """
+    # 读取后台任务表时加锁，避免与后台线程同时修改状态。
     with background_lock:
+        # 只要有一个任务已经完成或失败，就需要延迟目标评估。
         return any(task["status"] in {"completed", "failed"}
                    for task in background_tasks.values())
 

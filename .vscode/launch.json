@@ -10,7 +10,9 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": true,
-      "pythonArgs": ["-Xfrozen_modules=off"],
+      "pythonArgs": [
+        "-Xfrozen_modules=off"
+      ],
       "env": {
         "PYTHONPATH": "${workspaceFolder}/src"
       }
@@ -24,7 +26,9 @@
       "cwd": "${workspaceFolder}",
       "console": "externalTerminal",
       "justMyCode": true,
-      "pythonArgs": ["-Xfrozen_modules=off"],
+      "pythonArgs": [
+        "-Xfrozen_modules=off"
+      ],
       "env": {
         "PYTHONPATH": "${workspaceFolder}/src"
       }
@@ -35,11 +39,16 @@
       "request": "launch",
       "python": "/home/gaogao/miniconda3/envs/learncc/bin/python",
       "module": "agent_harness",
-      "args": ["workflow", "demo"],
+      "args": [
+        "workflow",
+        "demo"
+      ],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": true,
-      "pythonArgs": ["-Xfrozen_modules=off"],
+      "pythonArgs": [
+        "-Xfrozen_modules=off"
+      ],
       "env": {
         "PYTHONPATH": "${workspaceFolder}/src"
       }
@@ -53,7 +62,9 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": true,
-      "pythonArgs": ["-Xfrozen_modules=off"]
+      "pythonArgs": [
+        "-Xfrozen_modules=off"
+      ]
     },
     {
       "name": "pytest（当前文件）",
@@ -61,10 +72,15 @@
       "request": "launch",
       "python": "/home/gaogao/miniconda3/envs/learncc/bin/python",
       "module": "pytest",
-      "args": ["-q", "${file}"],
+      "args": [
+        "-q",
+        "tests/test_goal.py::test_unmet_goal_continues_automatically_until_achieved"
+      ],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "pythonArgs": ["-Xfrozen_modules=off"]
+      "pythonArgs": [
+        "-Xfrozen_modules=off"
+      ]
     }
   ]
 }
