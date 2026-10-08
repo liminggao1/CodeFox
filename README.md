@@ -62,7 +62,7 @@ python -m agent_harness
 | `scripts/build_flat.py` | 拼接生成 `flat/agent_full.py` |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
 | `flat/agent_full.py` | 生成物：仓库内单文件入口，仍从 `src/` 导入客户端 shim |
-| `tests/` | 123 个离线测试，按模块拆分（任务、压缩、调度、权限、编码、技能等） |
+| `tests/` | 124 个离线测试，按模块拆分（任务、压缩、调度、权限、编码、技能等） |
 | `docs/` | 项目级设计与执行记录，入口见 `docs/README.md` |
 | `note/` | `env-setup.md` 安装说明；`dev-notes.md` 本机运行与调试笔记 |
 | `tmp/` | 本地临时文件，不入库（需要时手动 `mkdir tmp`） |

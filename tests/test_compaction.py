@@ -168,3 +168,53 @@ def test_reactive_compact_summarizes_only_old_history(host_factory) -> None:
     summarized = json.dumps(seen["messages"], default=str)
     assert "r7" not in summarized
     assert "r6" not in summarized
+
+
+def test_manual_compact_runs_once_per_user_turn(host_factory, monkeypatch) -> None:
+    host = host_factory()
+    monkeypatch.setattr(host.compaction, "summarize_history", lambda _: "summary")
+
+    def compact_response(tool_id: str):
+        return SimpleNamespace(
+            stop_reason="tool_use",
+            content=[SimpleNamespace(
+                type="tool_use", id=tool_id, name="compact", input={}
+            )],
+        )
+
+    def text_response():
+        return SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text="done")],
+        )
+
+    responses = [
+        compact_response("first"),
+        compact_response("duplicate"),
+        text_response(),
+        compact_response("next-turn"),
+        text_response(),
+    ]
+    offered_tools = []
+
+    def create(**kwargs):
+        offered_tools.append({tool["name"] for tool in kwargs["tools"]})
+        return responses.pop(0)
+
+    host.core.client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    messages = [{"role": "user", "content": "Compress the context"}]
+
+    host.agent_loop(messages, {}, "Compress the context")
+
+    assert len(list(host.core.transcript_dir().glob("transcript_*.jsonl"))) == 1
+    assert "Compress the context" in messages[0]["content"]
+    assert messages[-1]["content"][0].text == "done"
+
+    messages.append({"role": "user", "content": "Compress again"})
+    host.agent_loop(messages, {}, "Compress again")
+
+    assert len(list(host.core.transcript_dir().glob("transcript_*.jsonl"))) == 2
+    assert ["compact" in names for names in offered_tools] == [
+        True, False, False, True, False,
+    ]
+    assert responses == []

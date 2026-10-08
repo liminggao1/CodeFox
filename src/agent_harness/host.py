@@ -210,145 +210,259 @@ def evaluate_goal(messages: list):
         return None
 
 
+# Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
 def agent_loop(messages: list, context: dict, active_request: str):
+    # TODO 提醒计数在多轮调用之间共享。
     global rounds_since_todo
-    tools, handlers = mcp_tools.assemble_tool_pool()
-    state = recovery.RecoveryState()
-    max_tokens = core.DEFAULT_MAX_TOKENS
 
+    # 取得当前工具描述和工具名对应的处理函数。
+    tools, handlers = mcp_tools.assemble_tool_pool()
+    # 保存本轮 API 重试、模型降级和上下文恢复状态。
+    state = recovery.RecoveryState()
+    # 首次调用使用默认输出 token 上限。
+    max_tokens = core.DEFAULT_MAX_TOKENS
+    # 同一用户轮次最多执行一次手动压缩。
+    manual_compacted = False
+    # 暂存已取出、尚未确认交付的定时任务。
     unacknowledged_cron_jobs: list[scheduler.CronJob] = []
+
+    # 每次迭代完成一次模型调用，并处理它返回的文本或工具请求。
     while True:
-        # 每轮注入定时/后台任务，准备上下文，调用模型，执行 tool_use，追加 tool_result，再循环。
+        # 从队列中取出本次到期的定时任务。
         fired = scheduler.consume_cron_queue()
+        # 调用模型成功前保留这些任务，以便失败时重新入队。
         unacknowledged_cron_jobs.extend(fired)
+        # 将每个定时任务作为一条用户消息送入对话历史。
         for job in fired:
+            # 模型通过用户消息读取定时任务内容。
             messages.append({"role": "user",
                              "content": f"[Scheduled] {job.prompt}"})
+            # 在终端显示截短的注入提示。
             print(f"  \033[35m[cron inject] {job.prompt[:60]}\033[0m")
+        # 有定时任务时也把它们纳入压缩摘要使用的当前请求。
         if fired:
+            # 将本批定时任务合并成多行请求。
             scheduled_requests = "\n".join(
                 f"Run scheduled task: {job.prompt}" for job in fired)
+            # 保留原请求，并追加定时任务内容。
             active_request = f"{active_request}\n{scheduled_requests}".strip()
-
+        # 将已完成的后台任务通知加入对话历史。
         inject_background_notifications(messages)
 
+        # 连续三次工具调用未更新 TODO 时，提醒模型更新。
         if rounds_since_todo >= 3:
+            # 把提醒作为用户消息加入历史。
             messages.append({"role": "user",
                              "content": "<reminder>Update your todos.</reminder>"})
+            # 本次提醒后重新累计调用次数。
             rounds_since_todo = 0
 
+        # 按上下文预算裁剪或压缩历史消息。
         prepare_context(messages, active_request)
+        # 根据最新消息刷新记忆、MCP 和队友上下文。
         context = update_context(context, messages)
+        # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
         tools, handlers = mcp_tools.assemble_tool_pool()
+        # 手动压缩后不再向模型提供 compact 工具。
+        if manual_compacted:
+            # 过滤工具描述，保留其他工具。
+            tools = [tool for tool in tools if tool["name"] != "compact"]
 
+        # 调用模型，并在失败时区分上下文超限与其他错误。
         try:
+            # 重试策略和模型降级由 call_llm 内部处理。
             response = call_llm(messages, context, tools, state, max_tokens)
+        # 仅在重试策略仍无法完成调用时进入此分支。
         except Exception as e:
+            # 首次遇到提示过长错误时压缩历史，再重新调用模型。
             if recovery.is_prompt_too_long_error(e) and not state.has_attempted_reactive_compact:
+                # 原地替换历史，保留调用方持有的列表引用。
                 messages[:] = compaction.reactive_compact(messages, active_request)
+                # 标记已尝试恢复，避免同一错误反复压缩。
                 state.has_attempted_reactive_compact = True
+                # 返回循环顶部重新准备上下文。
                 continue
+            # 调用最终失败时，将未确认的定时任务重新放回队列。
             scheduler.restore_cron_jobs(unacknowledged_cron_jobs)
+            # 将错误写入历史，供外层向用户展示。
             messages.append({"role": "assistant", "content": [
                 {"type": "text", "text": f"[Error] {type(e).__name__}: {e}"}]})
+            # 释放已完成任务的 agent 分配记录。
             tasks.release_completed_assignment("agent")
+            # 结束本轮交互，不继续执行工具。
             return
 
+        # 模型已成功响应，确认本批定时任务已交付。
         try:
+            # 将已消费的任务从持久化记录中确认移除。
             scheduler.acknowledge_cron_jobs(unacknowledged_cron_jobs)
+        # 确认写入失败不阻止处理模型响应。
         except OSError as exc:
+            # 在终端报告确认失败。
             core.terminal_print(f"[cron error] Delivery confirmation failed: {exc}")
+        # 清空本轮待确认清单。
         unacknowledged_cron_jobs.clear()
 
+        # 输出达到 token 上限时，先提高上限，再尝试续写。
         if response.stop_reason == "max_tokens":
+            # 尚未提高过上限时，使用更大的上限重试当前调用。
             if not state.has_escalated:
+                # 设置升级后的输出 token 上限。
                 max_tokens = core.ESCALATED_MAX_TOKENS
+                # 防止下一次超限时重复升级。
                 state.has_escalated = True
+                # 在终端显示本次重试的上限。
                 print(f"  \033[33m[max_tokens] retry with {max_tokens}\033[0m")
+                # 重新调用模型，暂不把截断响应写入历史。
                 continue
+            # 升级后仍截断时，先保存模型已生成的内容。
             messages.append({"role": "assistant", "content": response.content})
+            # 在允许的恢复次数内，请求模型从截断处继续。
             if state.recovery_count < core.MAX_RECOVERY_RETRIES:
+                # 添加续写提示，作为下一次模型调用的用户消息。
                 messages.append({"role": "user", "content": core.CONTINUATION_PROMPT})
+                # 记录已使用的一次续写机会。
                 state.recovery_count += 1
+                # 返回循环顶部继续调用模型。
                 continue
+            # 续写机会耗尽时释放已完成的分配记录。
             tasks.release_completed_assignment("agent")
+            # 停止本轮交互。
             return
 
+        # 本次响应未截断，下一次调用恢复默认 token 上限。
         max_tokens = core.DEFAULT_MAX_TOKENS
+        # 清除本轮上限升级标记。
         state.has_escalated = False
+        # 保存模型响应，供工具结果和后续调用引用。
         messages.append({"role": "assistant", "content": response.content})
+        # 没有工具请求时，模型已完成当前一轮回答。
         if not subagent.has_tool_use(response.content):
+            # 通知 Stop 钩子本轮模型输出已完成。
             hooks.trigger_hooks("Stop", messages)
+            # 检查当前目标是否允许结束。
             decision = evaluate_goal(messages)
+            # 目标未达成时，反馈缺失条件并继续调用模型。
             if decision is not None and decision.action == "block":
+                # 读取仍在生效的目标条件。
                 condition = GOAL.active.condition if GOAL.active else ""
+                # 在终端显示要求继续的原因。
                 print(f"  \033[35m[goal] continue: "
                       f"{decision.reason[:80]}\033[0m")
+                # 将目标条件和评估结果写回历史。
                 messages.append({"role": "user", "content": (
                     "[Goal still active]\n"
                     f"Condition: {condition}\n"
                     f"Evaluator: {decision.reason}\n"
                     "Continue working and surface the missing evidence."
                 )})
+                # 再次调用模型寻找缺失证据。
                 continue
+            # 对非 allow 的其他评估结果仅输出提示。
             if decision is not None and decision.action != "allow":
+                # 在终端显示评估结果和原因。
                 print(f"  \033[35m[goal] {decision.action}: "
                       f"{decision.reason}\033[0m")
+            # 从已完成的对话中提取并整理长期记忆。
             remember_after_turn(messages)
+            # 释放已完成任务的 agent 分配记录。
             tasks.release_completed_assignment("agent")
+            # 本轮回答结束。
             return
 
+        # 本次响应包含工具调用，准备收集工具执行结果。
         results = []
+        # 记录是否需要在工具结果回填后压缩上下文。
         compact_requested = False
+        # 按模型返回顺序处理每个内容块。
         for block in response.content:
+            # 非工具块保留在助手消息中，无需执行。
             if block.type != "tool_use":
+                # 跳过文本等非工具内容。
                 continue
+            # 在终端显示当前工具名称。
             print(f"\033[36m> {block.name}\033[0m")
 
+            # compact 只登记压缩请求，稍后统一压缩完整历史。
             if block.name == "compact":
+                # 返回工具确认信息，满足模型的工具调用协议。
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": "[Compaction requested. This completed turn will be summarized.]",
+                    "content": (
+                        "[Compaction already completed for this user turn.]"
+                        if manual_compacted else
+                        "[Compaction requested. This completed turn will be summarized.]"
+                    ),
                 })
-                compact_requested = True
+                # 同一用户轮次第一次请求 compact 时安排一次压缩。
+                if not manual_compacted:
+                    # 工具结果写入历史后再执行压缩。
+                    compact_requested = True
+                    # 防止后续模型响应重复请求压缩。
+                    manual_compacted = True
+                # compact 不经过普通工具钩子和执行器。
                 continue
 
+            # 执行工具前通知钩子，允许它阻止本次调用。
             blocked = hooks.trigger_hooks("PreToolUse", block)
+            # 钩子拒绝调用时，将原因作为工具结果返回。
             if blocked:
+                # 使用原工具调用 ID 与结果配对。
                 results.append({"type": "tool_result",
                                 "tool_use_id": block.id,
                                 "content": str(blocked)})
+                # 不再执行被阻止的工具。
                 continue
 
+            # 可后台执行的工具不阻塞当前模型轮次。
             if scheduler.should_run_background(block.name, block.input):
+                # 启动后台任务；失败时也要返回工具结果。
                 try:
+                    # 将工具调用交给后台任务调度器。
                     bg_id = scheduler.start_background_task(block, handlers)
+                    # 告知模型结果稍后通过任务通知送达。
                     output = (f"[Background task {bg_id} started] "
                               "Result will arrive as a task_notification.")
+                # 将启动异常转换成模型可读的结果。
                 except Exception as exc:
+                    # 保留异常类型和信息，便于模型判断失败原因。
                     output = (f"Error: Failed to start background task: "
                               f"{type(exc).__name__}: {exc}")
+                # 为本次后台工具调用登记返回内容。
                 results.append({"type": "tool_result",
                                 "tool_use_id": block.id,
                                 "content": output})
+                # 后台工具不再进入同步执行路径。
                 continue
 
+            # 根据工具名查找同步处理函数。
             handler = handlers.get(block.name)
+            # 执行工具，并把未知工具或执行异常转成结果文本。
             output = file_tools.call_tool_handler(handler, block.input, block.name)
+            # 执行完成后通知 PostToolUse 钩子。
             hooks.trigger_hooks("PostToolUse", block, output)
+            # 在终端显示截短的执行结果。
             print(str(output)[:300])
 
+            # 写入 TODO 后重新开始计算提醒间隔。
             if block.name == "todo_write":
+                # 清零已累计的非 TODO 工具调用次数。
                 rounds_since_todo = 0
+            # 其他工具调用会增加 TODO 提醒计数。
             else:
+                # 记录又完成了一次非 TODO 工具调用。
                 rounds_since_todo += 1
 
+            # 将同步工具输出与原调用 ID 配对。
             results.append({"type": "tool_result",
                             "tool_use_id": block.id, "content": output})
 
+        # 把所有工具结果及已完成的后台通知写入历史。
         messages.append({"role": "user", "content": build_user_content(results)})
+        # 如本轮请求了手动压缩，现在摘要包含完整工具结果的历史。
         if compact_requested:
+            # 原地替换历史，下一次模型调用读取压缩后的上下文。
             messages[:] = compaction.compact_history(messages, active_request)
 
 

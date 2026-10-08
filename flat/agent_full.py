@@ -5,6 +5,7 @@
 各段对应源码模块，末尾是 CLI 入口。
 """
 
+from __future__ import annotations   # 让类型注解按"字符串"延迟解析（3.7+），
 from __future__ import annotations
 import os
 import sys
@@ -13,15 +14,18 @@ import sys
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_repo_root, "src"))
 
-import threading
-from pathlib import Path
-from agent_harness.llm_client import Anthropic
-from dotenv import load_dotenv
+import os                            # 环境变量、路径操作
+import threading                     # 控制台锁、线程判断
+from pathlib import Path             # 面向对象的路径操作
+from agent_harness.llm_client import Anthropic    # 从同包 llm_client 导入 Anthropic 客户端类
+from dotenv import load_dotenv       # 读取 .env 文件的库
 import json
 import re
 import secrets
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict
+from pathlib import Path
 core = sys.modules[__name__]
 worktrees = sys.modules[__name__]
 import subprocess
@@ -60,89 +64,113 @@ workflow_runtime = sys.modules[__name__]  # noqa: F401
 
 # ==== src/agent_harness/core.py ====
 
+                                     # 避免前向引用报错（如 list[str] 写法）
+
+
+# ---------- 平台差异适配 ----------
 try:
-    import fcntl
-except ImportError:  # Windows 没有 fcntl 模块。
-    fcntl = None
+    import fcntl                    # Unix 文件锁模块
+except ImportError:                 # Windows 没有 fcntl 模块。
+    fcntl = None                    # 置为 None，后面代码用它时需判空
 
 try:
-    import readline
-    readline.parse_and_bind('set bind-tty-special-chars off')
+    import readline                 # 命令行行编辑（历史记录、补全、光标）
+    readline.parse_and_bind('set bind-tty-special-chars off')  # 关掉 tty 特殊字符绑定，避免干扰
     READLINE_AVAILABLE = True
-except ImportError:
+except ImportError:                 # 非交互环境（如管道/CI）没有 readline
     READLINE_AVAILABLE = False
 
-load_dotenv(override=True)
+# ---------- 环境变量加载 ----------
+load_dotenv(override=True)          # 读取 .env 文件；override=True 表示已存在的变量也被覆盖
 if os.getenv("ANTHROPIC_BASE_URL"):
+    # 自定义 API 地址时不带 auth token，避免被外部地址误用凭据
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
-WORKDIR = Path.cwd()
-PACKAGE_DIR = Path(__file__).resolve().parent
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
-PRIMARY_MODEL = MODEL
-FALLBACK_MODEL = os.getenv("FALLBACK_MODEL_ID")
+# ---------- 路径常量 ----------
+WORKDIR = Path.cwd()                # 启动目录（运行时状态放这，跟随"从哪里启动"）
+PACKAGE_DIR = Path(__file__).resolve().parent   # 包源码目录（静态资源放这，跟随代码位置）
+
+# ---------- API 客户端与模型 ----------
+client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))   # 全局唯一客户端
+MODEL = os.environ["MODEL_ID"]      # 主模型（用 [] 取，缺了直接报错，强制必须配置）
+PRIMARY_MODEL = MODEL               # 主模型别名
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL_ID")   # 备用模型（可选，getenv 缺了返回 None）
 
 # 运行时状态跟随启动目录；静态资源随包分发。
-SKILLS_DIR = PACKAGE_DIR / "skills"
+SKILLS_DIR = PACKAGE_DIR / "skills" # 技能目录（静态资源，随包走）
 
 
 def transcript_dir() -> Path:
+    """转录记录目录：启动目录下的 .transcripts。"""
     return WORKDIR / ".transcripts"
 
 
 def tool_results_dir() -> Path:
+    """工具结果目录：启动目录下按任务隔离存放。"""
     return WORKDIR / ".task_outputs" / "tool-results"
 
-DEFAULT_MAX_TOKENS = 8000
-ESCALATED_MAX_TOKENS = 16000
-MAX_RETRIES = 3
-MAX_CONSECUTIVE_529 = 2
-MAX_RECOVERY_RETRIES = 2
-BASE_DELAY_MS = 500
-CONTEXT_LIMIT = 50000
-KEEP_RECENT_TOOL_RESULTS = 3
-PERSIST_THRESHOLD = 30000
-CONTINUATION_PROMPT = "Continue from the previous response. Do not repeat completed work."
-PROMPT = "\033[36magent-harness >> \033[0m"
+
+# ---------- 运行参数常量 ----------
+DEFAULT_MAX_TOKENS = 8000           # 默认最大生成 token 数
+ESCALATED_MAX_TOKENS = 16000        # 升级/长任务时的上限
+MAX_RETRIES = 3                     # API 调用失败最大重试次数
+MAX_CONSECUTIVE_529 = 2             # 连续 529（限流）容忍次数
+MAX_RECOVERY_RETRIES = 2            # 恢复后的最大重试次数
+BASE_DELAY_MS = 500                 # 重试基础退避延迟（毫秒）
+CONTEXT_LIMIT = 50000               # 上下文长度上限（防止超模型窗口）
+KEEP_RECENT_TOOL_RESULTS = 3        # 历史中保留最近几条工具结果
+PERSIST_THRESHOLD = 30000           # 超过该长度就持久化/截断上下文
+CONTINUATION_PROMPT = "Continue from the previous response. Do not repeat completed work."  # 续写提示词
+
+# ---------- 控制台提示符 ----------
+PROMPT = "\033[36magent-harness >> \033[0m"   # 带 ANSI 颜色（青色）的普通提示符
 # \001/\002 告诉 Readline：ANSI 转义序列不占显示宽度。
-READLINE_PROMPT = "\001\033[36m\002agent-harness >> \001\033[0m\002"
-CLI_ACTIVE = False
+READLINE_PROMPT = "\001\033[36m\002agent-harness >> \001\033[0m\002"   # 给 readline 用的版本
+
+CLI_ACTIVE = False                  # 是否处于 CLI 模式（run_cli 里会置 True）
 
 
 class ConsoleBroker:
     """让普通输入和工作线程的权限确认依次使用同一个标准输入。"""
-
     def __init__(self):
-        self._lock = threading.Lock()
-        self.reader = None
-        self.display_prompt = PROMPT
-        self.readline_prompt = READLINE_PROMPT
+        self._lock = threading.Lock()       # 互斥锁：保证同时只有一个线程读输入
+        self.reader = None                  # 可替换的输入函数（默认用内置 input）
+        self.display_prompt = PROMPT        # 普通打印用的提示符
+        self.readline_prompt = READLINE_PROMPT  # readline 用的提示符
 
     def set_prompt(self, display_prompt: str, readline_prompt: str):
+        """外部可临时更换两种提示符。"""
         self.display_prompt = display_prompt
         self.readline_prompt = readline_prompt
 
     def ask(self, prompt: str | None = None) -> str:
-        with self._lock:
+        """读取一行用户输入；prompt 为 None 时用 readline 提示符。"""
+        with self._lock:                    # 加锁，避免多线程抢输入
+            # 没显式给 prompt 就用 readline 版提示符（否则用传入的）
             active_prompt = self.readline_prompt if prompt is None else prompt
+            # 优先用自定义 reader（如 GUI 注入），否则用内置 input
             return (self.reader or input)(active_prompt)
 
 
-CONSOLE = ConsoleBroker()
+CONSOLE = ConsoleBroker()           # 全局唯一的控制台入口
 
 
 def terminal_print(text: str):
+    """向终端打印文本；若在工作线程且 CLI 活跃，先清行再打印，避免把用户正在输入的内容冲掉。"""
     if threading.current_thread() is threading.main_thread() or not CLI_ACTIVE:
+        # 主线程打印：直接输出（没有输入框冲突）
         print(text)
         return
+
+    # 工作线程打印：需要保护用户正在输入的半行
     line = ""
     if READLINE_AVAILABLE:
         try:
-            line = readline.get_line_buffer()
+            line = readline.get_line_buffer()   # 取出用户当前还没回车的那半行输入
         except Exception:
-            line = ""
-    print(f"\r\033[K{text}")
+            line = ""                           # 取不到就当作空
+    print(f"\r\033[K{text}")                    # \r 回行首 + \033[K 清空本行，再打印新文本
+    # 重新打印提示符 + 用户那半行，把输入现场还原（flush 立即刷新）
     print(CONSOLE.display_prompt + line, end="", flush=True)
 
 
@@ -5284,145 +5312,259 @@ def evaluate_goal(messages: list):
         return None
 
 
+# Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
 def agent_loop(messages: list, context: dict, active_request: str):
+    # TODO 提醒计数在多轮调用之间共享。
     global rounds_since_todo
-    tools, handlers = mcp_tools.assemble_tool_pool()
-    state = recovery.RecoveryState()
-    max_tokens = core.DEFAULT_MAX_TOKENS
 
+    # 取得当前工具描述和工具名对应的处理函数。
+    tools, handlers = mcp_tools.assemble_tool_pool()
+    # 保存本轮 API 重试、模型降级和上下文恢复状态。
+    state = recovery.RecoveryState()
+    # 首次调用使用默认输出 token 上限。
+    max_tokens = core.DEFAULT_MAX_TOKENS
+    # 同一用户轮次最多执行一次手动压缩。
+    manual_compacted = False
+    # 暂存已取出、尚未确认交付的定时任务。
     unacknowledged_cron_jobs: list[scheduler.CronJob] = []
+
+    # 每次迭代完成一次模型调用，并处理它返回的文本或工具请求。
     while True:
-        # 每轮注入定时/后台任务，准备上下文，调用模型，执行 tool_use，追加 tool_result，再循环。
+        # 从队列中取出本次到期的定时任务。
         fired = scheduler.consume_cron_queue()
+        # 调用模型成功前保留这些任务，以便失败时重新入队。
         unacknowledged_cron_jobs.extend(fired)
+        # 将每个定时任务作为一条用户消息送入对话历史。
         for job in fired:
+            # 模型通过用户消息读取定时任务内容。
             messages.append({"role": "user",
                              "content": f"[Scheduled] {job.prompt}"})
+            # 在终端显示截短的注入提示。
             print(f"  \033[35m[cron inject] {job.prompt[:60]}\033[0m")
+        # 有定时任务时也把它们纳入压缩摘要使用的当前请求。
         if fired:
+            # 将本批定时任务合并成多行请求。
             scheduled_requests = "\n".join(
                 f"Run scheduled task: {job.prompt}" for job in fired)
+            # 保留原请求，并追加定时任务内容。
             active_request = f"{active_request}\n{scheduled_requests}".strip()
-
+        # 将已完成的后台任务通知加入对话历史。
         inject_background_notifications(messages)
 
+        # 连续三次工具调用未更新 TODO 时，提醒模型更新。
         if rounds_since_todo >= 3:
+            # 把提醒作为用户消息加入历史。
             messages.append({"role": "user",
                              "content": "<reminder>Update your todos.</reminder>"})
+            # 本次提醒后重新累计调用次数。
             rounds_since_todo = 0
 
+        # 按上下文预算裁剪或压缩历史消息。
         prepare_context(messages, active_request)
+        # 根据最新消息刷新记忆、MCP 和队友上下文。
         context = update_context(context, messages)
+        # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
         tools, handlers = mcp_tools.assemble_tool_pool()
+        # 手动压缩后不再向模型提供 compact 工具。
+        if manual_compacted:
+            # 过滤工具描述，保留其他工具。
+            tools = [tool for tool in tools if tool["name"] != "compact"]
 
+        # 调用模型，并在失败时区分上下文超限与其他错误。
         try:
+            # 重试策略和模型降级由 call_llm 内部处理。
             response = call_llm(messages, context, tools, state, max_tokens)
+        # 仅在重试策略仍无法完成调用时进入此分支。
         except Exception as e:
+            # 首次遇到提示过长错误时压缩历史，再重新调用模型。
             if recovery.is_prompt_too_long_error(e) and not state.has_attempted_reactive_compact:
+                # 原地替换历史，保留调用方持有的列表引用。
                 messages[:] = compaction.reactive_compact(messages, active_request)
+                # 标记已尝试恢复，避免同一错误反复压缩。
                 state.has_attempted_reactive_compact = True
+                # 返回循环顶部重新准备上下文。
                 continue
+            # 调用最终失败时，将未确认的定时任务重新放回队列。
             scheduler.restore_cron_jobs(unacknowledged_cron_jobs)
+            # 将错误写入历史，供外层向用户展示。
             messages.append({"role": "assistant", "content": [
                 {"type": "text", "text": f"[Error] {type(e).__name__}: {e}"}]})
+            # 释放已完成任务的 agent 分配记录。
             tasks.release_completed_assignment("agent")
+            # 结束本轮交互，不继续执行工具。
             return
 
+        # 模型已成功响应，确认本批定时任务已交付。
         try:
+            # 将已消费的任务从持久化记录中确认移除。
             scheduler.acknowledge_cron_jobs(unacknowledged_cron_jobs)
+        # 确认写入失败不阻止处理模型响应。
         except OSError as exc:
+            # 在终端报告确认失败。
             core.terminal_print(f"[cron error] Delivery confirmation failed: {exc}")
+        # 清空本轮待确认清单。
         unacknowledged_cron_jobs.clear()
 
+        # 输出达到 token 上限时，先提高上限，再尝试续写。
         if response.stop_reason == "max_tokens":
+            # 尚未提高过上限时，使用更大的上限重试当前调用。
             if not state.has_escalated:
+                # 设置升级后的输出 token 上限。
                 max_tokens = core.ESCALATED_MAX_TOKENS
+                # 防止下一次超限时重复升级。
                 state.has_escalated = True
+                # 在终端显示本次重试的上限。
                 print(f"  \033[33m[max_tokens] retry with {max_tokens}\033[0m")
+                # 重新调用模型，暂不把截断响应写入历史。
                 continue
+            # 升级后仍截断时，先保存模型已生成的内容。
             messages.append({"role": "assistant", "content": response.content})
+            # 在允许的恢复次数内，请求模型从截断处继续。
             if state.recovery_count < core.MAX_RECOVERY_RETRIES:
+                # 添加续写提示，作为下一次模型调用的用户消息。
                 messages.append({"role": "user", "content": core.CONTINUATION_PROMPT})
+                # 记录已使用的一次续写机会。
                 state.recovery_count += 1
+                # 返回循环顶部继续调用模型。
                 continue
+            # 续写机会耗尽时释放已完成的分配记录。
             tasks.release_completed_assignment("agent")
+            # 停止本轮交互。
             return
 
+        # 本次响应未截断，下一次调用恢复默认 token 上限。
         max_tokens = core.DEFAULT_MAX_TOKENS
+        # 清除本轮上限升级标记。
         state.has_escalated = False
+        # 保存模型响应，供工具结果和后续调用引用。
         messages.append({"role": "assistant", "content": response.content})
+        # 没有工具请求时，模型已完成当前一轮回答。
         if not subagent.has_tool_use(response.content):
+            # 通知 Stop 钩子本轮模型输出已完成。
             hooks.trigger_hooks("Stop", messages)
+            # 检查当前目标是否允许结束。
             decision = evaluate_goal(messages)
+            # 目标未达成时，反馈缺失条件并继续调用模型。
             if decision is not None and decision.action == "block":
+                # 读取仍在生效的目标条件。
                 condition = GOAL.active.condition if GOAL.active else ""
+                # 在终端显示要求继续的原因。
                 print(f"  \033[35m[goal] continue: "
                       f"{decision.reason[:80]}\033[0m")
+                # 将目标条件和评估结果写回历史。
                 messages.append({"role": "user", "content": (
                     "[Goal still active]\n"
                     f"Condition: {condition}\n"
                     f"Evaluator: {decision.reason}\n"
                     "Continue working and surface the missing evidence."
                 )})
+                # 再次调用模型寻找缺失证据。
                 continue
+            # 对非 allow 的其他评估结果仅输出提示。
             if decision is not None and decision.action != "allow":
+                # 在终端显示评估结果和原因。
                 print(f"  \033[35m[goal] {decision.action}: "
                       f"{decision.reason}\033[0m")
+            # 从已完成的对话中提取并整理长期记忆。
             remember_after_turn(messages)
+            # 释放已完成任务的 agent 分配记录。
             tasks.release_completed_assignment("agent")
+            # 本轮回答结束。
             return
 
+        # 本次响应包含工具调用，准备收集工具执行结果。
         results = []
+        # 记录是否需要在工具结果回填后压缩上下文。
         compact_requested = False
+        # 按模型返回顺序处理每个内容块。
         for block in response.content:
+            # 非工具块保留在助手消息中，无需执行。
             if block.type != "tool_use":
+                # 跳过文本等非工具内容。
                 continue
+            # 在终端显示当前工具名称。
             print(f"\033[36m> {block.name}\033[0m")
 
+            # compact 只登记压缩请求，稍后统一压缩完整历史。
             if block.name == "compact":
+                # 返回工具确认信息，满足模型的工具调用协议。
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": "[Compaction requested. This completed turn will be summarized.]",
+                    "content": (
+                        "[Compaction already completed for this user turn.]"
+                        if manual_compacted else
+                        "[Compaction requested. This completed turn will be summarized.]"
+                    ),
                 })
-                compact_requested = True
+                # 同一用户轮次第一次请求 compact 时安排一次压缩。
+                if not manual_compacted:
+                    # 工具结果写入历史后再执行压缩。
+                    compact_requested = True
+                    # 防止后续模型响应重复请求压缩。
+                    manual_compacted = True
+                # compact 不经过普通工具钩子和执行器。
                 continue
 
+            # 执行工具前通知钩子，允许它阻止本次调用。
             blocked = hooks.trigger_hooks("PreToolUse", block)
+            # 钩子拒绝调用时，将原因作为工具结果返回。
             if blocked:
+                # 使用原工具调用 ID 与结果配对。
                 results.append({"type": "tool_result",
                                 "tool_use_id": block.id,
                                 "content": str(blocked)})
+                # 不再执行被阻止的工具。
                 continue
 
+            # 可后台执行的工具不阻塞当前模型轮次。
             if scheduler.should_run_background(block.name, block.input):
+                # 启动后台任务；失败时也要返回工具结果。
                 try:
+                    # 将工具调用交给后台任务调度器。
                     bg_id = scheduler.start_background_task(block, handlers)
+                    # 告知模型结果稍后通过任务通知送达。
                     output = (f"[Background task {bg_id} started] "
                               "Result will arrive as a task_notification.")
+                # 将启动异常转换成模型可读的结果。
                 except Exception as exc:
+                    # 保留异常类型和信息，便于模型判断失败原因。
                     output = (f"Error: Failed to start background task: "
                               f"{type(exc).__name__}: {exc}")
+                # 为本次后台工具调用登记返回内容。
                 results.append({"type": "tool_result",
                                 "tool_use_id": block.id,
                                 "content": output})
+                # 后台工具不再进入同步执行路径。
                 continue
 
+            # 根据工具名查找同步处理函数。
             handler = handlers.get(block.name)
+            # 执行工具，并把未知工具或执行异常转成结果文本。
             output = file_tools.call_tool_handler(handler, block.input, block.name)
+            # 执行完成后通知 PostToolUse 钩子。
             hooks.trigger_hooks("PostToolUse", block, output)
+            # 在终端显示截短的执行结果。
             print(str(output)[:300])
 
+            # 写入 TODO 后重新开始计算提醒间隔。
             if block.name == "todo_write":
+                # 清零已累计的非 TODO 工具调用次数。
                 rounds_since_todo = 0
+            # 其他工具调用会增加 TODO 提醒计数。
             else:
+                # 记录又完成了一次非 TODO 工具调用。
                 rounds_since_todo += 1
 
+            # 将同步工具输出与原调用 ID 配对。
             results.append({"type": "tool_result",
                             "tool_use_id": block.id, "content": output})
 
+        # 把所有工具结果及已完成的后台通知写入历史。
         messages.append({"role": "user", "content": build_user_content(results)})
+        # 如本轮请求了手动压缩，现在摘要包含完整工具结果的历史。
         if compact_requested:
+            # 原地替换历史，下一次模型调用读取压缩后的上下文。
             messages[:] = compaction.compact_history(messages, active_request)
 
 
