@@ -66,7 +66,7 @@ python -m agent_harness
 | `scripts/build_flat.py` | 拼接生成 `flat/agent_full.py` |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
 | `flat/agent_full.py` | 生成物：仓库内单文件入口，仍从 `src/` 导入客户端 shim |
-| `tests/` | 124 个离线测试，按模块拆分（任务、压缩、调度、权限、编码、技能等） |
+| `tests/` | 离线测试，按模块拆分（协议、任务、压缩、调度、权限、编码、技能等） |
 | `docs/` | 项目级设计与执行记录，入口见 `docs/README.md` |
 | `note/` | `env-setup.md` 安装说明；`dev-notes.md` 本机运行与调试笔记 |
 | `tmp/` | 本地临时文件，不入库（需要时手动 `mkdir tmp`） |
@@ -82,6 +82,8 @@ python -m agent_harness
 - **goal 接在 Stop 边界**：模型不再请求工具时先问目标控制器，返回 `block` 就补一条
   `[Goal still active]` 消息，继续同一条循环。
 - **goal 状态只在内存**：重启后需要重新 `/goal`。
+- **响应有效性**：Responses 失败状态和非法、截断的工具调用会交付明确错误；不执行部分工具。
+- **历史压缩**：失败保留原历史，自动或手动失败后继续主请求；真正超限时只尝试一次被动恢复。
 - **workflow resume**：相同调用键回放 journal，不再次调用模型；预算包含该 run 的历史 token，
   返回的 `usage` 是本次新增用量，`cumulativeUsage` 是整个 run 的累计用量。旧格式 journal
   缺少 `tokens` 时会报错；重新运行 `workflow demo` 可生成新格式记录。
@@ -100,7 +102,8 @@ python -m pytest -q
 全部离线，不消耗 API：
 
 - `tests/test_goal.py`：控制器用例，以及用脚本化 client 驱动 `agent_loop` 的会话级用例。
-- `tests/test_workflow.py`：19 个用例，覆盖 journal 回放、预算与 runner 接线。
+- `tests/test_workflow.py`：覆盖 journal 回放、预算与 runner 接线。
+- `tests/test_llm_client.py`：覆盖响应协议、工具参数和失败响应的 Lead 行为。
 - `tests/test_agent_teams.py`：合并宿主的运行时用例。
 - `tests/test_flat_build.py`：拼接输出确定、与生成物一致、可编译、可运行。
 

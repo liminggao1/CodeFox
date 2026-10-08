@@ -170,39 +170,6 @@ rounds_since_todo = 0
 agent_lock = threading.Lock()
 
 
-# 每次调用模型前，按从轻到重的顺序控制对话历史大小。
-def prepare_context(messages: list, active_request: str) -> list:
-    """压缩对话历史，避免下一次模型调用超出上下文限制。
-
-    Args:
-        messages: 当前对话历史，会被原地压缩。
-        active_request: 当前用户请求，历史摘要会保留该请求。
-
-    Returns:
-        原来的 ``messages`` 列表对象。
-    """
-    # 先缩减最新一批过大的工具结果。
-    messages[:] = compaction.tool_result_budget(messages)
-    # 消息数量过多时归档中间的旧消息，保留头尾。
-    messages[:] = compaction.snip_compact(messages)
-    # 前两步后超过触发线，才处理更早的工具结果。
-    if compaction.estimate_size(messages) > core.COMPACT_TRIGGER:
-        # 将旧工具结果尽量压到目标值，给后续消息留出空间。
-        target = core.COMPACT_TARGET
-        # 将模型已看过的旧工具结果替换成磁盘路径。
-        messages[:] = compaction.micro_compact(messages, target)
-        # 旧结果缩减后仍超过触发线，就继续缩小较大的工具结果。
-        if compaction.estimate_size(messages) > core.COMPACT_TRIGGER:
-            # 为大结果保存完整输出，只在上下文中保留预览。
-            messages[:] = compaction.fit_tool_results(messages, target)
-    # 工具结果缩减后仍超过触发线，最后才调用模型生成历史摘要。
-    if compaction.estimate_size(messages) > core.COMPACT_TRIGGER:
-        # 用摘要替换历史，同时保留当前用户请求。
-        messages[:] = compaction.compact_history(messages, active_request)
-    # 返回原列表；切片赋值使调用方持有的引用保持有效。
-    return messages
-
-
 def build_user_content(results: list[dict]) -> list[dict]:
     """组合工具结果和后台任务通知。
 
@@ -302,6 +269,7 @@ def agent_loop(messages: list, active_request: str):
     max_tokens = core.DEFAULT_MAX_TOKENS
     # 管理本轮手动压缩的工具响应和执行时机。
     manual_compaction = compaction.ManualCompaction()
+    automatic_compaction_enabled = True
     # 暂存已取出、尚未确认交付的定时任务。
     unacknowledged_cron_jobs: list[scheduler.CronJob] = []
 
@@ -337,7 +305,11 @@ def agent_loop(messages: list, active_request: str):
             rounds_since_todo = 0
 
         # 按上下文预算裁剪或压缩历史消息。
-        prepare_context(messages, active_request)
+        compacted = compaction.prepare_history(
+            messages, active_request, enabled=automatic_compaction_enabled)
+        if compacted.reason:
+            automatic_compaction_enabled = False
+            core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
         # 根据最新消息刷新记忆、MCP 和队友上下文。
         context = runtime_context.build_context(messages)
         # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
@@ -354,11 +326,11 @@ def agent_loop(messages: list, active_request: str):
             # 首次遇到提示过长错误时压缩历史，再重新调用模型。
             if recovery.is_prompt_too_long_error(e) and not state.has_attempted_reactive_compact:
                 # 原地替换历史，保留调用方持有的列表引用。
-                messages[:] = compaction.reactive_compact(messages, active_request)
-                # 标记已尝试恢复，避免同一错误反复压缩。
                 state.has_attempted_reactive_compact = True
-                # 返回循环顶部重新准备上下文。
-                continue
+                compacted = compaction.reactive_compact(messages, active_request)
+                if compacted.reason is None:
+                    continue
+                e = RuntimeError(f"Reactive compaction failed: {compacted.reason}")
             # 调用最终失败时，将未确认的定时任务重新放回队列。
             scheduler.restore_cron_jobs(unacknowledged_cron_jobs)
             # 将错误写入历史，供外层向用户展示。

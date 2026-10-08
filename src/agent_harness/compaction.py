@@ -7,14 +7,52 @@
 from __future__ import annotations
 
 import json
+import copy
 import re
 import time
 from pathlib import Path
+from dataclasses import dataclass
 
 from . import core
 from . import subagent
 
 # -- 上下文压缩 --
+
+@dataclass(frozen=True)
+class CompactionResult:
+    applied: bool
+    reason: str | None = None
+
+
+def _history_transaction(messages: list, transform) -> CompactionResult:
+    """Commit a complete candidate history, preserving the caller's list identity."""
+    try:
+        candidate = transform(copy.deepcopy(messages))
+        if candidate == messages:
+            return CompactionResult(False)
+        messages[:] = candidate
+        return CompactionResult(True)
+    except Exception as exc:
+        return CompactionResult(False, f"{type(exc).__name__}: {exc}")
+
+
+def prepare_history(messages: list, active_request: str, *, enabled=True) -> CompactionResult:
+    """Apply the layered budget policy atomically, or retain the original history."""
+    if not enabled:
+        return CompactionResult(False)
+
+    def prepare(candidate):
+        candidate = tool_result_budget(candidate)
+        candidate = snip_compact(candidate)
+        if estimate_size(candidate) > core.COMPACT_TRIGGER:
+            candidate = micro_compact(candidate, core.COMPACT_TARGET)
+            if estimate_size(candidate) > core.COMPACT_TRIGGER:
+                candidate = fit_tool_results(candidate, core.COMPACT_TARGET)
+        if estimate_size(candidate) > core.COMPACT_TRIGGER:
+            candidate = compact_history(candidate, active_request)
+        return candidate
+
+    return _history_transaction(messages, prepare)
 
 # 压缩分层进行：先缩减过大的工具结果，再裁剪旧消息；必要时才调用模型生成摘要。
 def estimate_size(messages: list) -> int:
@@ -433,7 +471,7 @@ def summarize_history(messages: list) -> str:
     Args:
         messages: 待摘要的历史，序列化后最多发送前 80000 字符。
     Returns:
-        模型生成的摘要文本；无文本输出时返回占位说明。
+        Complete, non-empty summary text; invalid summaries raise ValueError.
     """
     conversation = json.dumps(messages, default=str)[:80000]
     handoff_system = (
@@ -448,7 +486,10 @@ def summarize_history(messages: list) -> str:
         system=handoff_system,
         messages=[{"role": "user", "content": conversation}],
         max_tokens=2000)
-    return subagent.extract_text(response.content) or "(empty summary)"
+    summary = subagent.extract_text(response.content).strip()
+    if getattr(response, "stop_reason", None) != "end_turn" or not summary:
+        raise ValueError("History summary must contain complete, non-empty text")
+    return summary
 
 
 def compact_history(messages: list, active_request: str) -> list:
@@ -478,7 +519,7 @@ def compact_history(messages: list, active_request: str) -> list:
 
 
 
-def reactive_compact(messages: list, active_request: str) -> list:
+def _reactive_history(messages: list, active_request: str) -> list:
     """提示过长时归档历史，摘要旧消息并保留最近的消息尾部。
     Args:
         messages: 触发提示过长错误的对话历史。
@@ -503,7 +544,8 @@ def reactive_compact(messages: list, active_request: str) -> list:
     try:
         # 对分割点之前的全部旧对话生成摘要
         summary = summarize_history(messages[:tail_start])
-    except Exception:
+    except Exception as exc:
+        core.terminal_print(f"[compact error] Summary unavailable: {type(exc).__name__}: {exc}")
         # 摘要生成失败兜底文本
         summary = "Earlier conversation was trimmed after a prompt-too-long error."
     request = str(active_request)
@@ -517,13 +559,19 @@ def reactive_compact(messages: list, active_request: str) -> list:
 
 
 
+def reactive_compact(messages: list, active_request: str) -> CompactionResult:
+    """Commit an archived summary and intact tail, or report the archive failure."""
+    return _history_transaction(messages, lambda candidate: _reactive_history(candidate, active_request))
+
+
 class ManualCompaction:
     """管理一次用户请求中的手动压缩状态和执行时机。"""
 
     def __init__(self):
         """初始化未完成、未待执行的手动压缩状态。"""
-        self.completed = False
+        self.accepted = False
         self.pending = False
+        self._result = None
 
     def available_tools(self, tools: list) -> list:
         """首次手动压缩请求被接受后，不再向模型提供 compact 工具。
@@ -533,7 +581,7 @@ class ManualCompaction:
         Returns:
             尚未接受请求时返回原列表；否则返回移除 compact 的列表。
         """
-        if not self.completed:
+        if not self.accepted:
             return tools
         return [tool for tool in tools if tool["name"] != "compact"]
 
@@ -544,30 +592,35 @@ class ManualCompaction:
             block: 模型返回的工具调用块。
         Returns:
             非 compact 工具返回 None；否则返回工具结果字典。
-            首次请求安排压缩，重复请求只返回已完成提示。
+            The first request schedules compaction; repeats report it was requested.
         """
         if block.name != "compact":
             return None
         content = (
-            "[Compaction already completed for this user turn.]"
-            if self.completed else
+            "[Compaction already requested for this user turn.]"
+            if self.accepted else
             "[Compaction requested. This completed turn will be summarized.]"
         )
-        if not self.completed:
+        result = {"type": "tool_result", "tool_use_id": block.id, "content": content}
+        if not self.accepted:
             self.pending = True
-            self.completed = True
-        return {"type": "tool_result", "tool_use_id": block.id,
-                "content": content}
+            self.accepted = True
+            self._result = result
+        return result
 
-    def apply_after_results(self, messages: list, active_request: str) -> None:
+    def apply_after_results(self, messages: list, active_request: str) -> CompactionResult | None:
         """工具结果写回历史后，执行待处理的手动压缩。
 
         Args:
             messages: 含完整工具结果的历史，压缩时会就地替换内容。
             active_request: 摘要后需要保留的当前请求。
         Returns:
-            None；没有待处理请求时不修改历史。
+            CompactionResult after applying a pending request, otherwise None.
         """
         if self.pending:
-            messages[:] = compact_history(messages, active_request)
             self.pending = False
+            result = _history_transaction(messages, lambda candidate: compact_history(candidate, active_request))
+            if result.reason:
+                self._result["content"] = f"[Compaction failed: {result.reason}]"
+            return result
+        return None

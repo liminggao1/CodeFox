@@ -225,9 +225,9 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 这里是一次交互的总入口。第一次停住时看 `messages`、`context`、`active_request` 和 `tools`，
 可以沿下面的顺序找实现：
 
-1. [prepare_context](../src/agent_harness/host.py#L160) 先按字符预算裁剪或压缩历史。
-2. [update_context](../src/agent_harness/host.py#L138) 刷新记忆、MCP 和队友状态，随后再次调用
-   [assemble_tool_pool](../src/agent_harness/mcp_tools.py#L137) 获取工具描述与 handler。
+1. [prepare_history](../src/agent_harness/compaction.py) 按字符预算处理候选历史，成功后提交，失败保留原值。
+2. [build_context](../src/agent_harness/runtime_context.py) 构造记忆、MCP 和队友的只读快照，随后
+   [ToolRegistry.snapshot](../src/agent_harness/tool_registry.py) 获取工具描述、handler 和权限。
 3. [call_llm](../src/agent_harness/host.py#L198) 组装系统提示词并发起模型请求；返回工具调用后，
    [call_tool_handler](../src/agent_harness/file_tools.py#L217) 执行 handler。
 4. 工具结果由 `build_user_content` 配对写回 `messages`，循环再次进入 `call_llm`；模型返回文本

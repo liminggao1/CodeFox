@@ -40,8 +40,8 @@ def test_prepare_compacts_only_above_trigger(host_factory, monkeypatch) -> None:
     below = [{"role": "user", "content": "x" * (host.core.COMPACT_TRIGGER - 100)}]
     above = [{"role": "user", "content": "x" * host.core.COMPACT_TRIGGER}]
 
-    host.prepare_context(below, "below")
-    host.prepare_context(above, "above")
+    host.compaction.prepare_history(below, "below")
+    host.compaction.prepare_history(above, "above")
 
     assert requests == ["above"]
     assert above == [{"role": "user", "content": "summary"}]
@@ -64,7 +64,7 @@ def test_prepare_stops_below_trigger_without_forcing_target(
     monkeypatch.setattr(host.compaction, "compact_history", unexpected)
     messages = [{"role": "user", "content": "x" * host.core.COMPACT_TRIGGER}]
 
-    host.prepare_context(messages, "go")
+    host.compaction.prepare_history(messages, "go")
 
     assert targets == [host.core.COMPACT_TARGET]
     assert host.compaction.estimate_size(messages) > host.core.COMPACT_TARGET
@@ -76,9 +76,10 @@ def test_prepare_preserves_results_below_the_pressure_limit(host_factory) -> Non
     messages = [{"role": "user", "content": "go"}, tool_use("t1"),
                 tool_result("t1", "x" * 500)]
 
-    prepared = host.prepare_context(messages, "go")
+    result = host.compaction.prepare_history(messages, "go")
 
-    assert prepared[2]["content"][0]["content"] == "x" * 500
+    assert not result.applied and result.reason is None
+    assert messages[2]["content"][0]["content"] == "x" * 500
 
 
 def test_prepare_persists_oversized_result_before_trimming(host_factory) -> None:
@@ -93,9 +94,10 @@ def test_prepare_persists_oversized_result_before_trimming(host_factory) -> None
         {"role": "user", "content": "next"},
     ]
 
-    prepared = host.prepare_context(messages, "go")
+    result = host.compaction.prepare_history(messages, "go")
 
-    rendered = json.dumps(prepared, default=str)
+    assert result.applied and result.reason is None
+    rendered = json.dumps(messages, default=str)
     assert "<persisted-output>" in rendered or "[Earlier tool result saved at" in rendered
 
 
@@ -216,18 +218,20 @@ def test_snip_compact_archives_the_complete_history(host_factory) -> None:
     assert "42 messages archived at" in compacted[3]["content"]
 
 
-def test_reactive_compact_keeps_the_tail_tool_pair(host_factory) -> None:
+def test_reactive_compact_keeps_the_tail_tool_pair(host_factory, monkeypatch) -> None:
     host = host_factory()
     messages = [{"role": "user", "content": "go"}]
     for index in range(8):
         messages.append(tool_use(f"t{index}"))
         messages.append(tool_result(f"t{index}", f"r{index}"))
 
-    compacted = host.compaction.reactive_compact(messages, "go")
+    monkeypatch.setattr(host.compaction, "summarize_history", lambda _: "summary")
+    result = host.compaction.reactive_compact(messages, "go")
 
-    assert compacted[-1]["content"][0]["type"] == "tool_result"
-    assert compacted[-2]["content"][0]["type"] == "tool_use"
-    assert compacted[0]["content"].startswith("[Reactive compact]")
+    assert result.applied
+    assert messages[-1]["content"][0]["type"] == "tool_result"
+    assert messages[-2]["content"][0]["type"] == "tool_use"
+    assert messages[0]["content"].startswith("[Reactive compact]")
 
 
 def test_reactive_compact_summarizes_only_old_history(host_factory) -> None:
@@ -237,7 +241,7 @@ def test_reactive_compact_summarizes_only_old_history(host_factory) -> None:
     def respond(**kwargs):
         seen["messages"] = kwargs["messages"]
         from types import SimpleNamespace
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text="summary")])
+        return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="summary")])
 
     host.core.client = SimpleNamespace(
         messages=SimpleNamespace(create=respond))
@@ -323,7 +327,7 @@ def test_manual_compact_handles_duplicate_calls_in_one_batch(
     assert first == {"type": "tool_result", "tool_use_id": "first",
                      "content": "[Compaction requested. This completed turn will be summarized.]"}
     assert duplicate == {"type": "tool_result", "tool_use_id": "second",
-                         "content": "[Compaction already completed for this user turn.]"}
+                         "content": "[Compaction already requested for this user turn.]"}
     assert manual.available_tools(tools) == [{"name": "bash"}]
 
     messages = [{"role": "user", "content": [first, duplicate]}]
