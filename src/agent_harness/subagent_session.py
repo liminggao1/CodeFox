@@ -10,10 +10,50 @@ from . import message_content
 from pathlib import Path
 
 
+BASE_TOOL_NAMES = ("bash", "read_file", "write_file", "edit_file", "glob")
+TASK_TOOL_NAMES = ("list_tasks", "claim_task", "complete_task")
+PERSISTENT_TOOL_NAMES = ("send_message", "submit_plan")
+
+
+def selected_tool_names(tools, *, mode="once", task_tools=False):
+    """Validate a whitelist against the capabilities of this child mode."""
+    available = BASE_TOOL_NAMES
+    if mode == "persistent":
+        available += PERSISTENT_TOOL_NAMES
+    if task_tools:
+        available += TASK_TOOL_NAMES
+    if tools is None:
+        return available
+    if not isinstance(tools, list) or any(not isinstance(t, str) for t in tools):
+        raise ValueError("tools must be a list of tool names")
+    unsupported = set(tools) - set(available)
+    if unsupported:
+        raise ValueError(f"Tools unavailable in this mode: {', '.join(sorted(unsupported))}")
+    return tuple(t for t in available if t in tools)
+
+
+class _MeteredClient:
+    """Count execution and summary calls through the same injected client."""
+
+    def __init__(self, client):
+        self._client = client
+        self.messages = self
+        self.usage = {"tokens": 0, "model_calls": 0}
+
+    def create(self, **kwargs):
+        self.usage["model_calls"] += 1
+        response = self._client.messages.create(**kwargs)
+        usage = getattr(response, "usage", None)
+        for key in ("input_tokens", "output_tokens"):
+            value = usage.get(key, 0) if isinstance(usage, dict) else getattr(usage, key, 0)
+            self.usage["tokens"] += int(value or 0)
+        return response
+
+
 class SubagentSession:
     def __init__(self, name, client, model, system, authorize_tool=None,
                  send_message=None, submit_plan=None, *, mode="persistent",
-                 task_tools=True, work_context=None):
+                 task_tools=True, work_context=None, tools=None, max_tokens=None):
         """装配子 agent的模型参数、受限工具列表和执行回调。
 
         输入：name 为子 agent名称；client/model/system 为模型请求配置；
@@ -21,8 +61,10 @@ class SubagentSession:
         返回：None。保存配置并创建工具处理器；不请求模型、不启动线程。
         """
         self.name = name
-        self.client = client
+        self.client = _MeteredClient(client)
+        self.usage = self.client.usage
         self.model = model
+        self.max_tokens = core.DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
         self.system = system
         self.authorize_tool = authorize_tool or (lambda block: None)
         self.work_context = work_context or (lambda: "")
@@ -147,13 +189,11 @@ class SubagentSession:
             "complete_task": _run_complete_task,
         }
 
-        if mode == "once":
-            excluded = {"send_message", "submit_plan"}
-            if not task_tools:
-                excluded.update({"list_tasks", "claim_task", "complete_task"})
-            self.tools = [tool for tool in self.tools if tool["name"] not in excluded]
-            self.handlers = {key: value for key, value in self.handlers.items()
-                             if key not in excluded}
+        selected = selected_tool_names(tools, mode=mode, task_tools=task_tools)
+        self.tools = [tool for tool in self.tools if tool["name"] in selected]
+        self.handlers = {key: value for key, value in self.handlers.items() if key in selected}
+        self.system += (f"\nAvailable child tools: {', '.join(selected)}."
+                        if selected else "\nNo tools are available; use only the supplied text.")
 
     def begin_work(self, prompt: str):
         """Set the current delegation and reset its single context recovery."""
@@ -168,6 +208,8 @@ class SubagentSession:
         返回：拒绝原因、工具结果或执行错误的字符串。
             放行后调用处理器并触发 PostToolUse；拒绝时不执行处理器或后置 hook。
         """
+        if block.name not in self.handlers:
+            return f"Error: Tool '{block.name}' is unavailable for this child"
         blocked = self.authorize_tool(block)
         if blocked is not None:
             return str(blocked)
@@ -227,4 +269,4 @@ class SubagentSession:
             model=self.model, system=(f"{self.system}\n\n[Current delegation]\n{request}\n\n"
                                      "Earlier delegations in history are reference only; follow the current delegation."),
             messages=messages,
-            tools=self.tools, max_tokens=core.DEFAULT_MAX_TOKENS)
+            **({"tools": self.tools} if self.tools else {}), max_tokens=self.max_tokens)

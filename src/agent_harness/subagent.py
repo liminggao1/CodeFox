@@ -18,7 +18,7 @@ from . import core
 from . import tasks
 from . import prompts
 from . import message_content
-from .subagent_session import SubagentSession
+from .subagent_session import SubagentSession, selected_tool_names
 
 # -- 消息总线与团队协议 --
 
@@ -119,6 +119,7 @@ class SubagentRecord:
     status: str = "working"
     messages: list = field(default_factory=list)
     active_request: str = ""
+    usage: dict = field(default_factory=lambda: {"tokens": 0, "model_calls": 0})
 
 
 active_subagents: dict[str, SubagentRecord] = {}
@@ -258,14 +259,15 @@ def authorize_subagent_tool(name: str, block) -> str | None:
 
 
 def create_subagent_session(name: str, system: str = "", *,
-                            mode="persistent", task_tools=True):
+                            mode="persistent", task_tools=True, tools=None,
+                            client=None, model=None, max_tokens=None):
     """Build one session with runtime callbacks; do not start its lifecycle."""
     return SubagentSession(
-        name, core.client, core.MODEL, system,
+        name, core.client if client is None else client, core.MODEL if model is None else model, system,
         lambda block: authorize_subagent_tool(name, block),
         lambda to, content: send_message(name, to, content),
         lambda plan: submit_plan(name, plan),
-        mode=mode, task_tools=task_tools,
+        mode=mode, task_tools=task_tools, tools=tools, max_tokens=max_tokens,
         work_context=lambda: f"Plan status: {plan_gates.get(name, 'not_required')}",
     )
 
@@ -475,7 +477,8 @@ def _persistent_loop(record, session):
 
 
 def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
-                   task_id: str | None = None, require_plan: bool = False) -> dict:
+                   task_id: str | None = None, require_plan: bool = False, tools=None,
+                   *, client=None, model=None, max_tokens=None) -> dict:
     """Create one child and execute according to its fixed lifetime.
 
     Input: a unique name, delegation, explicit once/persistent mode, optional
@@ -485,7 +488,8 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
     """
     valid_name = name if is_valid_agent_name(name) and name.casefold() not in RESERVED_SUBAGENT_NAMES else None
     valid_mode = mode if isinstance(mode, str) and mode in {"once", "persistent"} else None
-    result = {"name": valid_name, "mode": valid_mode, "status": "failed", "text": ""}
+    result = {"name": valid_name, "mode": valid_mode, "status": "failed", "text": "",
+              "usage": {"tokens": 0, "model_calls": 0}}
     if valid_name is None:
         result["text"] = "Invalid or reserved subagent name"
         return result
@@ -503,6 +507,16 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
     if mode == "once" and require_plan:
         result["text"] = "once cannot wait for plan approval"
         return result
+    task_tools = task_id is not None or mode == "persistent"
+    try:
+        selected_tool_names(tools, mode=mode, task_tools=task_tools)
+        if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0):
+            raise ValueError("max_tokens must be a positive integer")
+        if model is not None and (not isinstance(model, str) or not model.strip()):
+            raise ValueError("model must be a non-empty string")
+    except ValueError as exc:
+        result["text"] = str(exc)
+        return result
     record = SubagentRecord(name, role, mode, active_request=prompt)
     with tasks.task_lock:
         with subagent_lock:
@@ -515,6 +529,7 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
             active_subagents[name] = record
             plan_gates[name] = "required" if require_plan else "not_required"
             plan_gate_versions[name] = tasks.assignment_versions.get(name, 0)
+    session = None
     try:
         if task_id is not None:
             claimed = tasks.claim_task(task_id, owner=name)
@@ -543,7 +558,9 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
             system += ("Decide whether intermediate coordination is useful and call send_message "
                        "to 'lead' or another active persistent child. The runtime delivers your "
                        "final answer and waits for the next message; do not poll while idle. ")
-        session = create_subagent_session(name, system, mode=mode, task_tools=task_id is not None or mode == "persistent")
+        session = create_subagent_session(name, system, mode=mode, task_tools=task_tools,
+                                           tools=tools, client=client, model=model, max_tokens=max_tokens)
+        record.usage = session.usage
         session.begin_work(prompt)
         if mode == "persistent":
             threading.Thread(target=lambda: _persistent_loop(record, session), daemon=True).start()
@@ -560,6 +577,8 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
         _cleanup(record)
     except Exception as exc:
         result.update(status="failed", text=f"Cleanup failed: {type(exc).__name__}: {exc}")
+    if session is not None:
+        result["usage"] = dict(session.usage)
     return result
 
 

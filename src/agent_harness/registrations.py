@@ -142,10 +142,10 @@ def run_complete_task(task_id: str) -> str:
         return f"Error: task {task_id} not found"
 
 def run_spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
-                       task_id: str | None = None, require_plan: bool = False) -> str:
+                       task_id: str | None = None, require_plan: bool = False, tools=None) -> str:
     """Serialize the unified runtime result for the Lead's creation tool."""
     return json.dumps(subagent.spawn_subagent(
-        name, prompt, mode, role, task_id, require_plan), ensure_ascii=False)
+        name, prompt, mode, role, task_id, require_plan, tools), ensure_ascii=False)
 
 
 def run_list_subagents() -> str:
@@ -296,7 +296,9 @@ BUILTIN_DEFINITIONS = [
                           "mode": {"type": "string", "enum": ["once", "persistent"]},
                           "role": {"type": "string"},
                           "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{8}$"},
-                          "require_plan": {"type": "boolean"}},
+                          "require_plan": {"type": "boolean"},
+                          "tools": {"type": "array", "items": {"type": "string"},
+                                    "description": "Optional tool whitelist; omit for mode defaults, [] for no tools."}},
                       "required": ["name", "prompt", "mode"],
                       "additionalProperties": False}},
                    run_spawn_subagent, "built-in tool 'spawn_subagent'"),

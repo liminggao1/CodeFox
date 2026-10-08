@@ -273,8 +273,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 | ---- | --------------------------- | ----------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------- |
 | 1    | `subagent.active_subagents` | 共享数据    | [runtime_context.py:39](../src/agent_harness/runtime_context.py#L39) | [subagent.py:124](../src/agent_harness/subagent.py#L124)             | 加锁读取活跃子 agent 名称     |
 | 2    | `read_memory_index`         | 内部·跨文件 | [runtime_context.py:41](../src/agent_harness/runtime_context.py#L41) | [memory_runtime.py:197](../src/agent_harness/memory_runtime.py#L197) | 读取记忆索引                  |
-| 3    | `load_memories`             | 内部·跨文件 | [runtime_context.py:42](../src/agent_harness/runtime_context.py#L42) | [memory_runtime.py:371](../src/agent_harness/memory_runtime.py#L371) | 加载相关记忆                  |
-| 3.1  | `select_relevant_memories`  | 内部·同文件 | [memory_runtime.py:386](../src/agent_harness/memory_runtime.py#L386) | [memory_runtime.py:314](../src/agent_harness/memory_runtime.py#L314) | 在 `load_memories` 内筛选记忆 |
+| 3    | `load_memories`             | 内部·跨文件 | [runtime_context.py:42](../src/agent_harness/runtime_context.py#L42) | [memory_runtime.py:371](../src/agent_harness/memory_runtime.py#L371) | 加载相关记忆，具体选取流程见第 14 节 |
 | 4    | `mcp_tools.mcp_clients`     | 共享数据    | [runtime_context.py:43](../src/agent_harness/runtime_context.py#L43) | [mcp_tools.py:54](../src/agent_harness/mcp_tools.py#L54)             | 读取已登记的 MCP 名称         |
 
 上下文构造完成后，主循环进入 `call_llm`，再按下面的顺序使用它：
@@ -457,6 +456,9 @@ Lead 模型选择是否委派及 mode。once 同步交付最终结果；persiste
 | 5    | `trigger_hooks（PostToolUse）`      | 内部·跨文件 | [host.py:468](../src/agent_harness/host.py#L468)                                                                       | [hooks.py:30](../src/agent_harness/hooks.py#L30)             | 工具执行后触发                 |
 | 6    | `trigger_hooks（Stop）`             | 内部·跨文件 | [host.py:380](../src/agent_harness/host.py#L380)                                                                       | [hooks.py:30](../src/agent_harness/hooks.py#L30)             | 后续模型回复不再请求工具时触发 |
 
+上表按事件发生位置汇总不同分支的 hooks，不表示每轮都会按 1 到 6 依次执行；`UserPromptSubmit`、
+工具执行前后和 `Stop` 分别对应不同的主循环边界。
+
 hooks 是运行时回调，不是模型工具。钩子拒绝时停止后续检查，也不执行工具。
 子 agent 执行器采用相同的工具 hooks。
 
@@ -566,11 +568,12 @@ journal 的方法都是工作流内部调用。恢复通过 CLI 的 `workflow re
 
 | 顺序 | 函数                       | 调用身份    | 调用 / 触发位置                                                      | 实现位置                                                             | 作用                              |
 | ---- | -------------------------- | ----------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- | --------------------------------- |
-| 1    | `select_relevant_memories` | 内部·同文件 | [memory_runtime.py:386](../src/agent_harness/memory_runtime.py#L386) | [memory_runtime.py:314](../src/agent_harness/memory_runtime.py#L314) | 从当前记忆库筛选相关记录          |
-| 2    | `list_memory_files`        | 内部·同文件 | [memory_runtime.py:323](../src/agent_harness/memory_runtime.py#L323) | [memory_runtime.py:228](../src/agent_harness/memory_runtime.py#L228) | 读取记忆目录                      |
-| 3    | `recent_user_text`         | 内部·同文件 | [memory_runtime.py:325](../src/agent_harness/memory_runtime.py#L325) | [memory_runtime.py:286](../src/agent_harness/memory_runtime.py#L286) | 取得最近用户文本作为查询          |
-| 4    | `extract_json_array`       | 内部·同文件 | [memory_runtime.py:350](../src/agent_harness/memory_runtime.py#L350) | [memory_runtime.py:273](../src/agent_harness/memory_runtime.py#L273) | 解析模型选中的记录下标            |
-| 5    | `read_memory_file`         | 内部·同文件 | [memory_runtime.py:388](../src/agent_harness/memory_runtime.py#L388) | [memory_runtime.py:216](../src/agent_harness/memory_runtime.py#L216) | 回到 load_memories 后读取选中正文 |
+| 1    | `load_memories`            | 内部·跨文件 | [runtime_context.py:42](../src/agent_harness/runtime_context.py#L42) | [memory_runtime.py:371](../src/agent_harness/memory_runtime.py#L371) | 按预算加载当前请求相关的记忆      |
+| 2    | `select_relevant_memories` | 内部·同文件 | [memory_runtime.py:386](../src/agent_harness/memory_runtime.py#L386) | [memory_runtime.py:314](../src/agent_harness/memory_runtime.py#L314) | 从当前记忆库筛选相关记录          |
+| 3    | `list_memory_files`        | 内部·同文件 | [memory_runtime.py:323](../src/agent_harness/memory_runtime.py#L323) | [memory_runtime.py:228](../src/agent_harness/memory_runtime.py#L228) | 读取记忆目录                      |
+| 4    | `recent_user_text`         | 内部·同文件 | [memory_runtime.py:325](../src/agent_harness/memory_runtime.py#L325) | [memory_runtime.py:286](../src/agent_harness/memory_runtime.py#L286) | 取得最近用户文本作为查询          |
+| 5    | `extract_json_array`       | 内部·同文件 | [memory_runtime.py:350](../src/agent_harness/memory_runtime.py#L350) | [memory_runtime.py:273](../src/agent_harness/memory_runtime.py#L273) | 解析模型选中的记录下标            |
+| 6    | `read_memory_file`         | 内部·同文件 | [memory_runtime.py:388](../src/agent_harness/memory_runtime.py#L388) | [memory_runtime.py:216](../src/agent_harness/memory_runtime.py#L216) | 读取选中的记忆正文                |
 
 筛选请求失败时，在 [memory_runtime.py:368](../src/agent_harness/memory_runtime.py#L368) 调用关键词匹配，实现位于 [memory_runtime.py:298](../src/agent_harness/memory_runtime.py#L298)。
 
