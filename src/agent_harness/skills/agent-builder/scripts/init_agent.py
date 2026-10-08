@@ -38,6 +38,9 @@ client = Anthropic(
     base_url=os.getenv("ANTHROPIC_BASE_URL")
 )
 MODEL = os.getenv("MODEL_NAME", "claude-sonnet-4-20250514")
+DEFAULT_MAX_TOKENS = 8000
+BASH_TIMEOUT_SECONDS = 60
+TOOL_OUTPUT_CHAR_LIMIT = 50000
 
 SYSTEM = """You are a coding agent. Use bash for everything:
 - Read: cat, grep, find, ls
@@ -54,7 +57,7 @@ TOOL = [{{
 def run(prompt, history=[]):
     history.append({{"role": "user", "content": prompt}})
     while True:
-        r = client.messages.create(model=MODEL, system=SYSTEM, messages=history, tools=TOOL, max_tokens=8000)
+        r = client.messages.create(model=MODEL, system=SYSTEM, messages=history, tools=TOOL, max_tokens=DEFAULT_MAX_TOKENS)
         history.append({{"role": "assistant", "content": r.content}})
         if r.stop_reason != "tool_use":
             return "".join(b.text for b in r.content if hasattr(b, "text"))
@@ -63,11 +66,11 @@ def run(prompt, history=[]):
             if b.type == "tool_use":
                 print(f"> {{b.input['command']}}")
                 try:
-                    out = subprocess.run(b.input["command"], shell=True, capture_output=True, text=True, errors="replace", timeout=60)
+                    out = subprocess.run(b.input["command"], shell=True, capture_output=True, text=True, errors="replace", timeout=BASH_TIMEOUT_SECONDS)
                     output = (out.stdout + out.stderr).strip() or "(empty)"
                 except Exception as e:
                     output = f"Error: {{e}}"
-                results.append({{"type": "tool_result", "tool_use_id": b.id, "content": output[:50000]}})
+                results.append({{"type": "tool_result", "tool_use_id": b.id, "content": output[:TOOL_OUTPUT_CHAR_LIMIT]}})
         history.append({{"role": "user", "content": results}})
 
 if __name__ == "__main__":
@@ -99,6 +102,9 @@ client = Anthropic(
 )
 MODEL = os.getenv("MODEL_NAME", "claude-sonnet-4-20250514")
 WORKDIR = Path.cwd()
+DEFAULT_MAX_TOKENS = 8000
+BASH_TIMEOUT_SECONDS = 60
+TOOL_OUTPUT_CHAR_LIMIT = 50000
 
 SYSTEM = f"""You are a coding agent at {{WORKDIR}}.
 
@@ -133,16 +139,16 @@ def execute(name: str, args: dict) -> str:
         if any(d in args["command"] for d in dangerous):
             return "Error: Dangerous command blocked"
         try:
-            r = subprocess.run(args["command"], shell=True, cwd=WORKDIR, capture_output=True, text=True, errors="replace", timeout=60)
-            return (r.stdout + r.stderr).strip()[:50000] or "(empty)"
+            r = subprocess.run(args["command"], shell=True, cwd=WORKDIR, capture_output=True, text=True, errors="replace", timeout=BASH_TIMEOUT_SECONDS)
+            return (r.stdout + r.stderr).strip()[:TOOL_OUTPUT_CHAR_LIMIT] or "(empty)"
         except subprocess.TimeoutExpired:
-            return "Error: Timeout (60s)"
+            return f"Error: Timeout ({{BASH_TIMEOUT_SECONDS:g}}s)"
         except Exception as e:
             return f"Error: {{e}}"
 
     if name == "read_file":
         try:
-            return safe_path(args["path"]).read_text(encoding="utf-8")[:50000]
+            return safe_path(args["path"]).read_text(encoding="utf-8")[:TOOL_OUTPUT_CHAR_LIMIT]
         except Exception as e:
             return f"Error: {{e}}"
 
@@ -179,7 +185,7 @@ def agent(prompt: str, history: list = None) -> str:
 
     while True:
         response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=history, tools=TOOLS, max_tokens=8000
+            model=MODEL, system=SYSTEM, messages=history, tools=TOOLS, max_tokens=DEFAULT_MAX_TOKENS
         )
         history.append({{"role": "assistant", "content": response.content}})
 

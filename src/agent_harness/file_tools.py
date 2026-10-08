@@ -56,7 +56,7 @@ def _stop_process_group(process: subprocess.Popen):
             except OSError:
                 return
             try:
-                process.wait(timeout=0.05)
+                process.wait(timeout=core.PROCESS_TERMINATION_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 continue
         return
@@ -67,7 +67,7 @@ def _stop_process_group(process: subprocess.Popen):
             return
         except OSError:
             return
-        time.sleep(0.05)
+        time.sleep(core.PROCESS_TERMINATION_GRACE_SECONDS)
 
 
 def _stop_all_shell_processes():
@@ -99,18 +99,18 @@ def _run_bash_process(command: str, cwd: Path | None = None) -> tuple[str, int |
         )
         with _shell_process_lock:
             _shell_processes.add(process)
-        stdout, stderr = process.communicate(timeout=120)
+        stdout, stderr = process.communicate(timeout=core.BASH_TIMEOUT_SECONDS)
         out = (stdout + stderr).strip()
-        return (out[:50000] if out else "(no output)"), process.returncode
+        return (out[:core.BASH_OUTPUT_CHAR_LIMIT] if out else "(no output)"), process.returncode
     except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)", None
+        return f"Error: Timeout ({core.BASH_TIMEOUT_SECONDS:g}s)", None
     except OSError as exc:
         return f"Error: {type(exc).__name__}: {exc}", None
     finally:
         if process is not None:
             _stop_process_group(process)
             try:
-                process.wait(timeout=0.2)
+                process.wait(timeout=core.PROCESS_REAP_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 pass
             with _shell_process_lock:
@@ -201,7 +201,7 @@ def run_glob(pattern: str, cwd: Path | None = None) -> str:
     """搜索指定目录内匹配 glob 模式的路径。
 
     输入：pattern 为模式，支持 ** 递归；cwd 为搜索根目录，默认使用启动目录。
-    返回：排序去重后的路径文本，最多展示 200 项；无匹配或异常时返回提示。
+    返回：排序去重后的路径文本，按 core.GLOB_RESULT_LIMIT 限制数量；无匹配时返回提示。
         解析后越界的匹配项不会返回，不修改文件。
     """
     import glob as g
@@ -212,8 +212,8 @@ def run_glob(pattern: str, cwd: Path | None = None) -> str:
                 pattern, root_dir=base, recursive=True)
             if (base / match).resolve().is_relative_to(base)
         })
-        shown = matches[:200]
-        if len(matches) > 200:
+        shown = matches[:core.GLOB_RESULT_LIMIT]
+        if len(matches) > core.GLOB_RESULT_LIMIT:
             shown.append("... (more matches omitted; narrow the pattern)")
         return "\n".join(shown) if shown else "(no matches)"
     except Exception as e:

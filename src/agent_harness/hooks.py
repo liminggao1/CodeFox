@@ -91,7 +91,7 @@ def log_hook(block):
 
 
 def large_output_hook(block, output):
-    if len(str(output)) > 100000:
+    if len(str(output)) > core.LARGE_OUTPUT_WARNING_CHARS:
         print(f"\033[33m[HOOK] large output from {block.name}: "
               f"{len(str(output))} chars\033[0m")
     return None

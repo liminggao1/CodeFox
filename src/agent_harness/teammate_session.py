@@ -1,5 +1,6 @@
 """Execute one teammate model round without owning its mailbox or lifecycle."""
 
+from . import core
 from . import file_tools
 from . import hooks
 from . import tasks
@@ -159,7 +160,7 @@ class TeammateSession:
         return str(output)
 
     def run(self, messages: list):
-        """执行一次队友模型请求，并将响应和工具结果写回历史。
+        """按 core.DEFAULT_MAX_TOKENS 执行一次队友模型请求，并将响应和工具结果写回历史。
 
         输入：messages 为当前队友历史，会原地追加 assistant 和配对的 tool_result 消息。
         返回：模型响应对象；线程外层根据是否含工具请求决定继续工作或进入空闲。
@@ -167,7 +168,7 @@ class TeammateSession:
         """
         response = self.client.messages.create(
             model=self.model, system=self.system, messages=messages,
-            tools=self.tools, max_tokens=8000)
+            tools=self.tools, max_tokens=core.DEFAULT_MAX_TOKENS)
         if getattr(response, "stop_reason", None) == "max_tokens":
             raise RuntimeError("Teammate response was truncated (max_tokens)")
         messages.append({"role": "assistant", "content": response.content})

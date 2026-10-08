@@ -21,6 +21,7 @@ from . import worktrees
 fcntl = core.fcntl
 
 # -- 任务系统 --
+TASK_ID_ALLOCATION_ATTEMPTS = 100
 
 # 任务是小型持久化记录；归属、依赖、worktree 和队友都建立在同一份文件状态上。
 def _tasks_dir() -> Path:
@@ -142,7 +143,7 @@ def create_task(subject: str, description: str = "") -> Task:
     if not subject:
         raise ValueError("Task subject cannot be empty")
     with task_store_lock():
-        for _ in range(100):
+        for _ in range(TASK_ID_ALLOCATION_ATTEMPTS):
             task = Task(
                 id=f"task_{secrets.token_hex(4)}",
                 subject=subject,

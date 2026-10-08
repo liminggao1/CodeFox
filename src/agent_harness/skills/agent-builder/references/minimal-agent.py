@@ -19,6 +19,9 @@ import os
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 MODEL = os.getenv("MODEL_NAME", "claude-sonnet-4-20250514")
 WORKDIR = Path.cwd()
+DEFAULT_MAX_TOKENS = 8000
+BASH_TIMEOUT_SECONDS = 60
+READ_OUTPUT_CHAR_LIMIT = 50000
 
 # 系统提示词保持简洁
 SYSTEM = f"""You are a coding agent at {WORKDIR}.
@@ -69,7 +72,7 @@ def execute_tool(name: str, args: dict) -> str:
         try:
             r = subprocess.run(
                 args["command"], shell=True, cwd=WORKDIR,
-                capture_output=True, text=True, errors="replace", timeout=60
+                capture_output=True, text=True, errors="replace", timeout=BASH_TIMEOUT_SECONDS
             )
             return (r.stdout + r.stderr).strip() or "(empty)"
         except subprocess.TimeoutExpired:
@@ -77,7 +80,7 @@ def execute_tool(name: str, args: dict) -> str:
 
     if name == "read_file":
         try:
-            return (WORKDIR / args["path"]).read_text(encoding="utf-8")[:50000]
+            return (WORKDIR / args["path"]).read_text(encoding="utf-8")[:READ_OUTPUT_CHAR_LIMIT]
         except Exception as e:
             return f"Error: {e}"
 
@@ -106,7 +109,7 @@ def agent(prompt: str, history: list = None) -> str:
             system=SYSTEM,
             messages=history,
             tools=TOOLS,
-            max_tokens=8000,
+            max_tokens=DEFAULT_MAX_TOKENS,
         )
 
         # 构造 assistant 消息

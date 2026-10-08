@@ -56,6 +56,11 @@ TEMPORARY_MEMORY_MARKERS = (
 RECALL_CHAR_LIMIT = 20000
 CONSOLIDATE_THRESHOLD = 10
 CONSOLIDATE_INPUT_CHAR_LIMIT = 20000
+MEMORY_QUERY_CHAR_LIMIT = 4000
+MEMORY_SELECTION_CATALOG_CHAR_LIMIT = 12000
+MEMORY_DIALOGUE_CHAR_LIMIT = 8000
+MEMORY_EXTRACTION_CATALOG_CHAR_LIMIT = 6000
+MEMORY_CONSOLIDATION_RECORD_LIMIT = 30
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     if not text.startswith("---\n"):
@@ -288,7 +293,7 @@ def recent_user_text(messages: list, max_turns: int = 3) -> str:
             turns.append(text)
         if len(turns) == max_turns:
             break
-    return "\n".join(reversed(turns))[:4000]
+    return "\n".join(reversed(turns))[:MEMORY_QUERY_CHAR_LIMIT]
 
 def keyword_memory_selection(
     records: list[dict], query: str, max_items: int
@@ -332,14 +337,14 @@ def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
         "Select memory records that are relevant to the current user request. "
         "Return only a JSON array of catalog indices, such as [0, 2]. "
         "Return [] when none are relevant.\n\n"
-        f"Current request:\n{query}\n\nMemory catalog:\n{catalog[:12000]}"
+        f"Current request:\n{query}\n\nMemory catalog:\n{catalog[:MEMORY_SELECTION_CATALOG_CHAR_LIMIT]}"
     )
     try:
         # 调用大模型，传入prompt，让模型判断哪些记忆条目相关
         response = core.client.messages.create(
             model=core.MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
+            max_tokens=core.MEMORY_SELECTION_MAX_TOKENS,
         )
         # 从模型返回文本提取JSON数组，得到选中的记忆索引
         indices = extract_json_array(
@@ -402,7 +407,7 @@ def dialogue_text(messages: list, max_messages: int = 12) -> str:
         text = message_text(message).strip()
         if text:
             lines.append(f"{message.get('role', 'unknown')}: {text}")
-    return "\n".join(lines)[:8000]
+    return "\n".join(lines)[:MEMORY_DIALOGUE_CHAR_LIMIT]
 
 def validate_memory_record(
     record, require_scope: bool = False
@@ -464,14 +469,14 @@ def extract_memories(messages: list) -> int:
         "sessions. Use current_task for one-off commands, temporary paths, "
         "current-session restrictions, and current task state. Return [] if "
         "nothing qualifies.\n\n"
-        f"Existing memory catalog:\n{existing[:6000]}\n\nDialogue:\n{dialogue}"
+        f"Existing memory catalog:\n{existing[:MEMORY_EXTRACTION_CATALOG_CHAR_LIMIT]}\n\nDialogue:\n{dialogue}"
     )
 
     try:
         response = core.client.messages.create(
             model=core.MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000,
+            max_tokens=core.MEMORY_EXTRACTION_MAX_TOKENS,
         )
         candidates = [
             validated
@@ -528,7 +533,7 @@ def consolidate_memories() -> int:
         "Merge duplicates, apply newer corrections, and remove information that "
         "is no longer useful. Preserve specific user preferences. Return a JSON "
         "array of objects with name, type, description, and body. Keep at most "
-        f"30 records.\n\n{catalog}"
+        f"{MEMORY_CONSOLIDATION_RECORD_LIMIT} records.\n\n{catalog}"
     )
 
     try:
@@ -539,7 +544,7 @@ def consolidate_memories() -> int:
         response = core.client.messages.create(
             model=core.MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=3000,
+            max_tokens=core.MEMORY_CONSOLIDATION_MAX_TOKENS,
         )
         consolidated = [
             validated

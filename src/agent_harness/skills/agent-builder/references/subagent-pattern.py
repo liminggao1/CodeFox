@@ -8,6 +8,7 @@ import time
 import sys
 
 # 假设 client、MODEL 和 execute_tool 在其他位置已定义
+DEFAULT_MAX_TOKENS = 8000
 
 
 # =============================================================================
@@ -168,7 +169,7 @@ Complete the task and return a clear, concise summary."""
             system=sub_system,
             messages=sub_messages,
             tools=sub_tools,
-            max_tokens=8000,
+            max_tokens=DEFAULT_MAX_TOKENS,
         )
 
         # 检查是否完成

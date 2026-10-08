@@ -24,6 +24,7 @@ from . import tasks
 from . import compaction
 
 # -- 后台任务 --
+BACKGROUND_SUMMARY_CHARS = 200
 
 # 慢工具先返回占位 tool_result，实际结果随后作为 task_notification 注入主循环。
 _bg_counter = 0
@@ -125,7 +126,7 @@ def collect_background_results() -> list[str]:
             task = background_tasks[bg_id]
             output = background_results.get(bg_id, "")
             full_output = ""
-            if len(output) > 200:
+            if len(output) > BACKGROUND_SUMMARY_CHARS:
                 saved_path = task.get("saved_output_path")
                 if not saved_path or not Path(saved_path).is_file():
                     path = compaction.save_output(task["output_id"], output, subdirectory="background")
@@ -136,7 +137,7 @@ def collect_background_results() -> list[str]:
                 f"  <task_id>{bg_id}</task_id>\n"
                 f"  <status>{task['status']}</status>\n"
                 f"  <command>{task['command']}</command>\n"
-                f"  <summary>{output[:200]}</summary>\n"
+                f"  <summary>{output[:BACKGROUND_SUMMARY_CHARS]}</summary>\n"
                 f"{full_output}"
                 f"</task_notification>")
         # A failed save leaves the entire batch ready for a later collection.
@@ -384,13 +385,13 @@ def _enqueue_due_job(job: CronJob):
 
 
 def cron_scheduler_loop():
-    """每秒检查到期 cron，并在同一分钟内避免重复入队。
+    """按 core.CRON_POLL_SECONDS 检查到期 cron，在同一分钟内避免重复入队。
 
     返回：正常情况下持续循环。按本地时间匹配，跳过等待交付的一次性任务；
         单个任务出错时打印原因并继续处理其他任务，不在这里请求模型。
     """
     while True:
-        time.sleep(1)
+        time.sleep(core.CRON_POLL_SECONDS)
         now = datetime.now()
         marker = now.strftime("%Y-%m-%d %H:%M")
         with cron_lock:

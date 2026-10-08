@@ -88,8 +88,8 @@ class RecoveryState:
 
 
 def retry_delay(attempt: int) -> float:
-    base = min(core.BASE_DELAY_MS * (2 ** attempt), 32000) / 1000
-    return base + random.uniform(0, base * 0.25)
+    base = min(core.BASE_DELAY_MS * (2 ** attempt), core.MAX_RETRY_DELAY_MS) / 1000
+    return base + random.uniform(0, base * core.RETRY_JITTER_RATIO)
 
 
 def with_retry(fn, state: RecoveryState):

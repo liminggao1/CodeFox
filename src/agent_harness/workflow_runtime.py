@@ -45,6 +45,7 @@ WORKFLOW_AGENT_ENVIRONMENT = (
 # -- 运行时限制 --
 AGENT_CAP = 1000                       # 每次运行最多调用 agent() 的次数
 CONCURRENCY = 8                        # 并发上限（信号量）
+WORKFLOW_ID_ALLOCATION_ATTEMPTS = 32    # 新运行 ID 冲突时的重试上限
 MISS = object()                        # journal 缓存未命中标记
 WORKFLOW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RUN_ID_RE = re.compile(r"^wf_[A-Za-z0-9][A-Za-z0-9._-]{0,63}_[0-9a-f]{16}$")
@@ -68,11 +69,11 @@ def reserve_run_id(meta) -> str:
     """在打开新 journal 前，独占创建快照占位文件以预留运行 ID。
 
     输入：meta 为工作流元数据。
-    返回：已预留的运行 ID；最多尝试 32 次，仍冲突则抛出 WorkflowInputError。
+    返回：已预留的运行 ID；达到 WORKFLOW_ID_ALLOCATION_ATTEMPTS 后抛出 WorkflowInputError。
         创建 .runtime 和空快照文件，避免重复运行 ID 覆盖旧 journal。
     """
     store_dir().mkdir(parents=True, exist_ok=True)
-    for _ in range(32):
+    for _ in range(WORKFLOW_ID_ALLOCATION_ATTEMPTS):
         run_id = validate_run_id(create_run_id(meta))
         snapshot_path = store_dir() / f"{run_id}.json"
         try:
@@ -314,7 +315,7 @@ class AnthropicAgentRunner:
                 + "Do not claim access to files or results not included in the prompt."
             ),
             messages=[{"role": "user", "content": request}],
-            max_tokens=2000,
+            max_tokens=core.WORKFLOW_AGENT_MAX_TOKENS,
         )
         if getattr(response, "stop_reason", None) == "max_tokens":
             raise RuntimeError("Workflow agent response was truncated (max_tokens)")

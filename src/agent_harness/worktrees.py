@@ -88,7 +88,7 @@ def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
         cwd: 命令工作目录，默认使用 ``core.WORKDIR``。
     返回：
         ``(是否成功, 输出文本)``。合并标准输出和错误输出并去掉首尾空白，
-        无输出时使用 ``'(no output)'``。启动失败或超过 30 秒时返回失败及错误文本。
+        无输出时使用 ``'(no output)'``。启动失败或超过配置的超时时间时返回失败及错误文本。
         创建、移除等子命令会实际改变 Git 状态。
     """
     if run_git_impl is not None:
@@ -96,7 +96,7 @@ def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             ["git", *args], cwd=cwd or core.WORKDIR,
-            capture_output=True, text=True, errors="replace", timeout=30,
+            capture_output=True, text=True, errors="replace", timeout=core.GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"{type(exc).__name__}: {exc}"
@@ -111,11 +111,11 @@ def run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
         args: Git 子命令和参数列表，不包含可执行文件名。
         cwd: 命令工作目录，默认使用 ``core.WORKDIR``。
     返回：
-        ``_run_git`` 的 ``(是否成功, 输出文本)``，输出最多保留 5,000 个字符。
+        ``_run_git`` 的 ``(是否成功, 输出文本)``，按 core.GIT_OUTPUT_CHAR_LIMIT 截断。
         解析 Git 注册表时使用未截断的 ``_run_git``。
     """
     ok, output = _run_git(args, cwd)
-    return ok, output[:5000]
+    return ok, output[:core.GIT_OUTPUT_CHAR_LIMIT]
 
 
 def _registered_worktrees() -> tuple[dict[Path, dict[str, str]], str | None]:

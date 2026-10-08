@@ -58,10 +58,33 @@ def tool_results_dir() -> Path:
 # ---------- 运行参数常量 ----------
 DEFAULT_MAX_TOKENS = 8000           # 默认最大生成 token 数
 ESCALATED_MAX_TOKENS = 16000        # 升级/长任务时的上限
+WORKFLOW_AGENT_MAX_TOKENS = 2000    # 工作流步骤输出上限
+COMPACTION_MAX_TOKENS = 2000        # 历史压缩摘要输出上限
+MEMORY_SELECTION_MAX_TOKENS = 200  # 记忆筛选结果输出上限
+MEMORY_EXTRACTION_MAX_TOKENS = 1000 # 新记忆抽取输出上限
+MEMORY_CONSOLIDATION_MAX_TOKENS = 3000  # 记忆合并输出上限
 MAX_RETRIES = 3                     # API 调用失败最大重试次数
 MAX_CONSECUTIVE_529 = 2             # 连续 529（限流）容忍次数
 MAX_RECOVERY_RETRIES = 2            # 恢复后的最大重试次数
 BASE_DELAY_MS = 500                 # 重试基础退避延迟（毫秒）
+MAX_RETRY_DELAY_MS = 32000          # 重试退避延迟上限（毫秒，不含抖动）
+RETRY_JITTER_RATIO = 0.25           # 在退避延迟上追加的随机抖动比例
+SUBAGENT_MAX_ROUNDS = 30            # 一次性子代理的模型调用轮数上限
+TODO_REMINDER_ROUNDS = 3            # 未更新 TODO 的工具轮数提醒阈值
+ASYNC_EVENT_POLL_SECONDS = 1        # 主循环后台事件检查间隔（秒）
+CRON_POLL_SECONDS = 1               # 定时任务检查间隔（秒）
+
+# ---------- 工具执行参数 ----------
+BASH_TIMEOUT_SECONDS = 120          # 同步及后台 shell 命令超时（秒）
+BASH_OUTPUT_CHAR_LIMIT = 50000      # shell 返回结果的字符上限
+GIT_TIMEOUT_SECONDS = 30            # Git 命令超时（秒）
+GIT_OUTPUT_CHAR_LIMIT = 5000        # Git 工具返回结果的字符上限
+GLOB_RESULT_LIMIT = 200             # glob 最多展示的路径数
+PROCESS_TERMINATION_GRACE_SECONDS = 0.05  # 终止信号到强制结束的等待时间
+PROCESS_REAP_TIMEOUT_SECONDS = 0.2  # 结束后回收 shell 进程的等待时间
+LARGE_OUTPUT_WARNING_CHARS = 100000 # 大工具输出的日志提醒阈值
+
+# ---------- 上下文压缩参数 ----------
 CONTEXT_LIMIT = 50000               # 对话历史字符预算，不含系统提示词和工具定义
 COMPACT_TRIGGER = int(CONTEXT_LIMIT * 0.8)       # 自动压缩触发线
 COMPACT_TARGET = int(CONTEXT_LIMIT * 0.7)        # 工具结果压缩的目标值
@@ -69,6 +92,10 @@ TOOL_RESULT_BUDGET = int(CONTEXT_LIMIT * 0.16)  # 最新一批工具结果预算
 TOOL_PREVIEW_CHARS = int(CONTEXT_LIMIT * 0.02)  # 落盘结果的预览长度
 KEEP_RECENT_TOOL_RESULTS = 3        # 历史中保留最近几条工具结果
 PERSIST_THRESHOLD = int(CONTEXT_LIMIT * 0.08)  # 单条工具结果落盘阈值
+COMPACTION_INPUT_CHAR_LIMIT = 80000 # 发送给摘要模型的历史字符上限
+COMPACTION_HEAD_MESSAGES = 3        # 归档中间历史时保留的开头消息数
+COMPACTION_TAIL_MESSAGES = 5        # 被动压缩时保留的最近消息数
+MIN_COMPACT_RESULT_CHARS = 120      # 不值得压缩落盘的短工具结果阈值
 CONTINUATION_PROMPT = "Continue from the previous response. Do not repeat completed work."  # 续写提示词
 
 # ---------- 控制台提示符 ----------

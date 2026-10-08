@@ -25,6 +25,8 @@ import urllib.request
 __all__ = ["Anthropic", "ProtocolResponseError"]
 
 DEFAULT_TIMEOUT = 300.0
+ERROR_BODY_PREVIEW_CHARS = 500
+ERROR_DETAIL_PREVIEW_CHARS = 1000
 USER_AGENT = "learncc-llm-client/1.0"
 
 
@@ -329,11 +331,11 @@ def _describe(error: urllib.error.HTTPError) -> str:
     try:
         parsed = json.loads(body)
     except ValueError:
-        return body[:500] or str(error.reason or "request failed")
+        return body[:ERROR_BODY_PREVIEW_CHARS] or str(error.reason or "request failed")
     detail = parsed.get("error", parsed)
     if isinstance(detail, dict):
         detail = detail.get("message") or json.dumps(detail, ensure_ascii=False)
-    return str(detail)[:1000]
+    return str(detail)[:ERROR_DETAIL_PREVIEW_CHARS]
 
 
 class _Messages:
@@ -385,7 +387,7 @@ class ResponsesClient:
             return json.loads(body)
         except ValueError:
             raise APIStatusError(
-                f"Invalid JSON from {self._endpoint()}: {body[:500]}") from None
+                f"Invalid JSON from {self._endpoint()}: {body[:ERROR_BODY_PREVIEW_CHARS]}") from None
 
     def _headers(self) -> dict:
         headers = {

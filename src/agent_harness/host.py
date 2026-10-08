@@ -316,8 +316,8 @@ def agent_loop(messages: list, active_request: str):
             # 将已完成的后台任务通知加入对话历史。
             inject_background_notifications(messages)
 
-            # 连续三次工具调用未更新 TODO 时，提醒模型更新。
-            if rounds_since_todo >= 3:
+            # 达到未更新 TODO 的工具轮数阈值时，提醒模型更新。
+            if rounds_since_todo >= core.TODO_REMINDER_ROUNDS:
                 # 把提醒作为用户消息加入历史。
                 messages.append({"role": "user",
                                  "content": "<reminder>Update your todos.</reminder>"})
@@ -522,12 +522,12 @@ def async_event_loop(history: list, session_state: dict):
     """在后台线程轮询运行时事件，并串行唤醒主 agent。
 
     输入：history 为与 CLI 共享的历史；session_state 保存当前 active_user_request。
-    返回：正常情况下持续循环。每秒检查 cron、Lead 信箱和后台任务，
+    返回：正常情况下持续循环。按配置间隔检查 cron、Lead 信箱和后台任务，
         有事件时在 agent_lock 内追加团队消息、执行 agent_loop 并打印新增回复。
         这是普通同步函数，函数名中的 async 不表示 asyncio 协程。
     """
     while True:
-        time.sleep(1)
+        time.sleep(core.ASYNC_EVENT_POLL_SECONDS)
         with agent_lock:
             with scheduler.cron_lock:
                 fired = list(scheduler.cron_queue)

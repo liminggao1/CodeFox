@@ -88,14 +88,14 @@ def spawn_subagent(description: str) -> str:
 
     输入：description 为任务说明。
     返回：最近一次非空助手文本，或没有总结的提示。
-        最多调用模型 30 次，文件和 shell 工具经过权限 hooks，不能继续创建 agent。
+        调用轮数由 core.SUBAGENT_MAX_ROUNDS 控制，文件和 shell 工具经过权限 hooks。
         使用启动目录，不管理队友信箱和任务认领；模型请求异常继续抛出。
     """
     messages = [{"role": "user", "content": description}]
-    for _ in range(30):
+    for _ in range(core.SUBAGENT_MAX_ROUNDS):
         response = core.client.messages.create(
             model=core.MODEL, system=sub_system(), messages=messages,
-            tools=SUB_TOOLS, max_tokens=8000)
+            tools=SUB_TOOLS, max_tokens=core.DEFAULT_MAX_TOKENS)
         messages.append({"role": "assistant", "content": response.content})
         if not has_tool_use(response.content):
             break

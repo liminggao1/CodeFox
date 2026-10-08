@@ -10,6 +10,8 @@ from pathlib import Path
 import subprocess
 
 WORKDIR = Path.cwd()
+BASH_TIMEOUT_SECONDS = 60
+TOOL_OUTPUT_CHAR_LIMIT = 50000
 
 
 # =============================================================================
@@ -154,8 +156,8 @@ def run_bash(command: str) -> str:
 
     检查内容：
     - 拦截明显危险的命令
-    - 60 秒超时
-    - 输出最多保留 50KB
+    - 超时由 BASH_TIMEOUT_SECONDS 控制
+    - 输出字符上限由 TOOL_OUTPUT_CHAR_LIMIT 控制
     """
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
@@ -168,13 +170,13 @@ def run_bash(command: str) -> str:
             cwd=WORKDIR,
             capture_output=True,
             text=True, errors="replace",
-            timeout=60
+            timeout=BASH_TIMEOUT_SECONDS
         )
         output = (result.stdout + result.stderr).strip()
-        return output[:50000] if output else "(no output)"
+        return output[:TOOL_OUTPUT_CHAR_LIMIT] if output else "(no output)"
 
     except subprocess.TimeoutExpired:
-        return "Error: Command timed out (60s)"
+        return f"Error: Command timed out ({BASH_TIMEOUT_SECONDS:g}s)"
     except Exception as e:
         return f"Error: {e}"
 
@@ -186,7 +188,7 @@ def run_read_file(path: str, limit: int = None) -> str:
     功能：
     - 安全解析路径
     - 大文件可限制读取行数
-    - 输出最多保留 50KB
+    - 输出字符上限由 TOOL_OUTPUT_CHAR_LIMIT 控制
     """
     try:
         text = safe_path(path).read_text(encoding="utf-8")
@@ -196,7 +198,7 @@ def run_read_file(path: str, limit: int = None) -> str:
             lines = lines[:limit]
             lines.append(f"... ({len(text.splitlines()) - limit} more lines)")
 
-        return "\n".join(lines)[:50000]
+        return "\n".join(lines)[:TOOL_OUTPUT_CHAR_LIMIT]
 
     except Exception as e:
         return f"Error: {e}"
