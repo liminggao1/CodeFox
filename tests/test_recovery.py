@@ -130,3 +130,42 @@ def test_lead_does_not_repeat_reactive_recovery(host_factory, monkeypatch):
     assert calls == [True, True]
     assert summaries == [True]
     assert "context_length_exceeded" in history[-1]["content"][0]["text"]
+
+
+@pytest.mark.parametrize("failure", ["memory", "tools", "preparation_context_error"])
+def test_preparation_failure_restores_cron_and_next_turn_can_deliver(host_factory, monkeypatch, failure):
+    host = host_factory()
+    calls = []
+
+    def create(**kwargs):
+        calls.append(True)
+        return SimpleNamespace(stop_reason="end_turn", content=[])
+
+    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    original_index = host.memory_runtime.read_memory_index
+    if failure == "tools":
+        client = host.mcp_tools.MCPClient("invalid")
+        client.register([{"name": "bad", "inputSchema": {"type": "array"}}], {"bad": lambda: "bad"})
+        host.mcp_clients["invalid"] = client
+    else:
+        def fail_index():
+            raise OSError("context_length_exceeded" if failure == "preparation_context_error" else "memory unavailable")
+
+        monkeypatch.setattr(host.memory_runtime, "read_memory_index", fail_index)
+
+    monkeypatch.setattr(host.compaction, "reactive_compact", lambda *args: pytest.fail("Preparation was treated as a model context error"))
+    job = host.scheduler.schedule_job("* * * * *", "scheduled work", recurring=False, durable=False)
+    host.scheduler._enqueue_due_job(job)
+    history = [{"role": "user", "content": "go"}]
+    host.agent_loop(history, "go")
+    assert calls == []
+    assert host.scheduler.cron_queue == [job]
+    assert host.scheduler.scheduled_jobs[job.id].pending_delivery
+    assert "[Error]" in history[-1]["content"][0]["text"]
+
+    monkeypatch.setattr(host.memory_runtime, "read_memory_index", original_index)
+    host.mcp_clients.clear()
+    host.agent_loop(history, "retry")
+    assert calls == [True]
+    assert host.scheduler.cron_queue == []
+    assert job.id not in host.scheduler.scheduled_jobs

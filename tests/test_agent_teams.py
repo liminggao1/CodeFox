@@ -54,6 +54,43 @@ def test_assignment_cwd_recovers_plain_and_bound_tasks(
         host.assignment_cwd("alice")
 
 
+@pytest.mark.parametrize("owner", ["agent", "alice"])
+@pytest.mark.parametrize("archive", ["tool_output", "transcript"])
+def test_bound_file_tools_read_runtime_archives_without_changing_write_cwd(
+    host_factory, monkeypatch, owner, archive
+) -> None:
+    host = host_factory()
+    checkout = host.core.WORKDIR / ".worktrees" / "feature"
+    checkout.mkdir(parents=True)
+    monkeypatch.setattr(host.worktrees, "_registered_worktree", lambda name: (checkout, None))
+    task = host.tasks.create_task("Read archive")
+    task.worktree = "feature"
+    host.tasks.save_task(task)
+    assert host.tasks.claim_task(task.id, owner=owner).startswith("Claimed")
+    if archive == "tool_output":
+        path = host.compaction.save_output("archive", "first\n中文 evidence")
+    else:
+        path = host.compaction.write_transcript([{"role": "user", "content": "evidence"}])
+    expected = path.read_text(encoding="utf-8").rstrip("\n")
+    outside = host.core.WORKDIR / "outside.txt"
+    outside.write_text("other root file", encoding="utf-8")
+    (checkout / "relative.txt").write_text("task file", encoding="utf-8")
+
+    if owner == "agent":
+        read = host.registrations.BUILTIN_HANDLERS["read_file"]
+        write = host.registrations.BUILTIN_HANDLERS["write_file"]
+    else:
+        session = host.teams.create_teammate_session(owner)
+        read = lambda path: session.execute_tool(SimpleNamespace(name="read_file", input={"path": path}))
+        write = lambda path, content: session.execute_tool(SimpleNamespace(
+            name="write_file", input={"path": path, "content": content}))
+    assert read(str(path)) == expected
+    assert read("relative.txt") == "task file"
+    assert "Path escapes workspace" in read(str(outside))
+    assert "Path escapes workspace" in write(str(path), "replacement")
+    assert path.read_text(encoding="utf-8").rstrip("\n") == expected
+
+
 def test_cross_process_claim_waits_for_worktree_binding(
     host_factory, tmp_path
 ) -> None:

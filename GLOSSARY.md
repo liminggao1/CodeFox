@@ -20,7 +20,7 @@
 
 - 结构：`src/agent_harness/`（源码 + 包内 `skills/`）、`scripts/`、`flat/`、`tests/`、`docs/`、`note/`。
 - 运行：本地以源码方式运行，环境约定见 `AGENTS.md`；通用安装步骤见 `note/env-setup.md`。
-- 验证：124 个离线测试；workflow `demo` / `resume` 离线运行；离线自检 9 项。
+- 验证：完整离线测试；workflow `demo` / `resume` 离线运行；离线自检 9 项。
 - 未实测：真实 API 交互问答、队友线程端到端、memory 抽取。
 - 不做打包发布，不引入 linter/formatter。
 

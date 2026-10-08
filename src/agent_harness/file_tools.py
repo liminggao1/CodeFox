@@ -128,7 +128,14 @@ def run_bash(command: str, cwd: Path | None = None,
 
 def run_read(path: str, limit: int | None = None,
              offset: int = 0, cwd: Path | None = None) -> str:
+    """Read workspace files or absolute runtime archives, with optional line bounds."""
     try:
+        absolute = Path(path)
+        if absolute.is_absolute() and any(
+                absolute.resolve().is_relative_to(directory.resolve())
+                for directory in (core.tool_results_dir(), core.transcript_dir())):
+            # Runtime archive paths remain readable when the task cwd changes.
+            cwd = core.WORKDIR
         file_path = safe_path(path, cwd)
         lines = file_path.read_text(encoding="utf-8").splitlines()
         offset = max(int(offset or 0), 0)

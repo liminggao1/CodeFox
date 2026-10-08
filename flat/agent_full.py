@@ -936,7 +936,14 @@ def run_bash(command: str, cwd: Path | None = None,
 
 def run_read(path: str, limit: int | None = None,
              offset: int = 0, cwd: Path | None = None) -> str:
+    """Read workspace files or absolute runtime archives, with optional line bounds."""
     try:
+        absolute = Path(path)
+        if absolute.is_absolute() and any(
+                absolute.resolve().is_relative_to(directory.resolve())
+                for directory in (core.tool_results_dir(), core.transcript_dir())):
+            # Runtime archive paths remain readable when the task cwd changes.
+            cwd = core.WORKDIR
         file_path = safe_path(path, cwd)
         lines = file_path.read_text(encoding="utf-8").splitlines()
         offset = max(int(offset or 0), 0)
@@ -1209,6 +1216,8 @@ class TeammateSession:
         response = self.client.messages.create(
             model=self.model, system=self.system, messages=messages,
             tools=self.tools, max_tokens=8000)
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise RuntimeError("Teammate response was truncated (max_tokens)")
         messages.append({"role": "assistant", "content": response.content})
         calls = [block for block in response.content if block.type == "tool_use"]
         if calls:
@@ -5024,6 +5033,8 @@ class AnthropicAgentRunner:
             messages=[{"role": "user", "content": request}],
             max_tokens=2000,
         )
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise RuntimeError("Workflow agent response was truncated (max_tokens)")
         text = _response_text(response)
         if schema is None:
             value = text
@@ -5806,8 +5817,6 @@ def agent_loop(messages: list, active_request: str):
     """
     # TODO 提醒计数在多轮调用之间共享。
     global rounds_since_todo
-    # 取得当前工具描述和工具名对应的处理函数。
-    tools, handlers = assemble_tool_pool()
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
     # 管理本轮手动压缩的工具响应和执行时机。
@@ -5822,52 +5831,55 @@ def agent_loop(messages: list, active_request: str):
         fired = scheduler.consume_cron_queue()
         # 调用模型成功前保留这些任务，以便失败时重新入队。
         unacknowledged_cron_jobs.extend(fired)
-        # 将每个定时任务作为一条用户消息送入对话历史。
-        for job in fired:
-            # 模型通过用户消息读取定时任务内容。
-            messages.append({"role": "user",
-                             "content": f"[Scheduled] {job.prompt}"})
-            # 在终端显示截短的注入提示。
-            print(f"  \033[35m[cron inject] {job.prompt[:60]}\033[0m")
-        # 有定时任务时也把它们纳入压缩摘要使用的当前请求。
-        if fired:
-            # 将本批定时任务合并成多行请求。
-            scheduled_requests = "\n".join(
-                f"Run scheduled task: {job.prompt}" for job in fired)
-            # 保留原请求，并追加定时任务内容。
-            active_request = f"{active_request}\n{scheduled_requests}".strip()
-        # 将已完成的后台任务通知加入对话历史。
-        inject_background_notifications(messages)
-
-        # 连续三次工具调用未更新 TODO 时，提醒模型更新。
-        if rounds_since_todo >= 3:
-            # 把提醒作为用户消息加入历史。
-            messages.append({"role": "user",
-                             "content": "<reminder>Update your todos.</reminder>"})
-            # 本次提醒后重新累计调用次数。
-            rounds_since_todo = 0
-
-        # 按上下文预算裁剪或压缩历史消息。
-        compacted = compaction.prepare_history(
-            messages, active_request, enabled=automatic_compaction_enabled)
-        if compacted.reason:
-            automatic_compaction_enabled = False
-            core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
-        # 根据最新消息刷新记忆、MCP 和队友上下文。
-        context = runtime_context.build_context(messages)
-        # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
-        tools, handlers = assemble_tool_pool()
-        # 手动压缩完成后不再向模型提供 compact 工具。
-        tools = manual_compaction.available_tools(tools)
-
-        # 调用模型，并在失败时区分上下文超限与其他错误。
+        model_call_started = False
+        # Preparation and model failures share the same cron cleanup.
         try:
+            # 将每个定时任务作为一条用户消息送入对话历史。
+            for job in fired:
+                # 模型通过用户消息读取定时任务内容。
+                messages.append({"role": "user",
+                                 "content": f"[Scheduled] {job.prompt}"})
+                # 在终端显示截短的注入提示。
+                print(f"  \033[35m[cron inject] {job.prompt[:60]}\033[0m")
+            # 有定时任务时也把它们纳入压缩摘要使用的当前请求。
+            if fired:
+                # 将本批定时任务合并成多行请求。
+                scheduled_requests = "\n".join(
+                    f"Run scheduled task: {job.prompt}" for job in fired)
+                # 保留原请求，并追加定时任务内容。
+                active_request = f"{active_request}\n{scheduled_requests}".strip()
+            # 将已完成的后台任务通知加入对话历史。
+            inject_background_notifications(messages)
+
+            # 连续三次工具调用未更新 TODO 时，提醒模型更新。
+            if rounds_since_todo >= 3:
+                # 把提醒作为用户消息加入历史。
+                messages.append({"role": "user",
+                                 "content": "<reminder>Update your todos.</reminder>"})
+                # 本次提醒后重新累计调用次数。
+                rounds_since_todo = 0
+
+            # 按上下文预算裁剪或压缩历史消息。
+            compacted = compaction.prepare_history(
+                messages, active_request, enabled=automatic_compaction_enabled)
+            if compacted.reason:
+                automatic_compaction_enabled = False
+                core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
+            # 根据最新消息刷新记忆、MCP 和队友上下文。
+            context = runtime_context.build_context(messages)
+            # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
+            tools, handlers = assemble_tool_pool()
+            # 手动压缩完成后不再向模型提供 compact 工具。
+            tools = manual_compaction.available_tools(tools)
+
+            model_call_started = True
             # 重试策略和模型降级由 call_llm 内部处理。
             response = call_llm(messages, context, tools, state)
-        # 仅在重试策略仍无法完成调用时进入此分支。
+        # Restore unacknowledged jobs if preparation or the model call fails.
         except Exception as e:
             # 首次遇到提示过长错误时压缩历史，再重新调用模型。
-            if recovery.is_prompt_too_long_error(e) and state.claim_reactive_compaction():
+            if (model_call_started and recovery.is_prompt_too_long_error(e)
+                    and state.claim_reactive_compaction()):
                 # 原地替换历史，保留调用方持有的列表引用。
                 compacted = compaction.reactive_compact(messages, active_request)
                 if compacted.reason is None:

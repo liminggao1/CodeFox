@@ -86,6 +86,40 @@ def test_core_runtime_runs_without_importing_demo(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("schema", [None, {"type": "object", "properties": {
+    "answer": {"type": "string"}}, "required": ["answer"]}])
+def test_truncated_runner_fails_without_caching_and_resume_calls_model(tmp_path, monkeypatch, schema):
+    monkeypatch.setattr(workflow.core, "WORKDIR", tmp_path)
+    calls = []
+    responses = [SimpleNamespace(stop_reason=stop, content=[SimpleNamespace(type="text", text=text)])
+                 for stop, text in [("max_tokens", '{"answer":"partial"}'),
+                                    ("end_turn", '{"answer":"complete"}')]]
+
+    def create(**kwargs):
+        calls.append(True)
+        return responses.pop(0)
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", lambda: workflow.AnthropicAgentRunner(client, "test"))
+
+    async def step(ctx, args):
+        return await ctx.agent("one step", schema=schema, label="first")
+
+    meta = {"name": "truncated", "description": "test"}
+    failed = asyncio.run(workflow.WorkflowTool().call(meta, step))
+    run_id = failed["task"].run_id
+    assert failed["task"].status == "failed"
+    assert "truncated (max_tokens)" in failed["result"]["error"]
+    journal = workflow.store_dir() / f"{run_id}.journal.jsonl"
+    assert journal.read_text(encoding="utf-8") == ""
+    assert calls == [True]
+
+    resumed = asyncio.run(workflow.WorkflowTool().call(meta, step, resume_from_run_id=run_id))
+    assert resumed["task"].status == "completed"
+    assert resumed["result"] == ({"answer": "complete"} if schema else '{"answer":"complete"}')
+    assert calls == [True, True]
+
+
 def test_resume_replays_at_budget_limit_without_spending_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

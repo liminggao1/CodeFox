@@ -152,6 +152,8 @@ class TeammateSession:
         response = self.client.messages.create(
             model=self.model, system=self.system, messages=messages,
             tools=self.tools, max_tokens=8000)
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise RuntimeError("Teammate response was truncated (max_tokens)")
         messages.append({"role": "assistant", "content": response.content})
         calls = [block for block in response.content if block.type == "tool_use"]
         if calls:

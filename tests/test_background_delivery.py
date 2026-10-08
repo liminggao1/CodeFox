@@ -34,10 +34,40 @@ def test_long_output_tail_is_readable(host_factory, monkeypatch, length, exit_co
     path = full_path(note)
     assert path.parent == host.core.tool_results_dir() / "background"
     assert path.read_text(encoding="utf-8") == expected
-    assert "TAIL" in host.file_tools.run_read(str(path.relative_to(host.core.WORKDIR)))
+    assert "TAIL" in host.registrations.BUILTIN_HANDLERS["read_file"](str(path))
     assert expected[:200] in note
     assert f"<status>{'failed' if exit_code or hook_failure else 'completed'}</status>" in note
     assert host.scheduler.collect_background_results() == []
+
+
+def test_bound_lead_reads_background_full_output_through_tool_loop(host_factory, monkeypatch):
+    host = host_factory()
+    checkout = host.core.WORKDIR / ".worktrees" / "feature"
+    checkout.mkdir(parents=True)
+    monkeypatch.setattr(host.worktrees, "_registered_worktree", lambda name: (checkout, None))
+    task = host.tasks.create_task("Read background evidence")
+    task.worktree = "feature"
+    host.tasks.save_task(task)
+    assert host.tasks.claim_task(task.id, owner="agent").startswith("Claimed")
+    task_id = finish_task(host, monkeypatch, "中" * 250 + "\nTAIL")
+    assert host.scheduler.background_tasks[task_id]["cwd"] == str(checkout)
+    note, = host.scheduler.collect_background_results()
+    path = full_path(note)
+    responses = [
+        SimpleNamespace(stop_reason="tool_use", content=[SimpleNamespace(
+            type="tool_use", id="read-evidence", name="read_file",
+            input={"path": str(path), "offset": 1, "limit": 1})]),
+        SimpleNamespace(stop_reason="end_turn", content=[]),
+    ]
+    monkeypatch.setattr(host.core, "client", SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **kwargs: responses.pop(0))))
+    history = [{"role": "user", "content": note}]
+    host.agent_loop(history, "Read the full background evidence")
+    results = [block for message in history if message["role"] == "user"
+               and isinstance(message["content"], list) for block in message["content"]
+               if block.get("type") == "tool_result"]
+    assert results[0]["content"] == "TAIL"
+    assert not responses
 
 
 def test_batch_save_failure_keeps_records_and_reuses_saved_path(host_factory, monkeypatch):

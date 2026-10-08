@@ -286,6 +286,8 @@ class AnthropicAgentRunner:
             messages=[{"role": "user", "content": request}],
             max_tokens=2000,
         )
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise RuntimeError("Workflow agent response was truncated (max_tokens)")
         text = _response_text(response)
         if schema is None:
             value = text
@@ -744,5 +746,4 @@ def run_workflow_sync(**tool_input):
         return json.dumps(asyncio.run(run_workflow(**tool_input)), default=str)
     except WorkflowInputError as exc:
         return f"Error: {exc}"
-
 

@@ -16,7 +16,7 @@ R=/mnt/d/01dpan/01project/life/learncc/agent-harness
 PY=/home/gaogao/miniconda3/envs/learncc/bin/python
 
 cd $R
-$PY -m pytest -q                          # 124 个测试
+$PY -m pytest -q                          # 完整离线测试
 PYTHONPATH=src $PY -m agent_harness workflow demo
 PYTHONPATH=src $PY -m agent_harness workflow resume
 $PY scripts/debug_pass.py                 # 端到端自检，9 项
@@ -29,7 +29,7 @@ $PY scripts/debug_pass.py                 # 端到端自检，9 项
 | | `pytest` | `scripts/debug_pass.py` |
 | --- | --- | --- |
 | 定位 | 单元与契约测试 | 子进程 / 真 Git / flat 集成自检 |
-| 粒度 | 每模块一个测试文件，共 10 个 | 一条命令 9 项 |
+| 粒度 | 按模块拆分的测试文件 | 一条命令 9 项 |
 | 覆盖 | 任务、压缩、调度、权限、编码、技能、goal、workflow、teams | 工具池、agent 回环、goal 边界、任务、workflow、worktree、flat |
 | 独有 | 边界条件与错误分支 | 真起子进程跑 CLI、真建 Git 仓库、验证 flat 产物在仓库内可运行 |
 
@@ -248,9 +248,9 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
    选取并加载相关记录。
 3. [mcp_clients](../src/agent_harness/mcp_tools.py) 和 [active_teammates](../src/agent_harness/teams.py)
    提供当前连接与队友名称。
-4. `agent_loop` 接收只读 RuntimeContext，再通过 `prompt_values()` 交给
-   [assemble_system_prompt](../src/agent_harness/prompts.py#L67) 生成下一次模型请求的提示词。
-   CLI 和后台循环只传历史与请求，不修改旧快照。
+4. `agent_loop` 每次模型调用前构造只读 RuntimeContext，再由 `call_llm` 通过
+   `prompt_values()` 交给 [assemble_system_prompt](../src/agent_harness/prompts.py#L67)。
+   CLI 和后台循环只传历史与请求，不保存或修改上下文快照。
 
 先看空历史时四项是否为空，再在工具结果写回后看 `messages` 如何影响记忆选取；运行中新增 MCP
 或队友后，下一轮应能在对应字段和系统提示词中看到它们。
