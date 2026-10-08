@@ -482,8 +482,8 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
     """Create one child and execute according to its fixed lifetime.
 
     Input: a unique name, delegation, explicit once/persistent mode, optional
-        role, Task and plan requirement (persistent only).
-    Return: name/mode/status/text. Once returns its final result; persistent
+        role, Task, plan requirement, tool whitelist and execution dependencies.
+    Return: name/mode/status/text/usage. Once returns its final result; persistent
         returns started and delivers later results through the mailbox.
     """
     valid_name = name if is_valid_agent_name(name) and name.casefold() not in RESERVED_SUBAGENT_NAMES else None

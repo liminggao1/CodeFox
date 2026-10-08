@@ -5,7 +5,7 @@
 
   agent-harness                    启动交互会话
   python -m agent_harness          无需安装命令行脚本，也可启动交互会话
-  agent-harness workflow demo      用模拟 runner 运行示例工作流
+  agent-harness workflow demo      Run the workflow with an offline model client
   agent-harness workflow resume    从 journal 恢复上一次工作流
 """
 
@@ -102,16 +102,16 @@ def main(argv: list[str] | None = None) -> None:
     """根据命令行参数选择离线工作流示例或交互会话。
 
     输入：argv 为不含程序名的参数列表；None 时读取 sys.argv[1:]。
-    返回：None。workflow 子命令安装模拟 runner 并运行 demo/resume，否则运行 CLI。
+    Return: None. Workflow injects an offline model client; otherwise start the CLI.
     """
     # argv 没传（是 None）时，从系统命令行参数读取（去掉程序名）
     if argv is None:
         argv = sys.argv[1:]
     # 如果传了参数，且第一个参数是 "workflow"（短路求值：argv 非空才比较）
     if argv and argv[0] == "workflow":
-        # demo 模式：保持离线，不调用真实 API。
-        # 把 RUNNER_FACTORY 替换成"模拟的 Runner"，用于测试/演示
-        workflow_runtime.RUNNER_FACTORY = workflow_demo.MockAgentRunner
+        # Exercise the unified child runtime with a deterministic offline client.
+        workflow_runtime.RUNNER_FACTORY = lambda: workflow_runtime.SubagentRunner(
+            workflow_demo.DemoModelClient(), core.MODEL)
         # 异步运行 demo，把 "workflow" 之后的参数传进去
         asyncio.run(workflow_demo.run_demo(argv[1:]))
         return  # 跑完 demo 就结束，不再走下面的交互模式

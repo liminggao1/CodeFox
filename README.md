@@ -17,7 +17,7 @@ cp .env.example .env         # 填好 key
 # 交互会话（调用真实 API，读 .env）
 agent-harness
 
-# 离线演示工作流：mock runner，不联网
+# 离线演示工作流：fake client，不联网
 agent-harness workflow demo
 agent-harness workflow resume
 ```
@@ -59,7 +59,7 @@ python -m agent_harness workflow resume
 | `src/agent_harness/message_content.py` | 共享文本提取和工具请求判断；不依赖生命周期 |
 | `src/agent_harness/subagent_session.py` | 两种模式共用模型回合、工具执行、目录绑定和历史压缩 |
 | `src/agent_harness/workflow_runtime.py` | 工作流运行时：journal、预算、resume、并行 agent |
-| `src/agent_harness/workflow_demo.py` | 保存的示例工作流、schema 与离线 mock runner；由 host/CLI 显式接线 |
+| `src/agent_harness/workflow_demo.py` | 保存的示例工作流、schema 与离线 DemoModelClient；由 host/CLI 显式接线 |
 | `src/agent_harness/goal.py` | 目标层：GoalController / PromptGoalEvaluator |
 | `src/agent_harness/skills/` | 技能资产（随包分发） |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
@@ -78,6 +78,8 @@ python -m agent_harness workflow resume
   `.scheduled_tasks.json` / `.transcripts` / `.task_outputs`）跟随**启动目录**；`skills/` 随包分发。
 - **子 agent**：统一用 `spawn_subagent(name, prompt, mode)` 创建；模式、通信和后续任务由模型决定。
   能力与生命周期见 [调试笔记第 9 节](note/dev-notes.md#9-统一子-agent-生命周期与协议)。
+- **工作流步骤**：`ctx.agent` 通过同一入口执行 once 子 agent，默认开放五项基础工具；
+  `tools=[]` 只处理文本，名单可限制工具。预算、格式重试与缓存恢复仍由工作流管理，见 [调试笔记第 12 节](note/dev-notes.md#12-工作流单次-agent-调用)。
 - **goal 接在 Stop 边界**：模型不再请求工具时先问目标控制器，返回 `block` 就补一条
   `[Goal still active]` 消息，继续同一条循环。
 - **goal 状态只在内存**：重启后需要重新 `/goal`。
@@ -106,10 +108,12 @@ python -m pytest -q
 
 - `tests/test_goal.py`：控制器用例，以及用脚本化 client 驱动 `agent_loop` 的会话级用例。
 - `tests/test_workflow.py`：覆盖 journal 回放、预算与 runner 接线。
+- `tests/test_workflow_subagents.py`：实际 Workflow 工具、子 agent 文件操作、权限、格式重试和失败消费的恢复。
 - `tests/test_llm_client.py`：覆盖响应协议、工具参数和失败响应的 Lead 行为。
 - `tests/test_subagents.py`：宿主与任务/审批协议用例。
 - `tests/test_subagent_lifetimes.py`：统一创建工具、真实线程、跨任务上下文和消息投递。
 - `tests/test_shared_session.py`：共享执行、截断与上下文恢复。
+- `tests/test_subagent_options.py`：工具白名单、依赖注入及模型/摘要用量计数。
 - `tests/test_worktree_cleanup.py`：Lead 同轮清理、目录切换，以及拒绝和失败后的分配保留。
 
 离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、子 agent），说明见

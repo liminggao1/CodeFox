@@ -54,11 +54,11 @@ class SubagentSession:
     def __init__(self, name, client, model, system, authorize_tool=None,
                  send_message=None, submit_plan=None, *, mode="persistent",
                  task_tools=True, work_context=None, tools=None, max_tokens=None):
-        """装配子 agent的模型参数、受限工具列表和执行回调。
+        """Configure one child session without requesting a model or starting a thread.
 
-        输入：name 为子 agent名称；client/model/system 为模型请求配置；
-            authorize_tool 检查计划门禁，send_message 发信，submit_plan 提交审批。
-        返回：None。保存配置并创建工具处理器；不请求模型、不启动线程。
+        Input: child identity, client/model/system, mode, callbacks and tool whitelist.
+            max_tokens controls execution output; summaries retain their own limit.
+        Return: None. Builds the selected handlers and per-instance usage counter.
         """
         self.name = name
         self.client = _MeteredClient(client)

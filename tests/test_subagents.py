@@ -167,7 +167,8 @@ def test_runtime_state_moves_with_workdir(host_factory, tmp_path, monkeypatch) -
     next_dir = tmp_path / "next"
     next_dir.mkdir()
     monkeypatch.setattr(host.core, "WORKDIR", next_dir)
-    monkeypatch.setattr(host.workflow_runtime, "RUNNER_FACTORY", host.workflow_demo.MockAgentRunner)
+    monkeypatch.setattr(host.workflow_runtime, "RUNNER_FACTORY",
+                        lambda: host.workflow_runtime.SubagentRunner(host.workflow_demo.DemoModelClient()))
 
     host.create_task("Moved task")
     host.compaction.save_output("tool-1", "output")

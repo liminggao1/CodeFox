@@ -28,7 +28,8 @@ from agent_harness import workflow_demo
 def deterministic_runner(monkeypatch):
     """导入 agent.host 会连接 API runner；这些测试保持离线。"""
     workflow_demo.register_workflows()
-    monkeypatch.setattr(workflow, "RUNNER_FACTORY", workflow_demo.MockAgentRunner)
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY",
+                        lambda: workflow.SubagentRunner(workflow_demo.DemoModelClient()))
 
 
 def run_cli(*args: str, cwd: Path) -> str:
@@ -100,7 +101,7 @@ def test_truncated_runner_fails_without_caching_and_resume_calls_model(tmp_path,
         return responses.pop(0)
 
     client = SimpleNamespace(messages=SimpleNamespace(create=create))
-    monkeypatch.setattr(workflow, "RUNNER_FACTORY", lambda: workflow.AnthropicAgentRunner(client, "test"))
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", lambda: workflow.SubagentRunner(client, "test"))
 
     async def step(ctx, args):
         return await ctx.agent("one step", schema=schema, label="first")
@@ -127,7 +128,7 @@ def test_resume_replays_at_budget_limit_without_spending_again(
     calls = []
 
     class CountingRunner:
-        def run(self, prompt, schema=None, label=None):
+        def run(self, prompt, schema=None, label=None, *, tools=None):
             calls.append(prompt)
             return workflow.RunnerOutput(prompt, 1)
 
@@ -198,7 +199,7 @@ def test_workflow_runtime_enforces_budget_and_shared_agent_cap(
     )
     task = workflow.LocalWorkflowTask("task", "wf_limit-test_0001", {})
     state = workflow.ExecutionState(
-        task, journal, workflow_demo.MockAgentRunner(), workflow.Budget(), {}
+        task, journal, workflow.SubagentRunner(workflow_demo.DemoModelClient()), workflow.Budget(), {}
     )
 
     async def child(child_state, _args):
@@ -251,7 +252,8 @@ def test_workflow_tool_adapter_uses_registry_and_returns_json(
     assert result["launched"]["workflowName"] == "review-changes"
     assert result["task"]["status"] == "completed"
     assert result["task"]["taskType"] == "local_workflow"
-    assert len(result["result"]["confirmed"]) == 5
+    assert result["result"]["confirmed"]
+    assert all(f["dimension"] in workflow_demo.DIMENSIONS for f in result["result"]["confirmed"])
     snapshot = json.loads(
         (tmp_path / f"{result['task']['runId']}.json").read_text()
     )
@@ -381,7 +383,7 @@ def test_workflow_run_lock_is_cross_process(tmp_path: Path) -> None:
     assert "already active" in results.get(timeout=1)
 
 
-def test_anthropic_runner_parses_json_and_records_real_usage() -> None:
+def test_subagent_runner_parses_json_and_records_real_usage() -> None:
     calls = []
 
     def create(**kwargs):
@@ -394,7 +396,7 @@ def test_anthropic_runner_parses_json_and_records_real_usage() -> None:
         )
 
     client = SimpleNamespace(messages=SimpleNamespace(create=create))
-    runner = workflow.AnthropicAgentRunner(client, "deepseek-v4-flash")
+    runner = workflow.SubagentRunner(client, "deepseek-v4-flash")
 
     result = runner.run(
         "Check the supplied change.",
@@ -409,7 +411,7 @@ def test_anthropic_runner_parses_json_and_records_real_usage() -> None:
     assert result.value == {"ok": True}
     assert result.tokens == 18
     assert calls[0]["model"] == "deepseek-v4-flash"
-    assert "tools" not in calls[0]
+    assert {t["name"] for t in calls[0]["tools"]} == set(workflow.subagent.selected_tool_names(None))
 
 
 def test_real_runner_output_retries_once_after_invalid_json(tmp_path: Path) -> None:
@@ -428,7 +430,7 @@ def test_real_runner_output_retries_once_after_invalid_json(tmp_path: Path) -> N
     client = SimpleNamespace(
         messages=SimpleNamespace(create=lambda **_kwargs: next(responses))
     )
-    runner = workflow.AnthropicAgentRunner(client, "test-model")
+    runner = workflow.SubagentRunner(client, "test-model")
     journal = workflow.WorkflowJournal(
         "wf_json-retry_0001", resume=False, store=tmp_path
     )
@@ -458,7 +460,7 @@ def test_parallel_agent_calls_do_not_block_the_event_loop(tmp_path: Path) -> Non
     barrier = threading.Barrier(2)
 
     class BarrierRunner:
-        def run(self, prompt, schema=None, label=None):
+        def run(self, prompt, schema=None, label=None, *, tools=None):
             barrier.wait(timeout=5)
             return workflow.RunnerOutput({"label": label}, 1)
 
@@ -489,7 +491,7 @@ def test_parallel_identical_agent_calls_share_one_result(tmp_path: Path) -> None
     calls = []
 
     class SlowRunner:
-        def run(self, prompt, schema=None, label=None):
+        def run(self, prompt, schema=None, label=None, *, tools=None):
             calls.append(prompt)
             time.sleep(0.05)
             return workflow.RunnerOutput("shared", 2)
@@ -547,6 +549,6 @@ def test_host_wires_the_workflow_runner_to_its_own_client(host_factory) -> None:
 
     runner = host.workflow_runtime.RUNNER_FACTORY()
 
-    assert isinstance(runner, workflow.AnthropicAgentRunner)
+    assert isinstance(runner, workflow.SubagentRunner)
     assert runner.client is host.core.client
     assert runner.model == host.core.MODEL

@@ -123,7 +123,7 @@ def test_workflow_protocol_failure_writes_no_successful_agent_journal(host_facto
     host = host_factory()
     client = client_for(monkeypatch, {"status": "failed", "output": []})
     runtime = host.workflow_runtime
-    monkeypatch.setattr(runtime, "RUNNER_FACTORY", lambda: runtime.AnthropicAgentRunner(client, "test"))
+    monkeypatch.setattr(runtime, "RUNNER_FACTORY", lambda: runtime.SubagentRunner(client, "test"))
 
     async def step(ctx, args):
         return await ctx.agent("one step", label="first")

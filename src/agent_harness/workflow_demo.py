@@ -1,9 +1,10 @@
 """Saved review workflow and deterministic offline demonstration."""
 
 import json
+from types import SimpleNamespace
 
 from . import workflow_runtime
-from .workflow_runtime import RunnerOutput, WorkflowInputError, _stable_hash
+from .workflow_runtime import WorkflowInputError, _stable_hash
 
 def _fill_schema(schema, seed):
     """为模拟器未特殊处理的 schema 生成确定性的通用填充值。"""
@@ -19,18 +20,27 @@ def _fill_schema(schema, seed):
         return _stable_hash(seed) % 5
     return seed.rsplit("/", 1)[-1]
 
-class MockAgentRunner:
-    """供 demo 和单元测试使用的确定性执行器。"""
+class DemoModelClient:
+    """Generate deterministic model responses for the real child execution path."""
 
-    def run(self, prompt, schema=None, label=None):
-        """按提示词稳定生成离线步骤结果。
+    def __init__(self):
+        self.messages = self
 
-        输入：prompt 为步骤指令；schema 为可选结构；label 为展示标签。
-        返回：RunnerOutput，含模拟值和估算 token 数，不请求网络模型。
-        """
+    def create(self, **kwargs):
+        """Return a complete fake response; never make a network request."""
+        prompt = str(kwargs["messages"][-1]["content"])
+        marker = "Return only one JSON object matching this schema:\n"
+        schema = json.loads(prompt.rsplit(marker, 1)[1]) if marker in prompt else None
+        label = prompt.splitlines()[0].removeprefix("Step label: ")
+        value = self._value(prompt, schema, label)
+        text = json.dumps(value) if schema is not None else value
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=text)], stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=len(prompt) // 4, output_tokens=len(text) // 4))
+
+    def _value(self, prompt, schema, label):
         if schema is None:
-            value = f"[mock] {(label or prompt)[:60]}"
-            return RunnerOutput(value, self._tokens(prompt, value))
+            return f"[mock] {(label or prompt)[:60]}"
         props = schema.get("properties", {})
         if "findings" in props:
             n = 1 + (_stable_hash(prompt) % 2)
@@ -46,11 +56,7 @@ class MockAgentRunner:
                      "reason": "reproduced" if real else "could not reproduce"}
         else:
             value = _fill_schema(schema, prompt)
-        return RunnerOutput(value, self._tokens(prompt, value))
-
-    @staticmethod
-    def _tokens(prompt, result):
-        return len(prompt) // 4 + len(json.dumps(result, default=str)) // 4
+        return value
 
 FINDINGS_SCHEMA = {
     "type": "object", "required": ["findings"],
@@ -87,7 +93,7 @@ async def sample_workflow(ctx, args):
     """按预设维度审查输入变更，再并发验证发现。
     输入：ctx 为编排上下文；args.changes 为供审查的代码或变更文本。
     返回：含 confirmed 的字典，只保留验证步骤确认的问题，并按严重程度排序。
-    编排由 Python 脚本固定，步骤执行由安装的真实或模拟 runner 决定。
+    Steps use the unified child runtime with the installed real or offline model client.
     """
     # 标记当前工作流阶段为 Review（用于日志、计时、状态追踪）
     ctx.phase("Review")
@@ -141,11 +147,11 @@ async def sample_workflow(ctx, args):
 
 
 async def run_demo(argv):
-    """启动内置审查示例，或恢复最近一次示例运行。
+    """Run or resume the saved review workflow and print its final state.
 
-    输入：argv 为 workflow 后的命令参数，首项为 resume 时读取 last_run。
-    返回：None。执行注册工作流并打印结果、状态、消费和 journal 路径。
-        离线能力由 CLI 安装 MockAgentRunner 提供，本函数不自行替换执行器。
+    Input: CLI arguments following workflow; resume reads last_run.
+    Return: None. Prints findings, status, usage and journal location.
+        CLI injects DemoModelClient through the real SubagentRunner for offline runs.
     """
     resume_id = None
     if argv and argv[0] == "resume":

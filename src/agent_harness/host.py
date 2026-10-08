@@ -105,7 +105,7 @@ except Exception:
 
 workflow_demo.register_workflows()
 workflow_runtime.RUNNER_FACTORY = (
-    lambda: workflow_runtime.AnthropicAgentRunner(core.client, core.MODEL)
+    lambda: workflow_runtime.SubagentRunner(core.client, core.MODEL)
 )
 
 tool_registry.REGISTRY.configure(

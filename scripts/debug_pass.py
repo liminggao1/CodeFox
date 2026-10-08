@@ -220,7 +220,28 @@ def main() -> int:
         assert resumed.returncode == 0, resumed.stderr
         assert "status=completed  agents=0  tokens=0" in resumed.stdout, resumed.stdout
         assert (workdir / ".runtime").is_dir()
-        return "demo, journal cache hit, state in launch dir"
+        wf = host.workflow_runtime
+        original_factory = wf.RUNNER_FACTORY
+        async def write_step(ctx, args):
+            return await ctx.agent("Write workflow-child.txt", label="debug write")
+        wf.WORKFLOWS["debug-write"] = ({"name": "debug-write", "description": "offline write"}, write_step)
+        client = FakeClient([
+            tool_response("write_file", {"path": "workflow-child.txt", "content": "saved"}),
+            text_response("Saved the result."),
+        ])
+        wf.RUNNER_FACTORY = lambda: wf.SubagentRunner(client, "debug-model")
+        try:
+            handler = host.assemble_tool_pool()[1]["Workflow"]
+            out = json.loads(handler(name="debug-write"))
+            replay = json.loads(handler(name="debug-write", resume_from_run_id=out["task"]["runId"]))
+            assert out["task"]["status"] == "completed", out
+            assert replay["task"]["usage"] == {"agents": 0, "tokens": 0}, replay
+            assert len(client.calls) == 2 and not host.active_subagents
+            assert (workdir / "workflow-child.txt").read_text() == "saved"
+        finally:
+            wf.RUNNER_FACTORY = original_factory
+            wf.WORKFLOWS.pop("debug-write", None)
+        return "demo/resume; unified child write and cache replay"
 
     def t_subagents():
         done = threading.Event()

@@ -23,24 +23,19 @@ import os
 import re
 import secrets
 import threading
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import core
+from . import subagent
+from .subagent_session import selected_tool_names
 
 try:
     import fcntl
 except ImportError:  # Windows 没有 fcntl 模块。
     fcntl = None
-
-WORKFLOW_AGENT_ENVIRONMENT = (
-    "Host OS: Windows. This workflow agent only responds to its supplied step; "
-    "it has no direct shell or file tools."
-    if os.name == "nt"
-    else "Host OS: Unix-like. This workflow agent only responds to its supplied "
-         "step; it has no direct shell or file tools."
-)
 
 # -- 运行时限制 --
 AGENT_CAP = 1000                       # 每次运行最多调用 agent() 的次数
@@ -256,14 +251,6 @@ class RunnerOutput:
 
 
 
-def _response_text(response) -> str:
-    return "\n".join(
-        str(getattr(block, "text", ""))
-        for block in getattr(response, "content", [])
-        if getattr(block, "type", None) == "text"
-    ).strip()
-
-
 def _parse_runner_json(text: str) -> object:
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -287,39 +274,40 @@ def _parse_runner_json(text: str) -> object:
         raise WorkflowInputError("workflow agent returned invalid JSON")
 
 
-class AnthropicAgentRunner:
-    """工作流 agent 复用 host 的 API 客户端。"""
+class WorkflowStepError(WorkflowInputError):
+    """An execution failure carrying consumption that must still be billed."""
 
-    def __init__(self, client, model):
-        self.client = client
-        self.model = model
+    def __init__(self, message, tokens=0):
+        super().__init__(message)
+        self.tokens = tokens
 
-    def run(self, prompt, schema=None, label=None):
-        """同步请求模型完成一个无直接工具权限的工作流步骤。
 
-        输入：prompt 为步骤指令；schema 为可选输出结构；label 为接口标签，当前不发送。
-        返回：RunnerOutput，含文本或解析值及输入/输出 token 总数。
-            JSON 解析失败时保留文本，让上层校验触发重试；截断响应直接抛出 RuntimeError。
+class SubagentRunner:
+    """Adapt a workflow step to the public once child interface."""
+
+    def __init__(self, client=None, model=None):
+        self.client = core.client if client is None else client
+        self.model = core.MODEL if model is None else model
+
+    def run(self, prompt, schema=None, label=None, *, tools=None):
+        """Run one child and return parsed output plus its measured token usage.
+
+        Input: step instructions, optional schema/label and tool whitelist.
+        Return: RunnerOutput; child failures raise WorkflowStepError with usage.
         """
-        request = prompt
+        request = f"Step label: {label or 'step'}\n{prompt}"
         if schema is not None:
             request += (
                 "\n\nReturn only one JSON object matching this schema:\n"
                 + json.dumps(schema, ensure_ascii=True, sort_keys=True)
             )
-        response = self.client.messages.create(
-            model=self.model,
-            system=(
-                "You are a focused workflow agent. Complete only the supplied step. "
-                + f"{WORKFLOW_AGENT_ENVIRONMENT} "
-                + "Do not claim access to files or results not included in the prompt."
-            ),
-            messages=[{"role": "user", "content": request}],
-            max_tokens=core.WORKFLOW_AGENT_MAX_TOKENS,
-        )
-        if getattr(response, "stop_reason", None) == "max_tokens":
-            raise RuntimeError("Workflow agent response was truncated (max_tokens)")
-        text = _response_text(response)
+        result = subagent.spawn_subagent(
+            f"wf-{uuid.uuid4().hex}", request, "once", role="workflow", tools=tools,
+            client=self.client, model=self.model, max_tokens=core.WORKFLOW_AGENT_MAX_TOKENS)
+        tokens = result["usage"]["tokens"]
+        if result["status"] != "completed":
+            raise WorkflowStepError(result["text"], tokens)
+        text = result["text"]
         if schema is None:
             value = text
         else:
@@ -328,14 +316,10 @@ class AnthropicAgentRunner:
             except WorkflowInputError:
                 # 由 ExecutionState 的 schema 校验触发唯一一次重试。
                 value = text
-        usage = getattr(response, "usage", None)
-        tokens = int(getattr(usage, "input_tokens", 0) or 0) + int(
-            getattr(usage, "output_tokens", 0) or 0
-        )
         return RunnerOutput(value, tokens)
 
 
-RUNNER_FACTORY = lambda: AnthropicAgentRunner(core.client, core.MODEL)
+RUNNER_FACTORY = SubagentRunner
 
 
 # -- Journal 日志 --
@@ -408,14 +392,15 @@ class WorkflowJournal:
         else:
             self._f = self.path.open("w", encoding="utf-8")             # 新运行从空文件开始
 
-    def key(self, kind, label, prompt, schema):
+    def key(self, kind, label, prompt, schema, tools=None):
         """生成不依赖并发执行顺序的 journal 语义键。
 
-        输入：kind 为调用类型；label 为标签；prompt 为指令；schema 为输出结构。
-        返回：基于以上字段稳定哈希的字符串，用于运行内去重及 resume 重放。
+        Input: call kind, label, prompt, schema and the normalized tool whitelist.
+        Return: a stable semantic key for deduplication and resume replay.
         """
         # 语义键不依赖并发顺序，parallel/pipeline 调用在恢复时仍能得到相同的键。
-        basis = f"{kind}|{label}|{prompt}|{json.dumps(schema, sort_keys=True)}"
+        names = sorted(selected_tool_names(tools))
+        basis = f"{kind}|{label}|{prompt}|{json.dumps(schema, sort_keys=True)}|{json.dumps(names)}"
         return f"{kind}-{_stable_hash(basis) % 10**10:010d}"
 
     def cached(self, key):
@@ -546,20 +531,24 @@ class ExecutionState:
         """
         self.task.progress_event("workflow_log", message=message)
 
-    async def agent(self, prompt, schema=None, label=None, phase=None):
+    async def agent(self, prompt, schema=None, label=None, phase=None, *, tools=None):
         """执行或重放一个工作流 agent 步骤。
 
-        输入：prompt 为步骤指令；schema 为可选输出结构；label 为稳定标签；phase 为可选阶段。
-        返回：步骤结果。申请调用额度并按语义键加锁，缓存命中直接校验后返回；
-            未命中则执行 runner，schema 不合格时最多重试一次，成功结果写入 journal。
+        Input: step instructions, schema, stable label, phase and optional tools.
+        Return: cached or newly executed output. Defaults to the five base tools;
+            tools=[] disables them. Invalid output gets one tool-free format repair.
         """
+        try:
+            tools = list(selected_tool_names(tools))
+        except ValueError as exc:
+            raise WorkflowInputError(str(exc)) from exc
         label = label or (prompt[:24] + "...")
         self._limits.claim_agent()
-        key = self.journal.key("agent", label, prompt, schema)
+        key = self.journal.key("agent", label, prompt, schema, tools)
         async with self.journal.key_locks.setdefault(key, asyncio.Lock()):
-            return await self._run_agent(prompt, schema, label, phase, key)
+            return await self._run_agent(prompt, schema, label, phase, key, tools)
 
-    async def _run_agent(self, prompt, schema, label, phase, key):
+    async def _run_agent(self, prompt, schema, label, phase, key, tools):
         """在语义键锁内检查缓存、执行步骤并提交结果和消费量。
 
         输入：prompt/schema/label/phase 为步骤配置；key 为已加锁的 journal 语义键。
@@ -581,37 +570,47 @@ class ExecutionState:
         if self.budget.remaining() <= 0:
             raise WorkflowInputError("token budget exceeded")
 
+        tokens = 0
         async with self._limits.semaphore:
-            run = await asyncio.to_thread(
-                self.runner.run, prompt, schema, label
-            )
-            result = run.value
-            tokens = run.tokens
+            if self.budget.remaining() <= 0:
+                raise WorkflowInputError("token budget exceeded")
+            try:
+                run = await asyncio.to_thread(self.runner.run, prompt, schema, label, tools=tools)
+                result = run.value
+                tokens += run.tokens
+                if schema is not None:
+                    ok, err = SimpleJsonSchema(schema).validate(result)
+                    if not ok:
+                        if self.budget.remaining() <= tokens:
+                            raise WorkflowInputError("token budget exceeded before format retry")
+                        repair = ("The step has already executed. Correct only its final output format.\n"
+                                  f"Validation error: {err}\nPrevious output:\n"
+                                  f"{json.dumps(result, ensure_ascii=False)}")
+                        retry = await asyncio.to_thread(
+                            self.runner.run, repair, schema, label, tools=[])
+                        result = retry.value
+                        tokens += retry.tokens
+                        ok, err = SimpleJsonSchema(schema).validate(result)
+                        if not ok:
+                            raise WorkflowInputError(f"agent({{schema}}) invalid output: {err}")
+            except WorkflowStepError as exc:
+                tokens += exc.tokens
+                raise
+            finally:
+                self._record_usage(tokens)
 
-        if schema is not None:
-            ok, err = SimpleJsonSchema(schema).validate(result)
-            if not ok:
-                retry = await asyncio.to_thread(
-                    self.runner.run,
-                    prompt + "\n\nReturn valid JSON.",
-                    schema,
-                    label,
-                )
-                result = retry.value
-                tokens += retry.tokens
-                ok, err = SimpleJsonSchema(schema).validate(result)
-                if not ok:
-                    raise WorkflowInputError(f"agent({{schema}}) invalid output: {err}")
-
-        self.budget.add(tokens)
-        self.task.usage["agents"] += 1
-        self.task.usage["tokens"] += tokens
-        self.task.cumulative_usage["agents"] += 1
-        self.task.cumulative_usage["tokens"] += tokens
         self.journal.record(key, result, tokens, self.task.cumulative_usage)
         self.task.progress_event("workflow_agent", label=label,
                                  phase=phase or self._phase, status="done")
         return result
+
+    def _record_usage(self, tokens):
+        """Bill completed and failed executions before enforcing the budget."""
+        self.task.usage["agents"] += 1
+        self.task.usage["tokens"] += tokens
+        self.task.cumulative_usage["agents"] += 1
+        self.task.cumulative_usage["tokens"] += tokens
+        self.budget.add(tokens)
 
     async def parallel(self, thunks):
         """并发启动一组异步任务，并等待全部结果。
@@ -705,9 +704,10 @@ class WorkflowTool:
 
         task = LocalWorkflowTask(task_id, run_id, meta)
         if resuming:
+            saved_usage = snapshot.get("task", {}).get("cumulativeUsage", {})
             task.cumulative_usage = {
-                "agents": journal.historical_agents,
-                "tokens": journal.historical_tokens,
+                "agents": max(journal.historical_agents, saved_usage.get("agents", 0)),
+                "tokens": max(journal.historical_tokens, saved_usage.get("tokens", 0)),
             }
         # 工作流执行前先记录启动事件。
         launched = {"status": "async_launched", "taskId": task_id,
