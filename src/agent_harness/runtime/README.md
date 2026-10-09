@@ -5,8 +5,8 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| [interactive_runtime.py](interactive_runtime.py) | `InteractiveRuntime`：接收输入、执行本地命令、串行驱动 Lead 回合、消费后台输入、切换会话、停止和关闭 |
-| [interaction.py](interaction.py) | 执行上下文、事件通道、输入/回合结果、审批请求及展示确认，关联会话代次和停止状态 |
+| [interactive_runtime.py](interactive_runtime.py) | `InteractiveRuntime`：接收输入、执行本地命令、串行驱动 Lead 回合、消费后台输入、生成展示记录、统一保存与恢复交付、切换会话、停止和关闭 |
+| [interaction.py](interaction.py) | 执行上下文、事件通道、独立事实队列、稳定记录 ID、审批请求及展示确认，关联会话代次和停止状态 |
 | [local_commands.py](local_commands.py) | `LocalCommand`、命令元数据和查找；供运行时路由与前端补全共用 |
 | [session_store.py](session_store.py) | `SessionStore` 和 `InteractiveSession`：会话格式校验、原子保存、读取/列出/删除及上下文保存与恢复准备 |
 | [scheduler.py](scheduler.py) | 后台任务结果、cron 校验/持久化/调度、待消费队列和服务启动/停止 |
@@ -14,10 +14,13 @@
 
 前端调用 `InteractiveRuntime`，后者调用根目录 [host.agent_loop](../host.py)。
 执行代码通过 `interaction` 发布事件和请求审批，前端通过同一通道消费和确认。
+展示事实另入内存队列，由驱动筛选并保存，前端消费不取走待保存数据。
+消息与对应事实在同一检查点落盘；审批创建、结束和等待轮询调用该检查点，后台线程只发布事实。
 调度器提供待交付工作，共享驱动决定何时把它交给 Lead。
 
 运行时拥有交互会话的执行与切换规则，不拥有 UI 控件。
 `session_store.py` 负责会话存储与恢复准备，目标是否能激活由共享驱动协调。
+`InteractiveSession` 按 ID 追加展示记录，维护模型历史与展示历史的不同用途，失败保留内存待重试；`SessionStore` 只校验当前结构及操作文件。
 任务和工作树绑定的校验由 [workspace/](../workspace/README.md) 提供，子 agent 生命周期由 [agents/](../agents/README.md) 提供。
 
 包级入口与职责分组见 [上级 README](../README.md)。

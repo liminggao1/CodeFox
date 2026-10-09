@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -34,6 +35,8 @@ class InteractiveRuntime:
         self._generation = 1
         self._thread = None
         self._usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
+        self._turn_started_at = None
+        self._turn_usage = dict(self._usage)
 
     def _session_context(self):
         with host.tasks.task_lock:
@@ -42,7 +45,8 @@ class InteractiveRuntime:
 
     def _context(self, **kwargs):
         return interaction.ExecutionContext(self.channel, self.session.session_id,
-                                              self._generation, **kwargs)
+                                              self._generation, checkpoint=self._checkpoint,
+                                              **kwargs)
 
     def start(self):
         with self._lifecycle:
@@ -113,16 +117,59 @@ class InteractiveRuntime:
         for key in ("input_tokens", "output_tokens"):
             self._usage[key] += usage.get(key, 0) or 0
 
-    def _checkpoint(self):
+    def _checkpoint(self, *, poll=False):
+        facts = self.channel.drain_facts()
+        changed = False
+        for fact in facts:
+            if (fact.session_id != self.session.session_id or fact.session_id is None
+                    or fact.generation != self._generation):
+                continue
+            if fact.type == "command_result" and "sessions" in fact.payload.get("data", {}):
+                continue
+            record = {"id": fact.id, "at": fact.at, "kind": "display",
+                      "type": fact.type, "source": fact.source,
+                      "turn_id": fact.turn_id, "payload": json_value(fact.payload)}
+            if fact.type == "tool_result":
+                record["payload"].setdefault("status", "failed" if fact.payload.get("is_error") else "returned")
+            if fact.type in {"subagent_status", "background_status"}:
+                key = "name" if fact.type == "subagent_status" else "task_id"
+                previous = next((r for r in reversed(self.session.display_records())
+                                 if r["type"] == fact.type and r["source"] == fact.source
+                                 and r["payload"].get(key) == fact.payload.get(key)), None)
+                if previous and previous["payload"].get("status") == fact.payload.get("status"):
+                    continue
+            if self.session.append_record(record):
+                changed = True
+                context = interaction.current_context()
+                if context is not None:
+                    context.publish("display_record", record=record)
+        if poll and not changed:
+            return True
         saved = self.session.save()
-        self._snapshot(interaction.current_context())
+        context = interaction.current_context()
+        if context is not None:
+            self._snapshot(context)
+        return saved
+
+    def _complete_event(self, context, kind, **payload):
+        """Save a terminal fact before exposing completion to the adapter."""
+        recorded = self.session.session_id is not None and "sessions" not in payload.get("data", {})
+        if recorded:
+            self.channel.publish(context, kind, payload, deliver=False)
+        with interaction.execution_context(context):
+            saved = self._checkpoint()
+        if kind == "turn_finished":
+            payload["saved"] = saved
+        if kind == "command_result":
+            payload["recorded"] = recorded
+        self.channel.publish(context, kind, payload, capture=False)
         return saved
 
     def _run(self):
         try:
             with host.agent_lock, interaction.execution_context(self._context()):
                 host.tasks.activate_lead_context(None, {"worktree": None, "todos": []})
-                host.tasks.save_lead_context = self.session.save
+                host.tasks.save_lead_context = self._checkpoint
                 host.start_runtime_services()
                 host.subagent.consume_lead_inbox(route_protocol=False)
                 self._snapshot(self._context())
@@ -143,9 +190,11 @@ class InteractiveRuntime:
                             else:
                                 context = replace(context, turn_id=uuid.uuid4().hex)
                                 context.publish("turn_started", submission_id=submission_id)
-                                context.publish("turn_finished", submission_id=submission_id,
+                                self._complete_event(context, "turn_finished", submission_id=submission_id,
                                                 outcome=asdict(interaction.TurnOutcome("stopped", "Runtime is closing")),
-                                                saved=True)
+                                                summary={"elapsed_seconds": 0, "tool_calls": 0,
+                                                         "approvals": 0, "lead_usage":
+                                                         {"model_calls": 0, "input_tokens": 0, "output_tokens": 0}})
                         break
                     work, self._pending = self._pending, None
                     if work is None and not self._busy and not self._background_paused:
@@ -154,6 +203,9 @@ class InteractiveRuntime:
                             work = (None, "background", self.session.active_request)
                 if work is not None:
                     self._execute(*work)
+                else:
+                    with host.agent_lock, interaction.execution_context(self._context()):
+                        self._checkpoint(poll=True)
         except Exception as exc:
             self._context().publish("runtime_error", error=f"{type(exc).__name__}: {exc}")
             self.close()
@@ -172,12 +224,14 @@ class InteractiveRuntime:
                             self._busy = False
                         self._snapshot(self._context())
                         context = self._context()
-                        context.publish("command_result", submission_id=submission_id,
-                                        command=text.split()[0], status="completed", data=self._command_data)
+                        self._complete_event(context, "command_result", submission_id=submission_id,
+                                             command=text.split()[0], status="completed", data=self._command_data)
                         return
                     text = followup
                 with self._lifecycle:
                     self._turn = uuid.uuid4().hex
+                    self._turn_started_at = time.monotonic()
+                    self._turn_usage = dict(self._usage)
                     self._stop = threading.Event()
                     if self._closing:
                         self._stop.set()
@@ -193,22 +247,23 @@ class InteractiveRuntime:
                             fired = list(host.scheduler.cron_queue)
                         if fired:
                             text = "\n".join(f"Run scheduled task: {job.prompt}" for job in fired)
-                        self.session.record("background_notification", text)
+                        self.session.record("background_notification", text, save=False)
                     else:
                         host.trigger_hooks("UserPromptSubmit", text)
                         self.session.finish_pending_tools()
                         self.session.history.append({"role": "user", "content": text})
-                        self.session.record("user_input", text)
+                        self.session.record("user_input", text, save=False)
                     # The first user message may have created the durable session ID.
                     context = replace(context, session_id=self.session.session_id)
                 with interaction.execution_context(context):
                     if kind == "command":
                         context.publish("command_result", submission_id=submission_id,
                                         command="/goal", status="completed", data=self._command_data,
-                                        turn_id=context.turn_id)
+                                        turn_id=context.turn_id, recorded=True)
                     if kind != "background":
                         context.publish("user_message", text=text, submission_id=submission_id)
                     context.publish("turn_started", submission_id=submission_id)
+                    self._checkpoint()
                     self._snapshot(context)
                     try:
                         outcome = host.agent_loop(self.session.history, text, self._checkpoint, self._record_usage)
@@ -219,12 +274,13 @@ class InteractiveRuntime:
                             outcome = interaction.TurnOutcome("stopped", "Stop requested")
                         self._turn = None
                         self._stop = None
-                    saved = self.session.record("turn_complete", text, outcome.status)
+                    summary = self._turn_summary(context, outcome)
+                    self.session.record("turn_complete", text, outcome.status, save=False)
                     with self._lifecycle:
                         self._busy = False
                     self._snapshot(context)
-                    context.publish("turn_finished", submission_id=submission_id,
-                                    outcome=asdict(outcome), saved=saved)
+                    self._complete_event(context, "turn_finished", submission_id=submission_id,
+                                         outcome=asdict(outcome), summary=summary)
             except Exception as exc:
                 with self._lifecycle:
                     self._busy = False
@@ -234,10 +290,11 @@ class InteractiveRuntime:
                     # A command may already have activated a different session.
                     context = self._context()
                 self._snapshot(context)
-                context.publish("command_result" if kind == "command" else "turn_finished",
+                self._complete_event(context, "command_result" if kind == "command" else "turn_finished",
                                 submission_id=submission_id, command=text.split()[0],
                                 status="failed", data={"error": str(exc)},
-                                outcome=asdict(interaction.TurnOutcome("failed", str(exc))))
+                                outcome=asdict(interaction.TurnOutcome("failed", str(exc))),
+                                summary=self._turn_summary(context))
 
     def _command(self, text):
         parts = text.split()
@@ -249,13 +306,13 @@ class InteractiveRuntime:
             argument = text[5:].strip()
             if not argument:
                 self._command_data = {"text": host.GOAL.status(0)}
-                self.session.record("goal_query", text)
+                self.session.record("goal_query", text, save=False)
             elif argument.lower() in goal.CLEAR_ALIASES:
                 self._command_data = {"text": host.GOAL.clear()}
-                self.session.record("goal_clear", text)
+                self.session.record("goal_clear", text, save=False)
             else:
                 host.GOAL.set_goal(argument)
-                self.session.record("goal_set", argument)
+                self.session.record("goal_set", argument, save=False)
                 self._command_data = {"text": f"Goal set: {argument}"}
                 return argument
         elif command == "/resume" and len(parts) == 1:
@@ -297,7 +354,7 @@ class InteractiveRuntime:
 
     def _resume(self, target):
         snapshot, root, restored_goal, assignment = self._prepare_resume(target)
-        if not self.session.save():
+        if not self._checkpoint():
             raise SessionError("Current session could not be saved; context was not switched")
         directory_changed = root != core.WORKDIR.resolve()
         # Do not join cron while holding its lock. Recheck after it has stopped.
@@ -316,7 +373,8 @@ class InteractiveRuntime:
             raise
         with interaction.execution_context(self._context()):
             try:
-                saved = self.session.record("resume", target)
+                self.session.record("resume", target, save=False)
+                saved = self._checkpoint()
                 if directory_changed:
                     host.scheduler.clear_runtime_jobs()
                     try:
@@ -329,7 +387,8 @@ class InteractiveRuntime:
                     self._background_paused = True
                 raise SessionError(f"Resumed {target} at {root}; post-resume processing failed: {exc}") from exc
             finally:
-                self._context().publish("session_changed", history=json_value(self.session.history))
+                self._context().publish("session_changed",
+                                        records=self.session.display_records(historical=True))
         text = f"Resumed {target} at {root}"
         if not saved:
             text += "; context could not be saved and will be retried on the next interaction"
@@ -346,10 +405,21 @@ class InteractiveRuntime:
         self._usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
         self._generation += 1
 
+    def _turn_summary(self, context, outcome=None):
+        records = self.session.display_records()
+        tool_calls = sum(1 for record in records
+                         if record["type"] == "tool_call" and record["turn_id"] == context.turn_id)
+        approvals = sum(1 for record in records
+                        if record["type"] == "approval_requested" and record["turn_id"] == context.turn_id)
+        return {"elapsed_seconds": round(time.monotonic() - self._turn_started_at, 3)
+                if self._turn_started_at is not None else 0,
+                "tool_calls": tool_calls, "approvals": approvals,
+                "lead_usage": {key: self._usage[key] - self._turn_usage[key] for key in self._usage}}
+
     def _shutdown(self):
         self.channel.close_approvals()
         with host.agent_lock, interaction.execution_context(self._context()):
-            saved = self.session.save()
+            saved = self._checkpoint()
             host.scheduler.stop_runtime_services()
             for child in host.subagent.list_subagents():
                 if child["mode"] == "persistent":
@@ -359,6 +429,7 @@ class InteractiveRuntime:
         host.subagent.wait_for_subagents()
         host.scheduler.wait_for_background_tasks()
         with host.agent_lock, interaction.execution_context(self._context()):
+            saved = self._checkpoint()
             host.tasks.save_lead_context = None
             self._context().publish("runtime_closed", saved=saved)
         self.channel.close()

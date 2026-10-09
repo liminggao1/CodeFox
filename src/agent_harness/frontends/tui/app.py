@@ -9,11 +9,11 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Footer, Markdown, RichLog, Static, TextArea
+from textual.widgets import Button, Footer, RichLog, Static, TextArea
 
 from ...runtime.interactive_runtime import InteractiveRuntime
 from ...runtime.local_commands import LOCAL_COMMANDS, find_command
-from .widgets import ApprovalScreen, CommandCandidates, SessionScreen
+from .widgets import ApprovalCard, CommandCandidates, ConversationRecord, SessionScreen
 
 
 class HarnessApp(App):
@@ -38,8 +38,7 @@ class HarnessApp(App):
     #body { height: 1fr; }
     #conversation { width: 2fr; height: 1fr; padding: 0 1; }
     #chat { height: 1fr; }
-    .speaker { color: #80cbc4; margin-top: 1; height: 1; }
-    .user-text { padding: 0 1; height: auto; color: #eeeeee; }
+    #earlier { height: 3; display: none; }
     Markdown { padding: 0 1; margin: 0; background: transparent; }
     #side { width: 1fr; min-width: 28; max-width: 48; border-left: solid #44484c; }
     #state { height: auto; max-height: 45%; padding: 1; }
@@ -67,11 +66,17 @@ class HarnessApp(App):
         self.approval = None
         self.snapshot = {}
         self._hidden_command_text = None
+        self.records = []
+        self._record_ids = set()
+        self._record_start = 0
+        self._tool_names = {}
+        self._consume_timer = None
 
     def compose(self) -> ComposeResult:
         yield Static("Agent Harness · 启动中", id="status", markup=False)
         with Horizontal(id="body"):
             with Vertical(id="conversation"):
+                yield Button("加载更早记录", id="earlier")
                 yield VerticalScroll(id="chat")
                 yield CommandCandidates(id="commands")
                 yield Static(id="command-hint", markup=False)
@@ -87,7 +92,7 @@ class HarnessApp(App):
 
     def on_mount(self):
         self.runtime.start()
-        self.set_interval(0.05, self.consume)
+        self._consume_timer = self.set_interval(0.05, self.consume)
         self.query_one("#input", TextArea).focus()
 
     def on_resize(self, event):
@@ -115,6 +120,8 @@ class HarnessApp(App):
         return name, find_command(name), stripped == name
 
     def _refresh_commands(self):
+        if not self.is_running:
+            return
         editor = self.query_one("#input", TextArea)
         if editor.text != self._hidden_command_text:
             self._hidden_command_text = None
@@ -294,31 +301,97 @@ class HarnessApp(App):
         self._controls()
         self._status("正在关闭")
 
-    def on_button_pressed(self, event: Button.Pressed):
+    async def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "send":
             self.action_send()
         elif event.button.id == "stop":
             self.action_stop_turn()
+        elif event.button.id == "earlier":
+            await self._load_earlier()
 
     def _dismiss_approval(self):
         if self.approval is not None:
+            for card in self.query(ApprovalCard):
+                if card.request_id == self.approval.request_id:
+                    card.disable()
             self.approval = None
-            if isinstance(self.screen, ApprovalScreen):
-                self.screen.dismiss("deny")
 
-    async def _message(self, speaker, text, markdown=False):
+    def on_approval_card_choice(self, event: ApprovalCard.Choice):
+        request = self.approval
+        if request is None or event.card.request_id != request.request_id:
+            return
+        if self.runtime.channel.respond(request.request_id, request.generation, event.decision):
+            event.card.finish(event.decision)
+            self.approval = None
+            self.query_one("#input", TextArea).focus()
+
+    def _record_widget(self, record):
+        data = record["payload"]
+        key = (record.get("turn_id"), record["source"], data.get("id") or data.get("tool_use_id"))
+        if record["type"] == "tool_call":
+            self._tool_names[key] = data["name"]
+        return ConversationRecord(record, self._tool_names.get(key))
+
+    async def _display_record(self, record):
+        if record["id"] in self._record_ids:
+            return
+        self._record_ids.add(record["id"])
+        self.records.append(record)
         chat = self.query_one("#chat", VerticalScroll)
-        await chat.mount(Static(speaker, classes="speaker", markup=False),
-                         Markdown(text) if markdown else Static(text, classes="user-text", markup=False))
-        while len(chat.children) > 400:
+        await chat.mount(self._record_widget(record))
+        if record["type"] == "approval_decided":
+            for card in self.query(ApprovalCard):
+                if card.request_id == record["payload"]["request_id"]:
+                    card.finish(record["payload"]["decision"])
+        while len(chat.children) > 80 and self.approval is None:
+            first = chat.children[0]
+            decided = {item["payload"]["request_id"] for item in self.records if item["type"] == "approval_decided"}
+            if any(not card.historical and card.request_id not in decided for card in first.query(ApprovalCard)):
+                break
             await chat.children[0].remove()
-            await chat.children[0].remove()
+            if isinstance(first, ConversationRecord):
+                self._record_start += 1
+        self.query_one("#earlier", Button).display = self._record_start > 0
         chat.scroll_end(animate=False)
+
+    async def _restore_records(self, records):
+        self._dismiss_approval()
+        self.records = list(records)
+        self._record_ids = {record["id"] for record in records}
+        self._record_start = max(0, len(records) - 80)
+        self._tool_names = {}
+        for record in records:
+            if record["type"] == "tool_call":
+                data = record["payload"]
+                self._tool_names[(record.get("turn_id"), record["source"], data["id"])] = data["name"]
+        await self._render_window()
+
+    async def _render_window(self):
+        chat = self.query_one("#chat", VerticalScroll)
+        await chat.remove_children()
+        if self.records[self._record_start:]:
+            await chat.mount(*(self._record_widget(record) for record in self.records[self._record_start:]))
+        decisions = {record["payload"]["request_id"]: record["payload"]["decision"] for record in self.records
+                     if record["type"] == "approval_decided"}
+        for card in self.query(ApprovalCard):
+            if card.request_id in decisions:
+                card.finish(decisions[card.request_id])
+            elif self.approval is not None and card.request_id == self.approval.request_id:
+                card.enable()
+        self.query_one("#earlier", Button).display = self._record_start > 0
+        chat.scroll_end(animate=False)
+
+    async def _load_earlier(self):
+        self._record_start = max(0, self._record_start - 80)
+        await self._render_window()
+        self.query_one("#chat", VerticalScroll).scroll_home(animate=False)
 
     def _log(self, text):
         self.query_one("#events", RichLog).write(Text.from_ansi(str(text)))
 
     async def consume(self):
+        if not self.is_running:
+            return
         # Drain a bounded batch so large output cannot starve UI input.
         for _ in range(100):
             event = self.runtime.channel.next_event()
@@ -333,20 +406,32 @@ class HarnessApp(App):
                 self.runtime.close()
                 raise
             self.runtime.channel.acknowledge_event(event.sequence)
+            if not self.is_running:
+                return
         if self.approval is None and not self.closing:
             request = self.runtime.channel.next_approval()
             if request is not None:
                 self.approval = request
-                def decide(decision):
-                    self.runtime.channel.respond(request.request_id, request.generation, decision)
-                    self.approval = None
-                self.push_screen(ApprovalScreen(request), decide)
+                card = next((card for card in self.query(ApprovalCard) if card.request_id == request.request_id), None)
+                if card is None:
+                    index = next((index for index, record in enumerate(self.records)
+                                  if record["type"] == "approval_requested" and
+                                  record["payload"]["request_id"] == request.request_id), None)
+                    if index is not None:
+                        self._record_start = min(self._record_start, index)
+                        await self._render_window()
+                        card = next(card for card in self.query(ApprovalCard) if card.request_id == request.request_id)
+                if card is not None:
+                    card.enable()
+                    self.query_one("#chat", VerticalScroll).scroll_to_widget(card, animate=False)
         self._refresh_commands()
 
     async def _event(self, event):
         data = event.payload
         kind = event.type
-        if kind == "state_snapshot":
+        if kind == "display_record":
+            await self._display_record(data["record"])
+        elif kind == "state_snapshot":
             self.snapshot = data
             self.snapshot["session_id"] = event.session_id
             self.busy = data["busy"]
@@ -361,26 +446,11 @@ class HarnessApp(App):
                 children.sort(key=lambda child: child["name"])
             self._render_state()
             self._log(f"[{event.source}] {kind}\n{json.dumps(data, ensure_ascii=False, indent=2)}")
-        elif kind == "user_message":
-            await self._message("你", data["text"])
-        elif kind == "assistant_message":
-            await self._message("Lead", data["text"], markdown=True)
         elif kind == "session_changed":
             self._hidden_command_text = None
             self.query_one(CommandCandidates).show_commands(())
-            await self.query_one("#chat", VerticalScroll).remove_children()
             self.query_one("#events", RichLog).clear()
-            for message in data["history"]:
-                speaker = "你" if message["role"] == "user" else "Lead"
-                content = message["content"]
-                if isinstance(content, str):
-                    await self._message(speaker, content, markdown=message["role"] == "assistant")
-                else:
-                    for block in content:
-                        if block.get("type") == "text":
-                            await self._message(speaker, block["text"], markdown=message["role"] == "assistant")
-                        elif block.get("type") in {"tool_use", "tool_result"}:
-                            self._log(json.dumps(block, ensure_ascii=False))
+            await self._restore_records(data["records"])
         elif kind == "turn_started":
             self.turn_id = event.turn_id
             self.busy = True
@@ -404,8 +474,8 @@ class HarnessApp(App):
             result = data["data"]
             if "sessions" in result and not self.closing:
                 self.push_screen(SessionScreen(result["sessions"], result["errors"]), lambda command: self._submit(command) if command else None)
-            elif result.get("text") or result.get("error"):
-                self._log(result.get("text") or result["error"])
+            elif not data.get("recorded") and (result.get("text") or result.get("error")):
+                await self.query_one("#chat", VerticalScroll).mount(Static(result.get("text") or result["error"], markup=False))
         elif kind == "runtime_closed":
             self.runtime_closed = True
             self.exit(0 if data["saved"] else 1)
@@ -414,9 +484,12 @@ class HarnessApp(App):
         elif kind in {"runtime_error", "session_save_error"}:
             self._log(data["error"])
             self.notify(data["error"], severity="error")
-        elif kind not in {"session_saved", "lead_usage"}:
+        elif kind not in {"session_saved", "lead_usage", "user_message", "assistant_message", "tool_call",
+                          "tool_result", "todo_updated", "background_status", "approval_requested", "approval_decided"}:
             self._log(f"[{event.source}] {kind}\n{json.dumps(data, ensure_ascii=False, indent=2)}")
 
     def on_unmount(self):
+        if self._consume_timer is not None:
+            self._consume_timer.stop()
         # Emergency terminal detachment also releases approval waiters.
         self.runtime.close()

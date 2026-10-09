@@ -1,4 +1,4 @@
-"""Presentation-only dialogs for approvals and saved sessions."""
+"""Presentation-only conversation records and saved-session selection."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ import json
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, ListItem, ListView, OptionList, Static
+from textual.message import Message
+from textual.widgets import Button, Collapsible, Label, ListItem, ListView, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
 
@@ -37,35 +38,118 @@ class CommandCandidates(OptionList):
         self.display = bool(names)
 
 
-class ApprovalScreen(ModalScreen[str]):
-    BINDINGS = [("escape", "deny", "拒绝")]
+class ApprovalCard(Vertical):
     DEFAULT_CSS = """
-    ApprovalScreen { align: center middle; background: $background 70%; }
-    ApprovalScreen > Vertical { width: 72; max-width: 95%; height: auto;
-        max-height: 90%; border: solid $warning; padding: 1 2; background: $surface; }
-    ApprovalScreen VerticalScroll { height: auto; max-height: 18; margin: 1 0; }
-    ApprovalScreen Horizontal { height: 3; align-horizontal: right; }
-    ApprovalScreen Button { margin-left: 1; }
+    ApprovalCard { height: auto; border-left: solid $warning; padding: 0 1; }
+    ApprovalCard Horizontal { height: 3; }
+    ApprovalCard Button { min-width: 8; margin-right: 1; }
     """
 
-    def __init__(self, request):
+    class Choice(Message):
+        def __init__(self, card, decision):
+            super().__init__()
+            self.card = card
+            self.decision = decision
+
+    def __init__(self, payload):
         super().__init__()
-        self.request = request
+        self.payload = payload
+        self.request_id = payload["request_id"]
+        self.historical = payload.get("historical", False)
 
     def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label(f"工具审批 · {self.request.source} · {self.request.tool_name}")
-            with VerticalScroll():
-                yield Static(json.dumps(self.request.arguments, ensure_ascii=False, indent=2), markup=False)
+        yield Static("上次中断，未继续执行" if self.payload.get("interrupted") else
+                     "历史审批" if self.historical else "等待审批", classes="approval-state", markup=False)
+        yield Collapsible(Static(json.dumps(self.payload.get("arguments", {}), ensure_ascii=False, indent=2), markup=False),
+                          title=self.payload["tool_name"], collapsed=True)
+        if not self.historical:
             with Horizontal():
-                yield Button("拒绝", id="deny")
-                yield Button("批准", variant="warning", id="approve")
+                yield Button("拒绝", name="deny", classes="deny", disabled=True)
+                yield Button("批准", name="approve", classes="approve", variant="warning", disabled=True)
+
+    def enable(self):
+        if not self.historical:
+            self.query_one(".approval-state", Static).update("等待你的决定")
+            for button in self.query(Button):
+                button.disabled = False
+
+    def finish(self, decision):
+        labels = {"approve": "已批准", "deny": "已拒绝", "closed": "已关闭"}
+        self.query_one(".approval-state", Static).update(labels.get(decision, decision))
+        self.disable()
+
+    def disable(self):
+        for button in self.query(Button):
+            button.disabled = True
 
     def on_button_pressed(self, event: Button.Pressed):
-        self.dismiss(event.button.id)
+        event.stop()
+        self.post_message(self.Choice(self, event.button.name))
 
-    def action_deny(self):
-        self.dismiss("deny")
+
+class ConversationRecord(Vertical):
+    DEFAULT_CSS = """
+    ConversationRecord { height: auto; margin-bottom: 1; }
+    ConversationRecord .record-source { height: 1; color: #80cbc4; }
+    ConversationRecord Static { height: auto; }
+    ConversationRecord Collapsible { height: auto; padding: 0; background: transparent; }
+    """
+
+    def __init__(self, record, tool_name=None):
+        super().__init__(id="record-" + record["id"])
+        self.record = record
+        self.tool_name = tool_name
+
+    def compose(self) -> ComposeResult:
+        record, data = self.record, self.record["payload"]
+        kind, source = record["type"], record["source"]
+        if kind in {"user_message", "assistant_message"}:
+            yield Static("你" if kind == "user_message" else source, classes="record-source", markup=False)
+            yield Markdown(data["text"]) if kind == "assistant_message" else Static(data["text"], markup=False)
+            return
+        yield Static(source, classes="record-source", markup=False)
+        if kind == "tool_call":
+            yield Collapsible(Static(json.dumps(data.get("input", {}), ensure_ascii=False, indent=2), markup=False),
+                              title=f"工具 · {data['name']}", collapsed=True)
+            if data.get("result_missing"):
+                yield Static("结果未记录，请核对当前状态", markup=False)
+        elif kind == "tool_result":
+            labels = {"returned": "已返回结果", "success": "成功", "failed": "失败", "denied": "已拒绝",
+                      "stopped": "已停止", "started": "后台已启动"}
+            status = labels.get(data.get("status"), "已返回结果")
+            content = data.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False, indent=2)
+            yield Collapsible(Static(content, markup=False), title=f"{self.tool_name or '工具'} · {status}", collapsed=True)
+        elif kind == "approval_requested":
+            yield ApprovalCard(data)
+        elif kind == "approval_decided":
+            labels = {"approve": "已批准", "deny": "已拒绝", "closed": "已关闭"}
+            yield Static(f"{data.get('tool_name', '工具')} · {labels.get(data['decision'], data['decision'])}", markup=False)
+        elif kind == "todo_updated":
+            labels = {"pending": "待办", "in_progress": "进行中", "completed": "完成"}
+            text = "\n".join(f"{labels.get(item.get('status'), item.get('status', ''))} · {item.get('content', '')}"
+                             for item in data.get("todos", [])) or "无待办"
+            yield Static("TODO\n" + text, markup=False)
+        elif kind in {"subagent_status", "background_status"}:
+            name = data.get("name") or data.get("task_id", "后台任务")
+            suffix = " · 历史记录" if data.get("historical") else ""
+            yield Static(f"{name} · {data['status']}{suffix}", markup=False)
+        elif kind == "command_result":
+            result = data.get("data", {})
+            yield Static(str(result.get("text") or result.get("error") or data.get("command", "")), markup=False)
+        elif kind == "turn_finished":
+            outcome, summary = data.get("outcome", {}), data.get("summary", {})
+            labels = {"completed": "完成", "failed": "失败", "stopped": "已停止", "truncated": "输出截断"}
+            status = outcome.get("status", data.get("status", "completed"))
+            text = labels.get(status, status)
+            if summary:
+                text += f" · {summary.get('elapsed_seconds', 0):.1f}s · 工具 {summary.get('tool_calls', 0)} · 审批 {summary.get('approvals', 0)}"
+                usage = summary.get("lead_usage", {})
+                text += f"\nLead 主模型 · 请求 {usage.get('model_calls', 0)} · 输入 {usage.get('input_tokens', 0)} · 输出 {usage.get('output_tokens', 0)}"
+            if outcome.get("reason"):
+                text += "\n" + outcome["reason"]
+            yield Static(text, markup=False)
 
 
 class SessionScreen(ModalScreen[str | None]):

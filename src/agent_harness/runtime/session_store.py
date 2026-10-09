@@ -114,6 +114,21 @@ class SessionStore:
             if (not isinstance(messages, list) or not isinstance(events, list)
                     or not all(isinstance(event, dict) for event in events)):
                 raise SessionError("Invalid session messages or events")
+            seen = set()
+            for event in events:
+                if (not isinstance(event.get("id"), str) or not event["id"]
+                        or event["id"] in seen or not isinstance(event.get("type"), str)):
+                    raise SessionError("Invalid or duplicate event ID/type")
+                seen.add(event["id"])
+                datetime.fromisoformat(event["at"])
+                if event.get("kind") == "display":
+                    self._validate_record(event)
+                elif event.get("kind") != "summary":
+                    raise SessionError("Invalid event kind; expected display or summary")
+            if messages and not any(event.get("kind") == "display" and
+                                    event["type"] in {"user_message", "assistant_message", "tool_call"}
+                                    for event in events):
+                raise SessionError("Messages are missing corresponding display records")
             for message in messages:
                 if (not isinstance(message, dict)
                         or message.get("role") not in {"user", "assistant"}
@@ -132,6 +147,13 @@ class SessionStore:
                         raise SessionError(f"Invalid {kind} fields")
                     if kind == "tool_use" and not isinstance(block.get("input"), dict):
                         raise SessionError("Invalid tool input")
+                    if message["role"] == "assistant" and kind in {"text", "tool_use"}:
+                        display_type = "assistant_message" if kind == "text" else "tool_call"
+                        field = "text" if kind == "text" else "id"
+                        if not any(event.get("kind") == "display" and event["type"] == display_type
+                                   and event["source"] == "lead"
+                                   and event["payload"].get(field) == block[field] for event in events):
+                            raise SessionError(f"Missing corresponding {display_type} record")
             # Validate goal state before any active context can be replaced.
             GoalController.from_snapshot(None, snapshot["goal"])
             return snapshot
@@ -139,6 +161,53 @@ class SessionStore:
             raise
         except (OSError, ValueError, TypeError, KeyError, GoalError) as exc:
             raise SessionError(f"Cannot read session {session_id}: {exc}") from exc
+
+    @staticmethod
+    def _validate_record(record):
+        kind, payload = record["type"], record.get("payload")
+        if (kind not in interaction.DISPLAY_FACT_TYPES or not isinstance(payload, dict)
+                or not isinstance(record.get("source"), str)
+                or not record["source"] or "turn_id" not in record
+                or record["turn_id"] is not None and not isinstance(record["turn_id"], str)):
+            raise SessionError("Invalid display record fields")
+        required = {
+            "user_message": {"text": str}, "assistant_message": {"text": str},
+            "tool_call": {"id": str, "name": str, "input": dict},
+            "tool_result": {"tool_use_id": str}, "todo_updated": {"todos": list},
+            "subagent_status": {"name": str, "mode": str, "status": str},
+            "background_status": {"task_id": str, "status": str},
+            "approval_requested": {"request_id": str, "tool_name": str,
+                                   "tool_call_id": str, "arguments": dict},
+            "approval_decided": {"request_id": str, "tool_name": str,
+                                 "tool_call_id": str, "decision": str},
+            "command_result": {"command": str, "status": str, "data": dict},
+            "turn_finished": {"outcome": dict, "summary": dict},
+        }[kind]
+        if not all(isinstance(payload.get(key), expected) for key, expected in required.items()):
+            raise SessionError(f"Invalid {kind} display payload")
+        if kind == "tool_result" and ("content" not in payload or payload.get("status") not in
+                {"returned", "success", "failed", "denied", "stopped", "started"}):
+            raise SessionError("Invalid tool result display state")
+        if kind == "approval_decided" and payload["decision"] not in {"approve", "deny", "closed"}:
+            raise SessionError("Invalid approval decision")
+        if kind == "todo_updated" and not all(
+                isinstance(todo, dict) and isinstance(todo.get("content"), str)
+                and todo.get("status") in {"pending", "in_progress", "completed"}
+                for todo in payload["todos"]):
+            raise SessionError("Invalid TODO display context")
+        if kind == "turn_finished":
+            outcome, summary = payload["outcome"], payload["summary"]
+            if (outcome.get("status") not in {"completed", "failed", "stopped", "truncated"}
+                    or not isinstance(outcome.get("reason"), str)
+                    or not isinstance(summary.get("elapsed_seconds"), (int, float))
+                    or summary["elapsed_seconds"] < 0
+                    or not all(isinstance(summary.get(key), int) and summary[key] >= 0
+                               for key in ("tool_calls", "approvals"))
+                    or not isinstance(summary.get("lead_usage"), dict)
+                    or not all(isinstance(summary["lead_usage"].get(key), int)
+                               and summary["lead_usage"][key] >= 0
+                               for key in ("model_calls", "input_tokens", "output_tokens"))):
+                raise SessionError("Invalid turn summary")
 
     def list_sessions(self, limit: int = 20) -> tuple[list[dict], list[str]]:
         sessions, errors = [], []
@@ -186,17 +255,43 @@ class InteractiveSession:
     def session_id(self) -> str | None:
         return self.snapshot["id"] if self.snapshot else None
 
-    def record(self, kind: str, text: str = "", result: str = "ok") -> bool:
+    def record(self, kind: str, text: str = "", result: str = "ok", *, save=True) -> bool:
         if self.snapshot is None:
             self.snapshot = self.store.create()
             self.report(f"[session] {self.session_id}")
         if kind in {"user_input", "goal_set"} and result == "ok":
             self.active_request = text
         self.snapshot["events"].append({"id": uuid.uuid4().hex, "at": utc_now(),
-                                        "type": kind, "text": text[:200],
+                                        "kind": "summary", "type": kind, "text": text[:200],
                                         "result": result,
                                         "message_count": len(self.history)})
-        return self.save()
+        self.dirty = True
+        return self.save() if save else True
+
+    def append_record(self, record: dict) -> bool:
+        if self.snapshot is None:
+            return False
+        if any(event["id"] == record["id"] for event in self.snapshot["events"]):
+            return False
+        self.snapshot["events"].append(json_value(record))
+        self.dirty = True
+        return True
+
+    def display_records(self, *, historical=False) -> list[dict]:
+        records = json_value([event for event in self.snapshot["events"]
+                              if event.get("kind") == "display"]) if self.snapshot else []
+        if historical:
+            decided = {r["payload"]["request_id"] for r in records if r["type"] == "approval_decided"}
+            results = {(r["turn_id"], r["source"], r["payload"]["tool_use_id"])
+                       for r in records if r["type"] == "tool_result"}
+            for record in records:
+                payload = record["payload"]
+                payload["historical"] = True
+                if record["type"] == "approval_requested" and payload["request_id"] not in decided:
+                    payload["interrupted"] = True
+                if record["type"] == "tool_call" and (record["turn_id"], record["source"], payload["id"]) not in results:
+                    payload["result_missing"] = True
+        return records
 
     def save(self) -> bool:
         if self.snapshot is None:
@@ -224,6 +319,7 @@ class InteractiveSession:
         """Replace memory; the caller records and saves after activation completes."""
         self.history[:] = snapshot["messages"]
         self.snapshot = snapshot
+        self.dirty = False
         self.active_request = snapshot["active_user_request"]
 
     def finish_pending_tools(self) -> None:
@@ -240,4 +336,4 @@ class InteractiveSession:
                    for block in content if block.get("type") == "tool_use"]
         if results:
             self.history.append({"role": "user", "content": results})
-            self.save()
+            self.dirty = True

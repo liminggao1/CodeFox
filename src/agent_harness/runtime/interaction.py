@@ -9,7 +9,8 @@ from __future__ import annotations
 from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import json
 import threading
 from typing import Literal
@@ -19,6 +20,12 @@ import uuid
 # -- Execution and submission contracts --
 
 EventScope = Literal["session", "runtime"]
+
+DISPLAY_FACT_TYPES = frozenset({
+    "user_message", "assistant_message", "tool_call", "tool_result",
+    "todo_updated", "subagent_status", "background_status",
+    "approval_requested", "approval_decided", "command_result", "turn_finished",
+})
 
 @dataclass(frozen=True)
 class TurnOutcome:
@@ -44,6 +51,8 @@ class InteractionEvent:
     type: str
     payload: dict
     scope: EventScope = "session"
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 @dataclass(frozen=True)
@@ -72,13 +81,15 @@ class ExecutionContext:
     origin: ExecutionOrigin = "background"
     stop_event: threading.Event | None = None
     scope: EventScope = "session"
+    checkpoint: object = None
 
     def stopped(self) -> bool:
         return self.stop_event is not None and self.stop_event.is_set()
 
     def delegate(self, source: str, origin: ExecutionOrigin | None = None):
         """Synchronous once inherits origin; independent work sets it explicitly."""
-        return replace(self, source=source, origin=origin or self.origin)
+        return replace(self, source=source, origin=origin or self.origin,
+                       checkpoint=self.checkpoint if origin is None else None)
 
     def publish(self, event_type: str, **payload) -> InteractionEvent:
         return self.channel.publish(self, event_type, payload)
@@ -118,6 +129,7 @@ class InteractionChannel:
     def __init__(self):
         self._changed = threading.Condition()
         self._events: deque[InteractionEvent] = deque()
+        self._facts: deque[InteractionEvent] = deque()
         self._requests: deque[tuple[ApprovalRequest, int]] = deque()
         self._unacknowledged: dict[int, InteractionEvent] = {}
         self._delivered: set[int] = set()
@@ -147,7 +159,7 @@ class InteractionChannel:
                 self._decisions[request_id] = "deny"
 
     def publish(self, context: ExecutionContext, event_type: str,
-                payload: dict) -> InteractionEvent:
+                payload: dict, *, deliver=True, capture=True) -> InteractionEvent:
         copied = data_copy(payload)
         with self._changed:
             if self._closed:
@@ -158,10 +170,20 @@ class InteractionChannel:
                                      context.generation, context.turn_id,
                                      context.source, event_type, copied, context.scope)
             if context.scope == "runtime" or not self._stale(event):
-                self._events.append(event)
-                self._unacknowledged[event.sequence] = event
+                if deliver:
+                    self._events.append(event)
+                    self._unacknowledged[event.sequence] = event
+                if capture and event.scope == "session" and event.type in DISPLAY_FACT_TYPES:
+                    self._facts.append(replace(event, payload=data_copy(event.payload)))
             self._changed.notify_all()
             return replace(event, payload=data_copy(event.payload))
+
+    def drain_facts(self) -> list[InteractionEvent]:
+        """Separate backend intake from frontend delivery and display acknowledgments."""
+        with self._changed:
+            facts = list(self._facts)
+            self._facts.clear()
+        return [replace(event, payload=data_copy(event.payload)) for event in facts]
 
     def next_event(self, timeout: float = 0) -> InteractionEvent | None:
         """Return one notification; blocking reads belong to adapters, not publishers."""
@@ -200,15 +222,38 @@ class InteractionChannel:
                     or context.turn_id in self._cancelled_turns):
                 return "deny"
             self._pending[request.request_id] = request
-            self._requests.append((request, self._sequence))
-            self._changed.notify_all()
-            try:
-                while request.request_id not in self._decisions:
-                    if self._closed or context.stopped():
-                        return "closed" if self._closed else "deny"
+        # The execution thread checkpoints outside the delivery lock, before
+        # making a request actionable and while waiting for an adapter decision.
+        try:
+            if context.checkpoint is not None:
+                context.publish("approval_requested", request_id=request.request_id,
+                                tool_name=tool_name, tool_call_id=tool_call_id,
+                                arguments=request.arguments)
+                context.checkpoint()
+            with self._changed:
+                self._requests.append((request, self._sequence))
+                self._changed.notify_all()
+            while True:
+                with self._changed:
+                    if request.request_id in self._decisions:
+                        decision = self._decisions.pop(request.request_id)
+                        break
+                    if self._closed or self._approvals_closed or context.stopped():
+                        decision = "closed" if self._closed or self._approvals_closed else "deny"
+                        break
                     self._changed.wait(timeout=0.1)
-                return self._decisions.pop(request.request_id)
-            finally:
+                if context.checkpoint is not None:
+                    context.checkpoint(poll=True)
+            if context.checkpoint is not None:
+                # close() may detach an adapter while the execution thread wakes.
+                if not self._closed:
+                    context.publish("approval_decided", request_id=request.request_id,
+                                    tool_name=tool_name, tool_call_id=tool_call_id,
+                                    decision=decision)
+                context.checkpoint()
+            return decision
+        finally:
+            with self._changed:
                 self._pending.pop(request.request_id, None)
                 self._decisions.pop(request.request_id, None)
 

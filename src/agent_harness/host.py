@@ -263,6 +263,7 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
         TurnOutcome; history and tool side effects remain with their owners.
     """
     global rounds_since_todo
+    result_states = {}
 
     def checkpoint():
         if save_context:
@@ -270,7 +271,6 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
 
     def append(message):
         messages.append(message)
-        checkpoint()
         if message.get("role") == "assistant":
             for block in json_value(message["content"]):
                 if block.get("type") == "text":
@@ -280,7 +280,10 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
         elif isinstance(message.get("content"), list):
             for block in json_value(message["content"]):
                 if block.get("type") == "tool_result":
-                    interaction.publish("tool_result", **block)
+                    interaction.publish("tool_result", **block,
+                                        status=result_states.pop(block["tool_use_id"],
+                                                                 "failed" if block.get("is_error") else "returned"))
+        checkpoint()
 
     def stopped_result():
         scheduler.restore_cron_jobs(unacknowledged_cron_jobs)
@@ -472,6 +475,7 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
                 # 跳过文本等非工具内容。
                 continue
             if interaction.stopped():
+                result_states[block.id] = "stopped"
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": "Interrupted before execution", "is_error": True})
                 continue
@@ -491,11 +495,13 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             # 执行工具前通知钩子，允许它阻止本次调用。
             blocked = hooks.trigger_hooks("PreToolUse", block)
             if interaction.stopped():
+                result_states[block.id] = "stopped"
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": "Interrupted before execution", "is_error": True})
                 continue
             # 钩子拒绝调用时，将原因作为工具结果返回。
             if blocked:
+                result_states[block.id] = "denied"
                 # 使用原工具调用 ID 与结果配对。
                 results.append({"type": "tool_result",
                                 "tool_use_id": block.id,
@@ -509,11 +515,13 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
                 try:
                     # 将工具调用交给后台任务调度器。
                     bg_id = scheduler.start_background_task(block, handlers)
+                    result_states[block.id] = "started"
                     # 告知模型结果稍后通过任务通知送达。
                     output = (f"[Background task {bg_id} started] "
                               "Result will arrive as a task_notification.")
                 # 将启动异常转换成模型可读的结果。
                 except Exception as exc:
+                    result_states[block.id] = "failed"
                     # 保留异常类型和信息，便于模型判断失败原因。
                     output = (f"Error: Failed to start background task: "
                               f"{type(exc).__name__}: {exc}")
@@ -527,7 +535,9 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             # 根据工具名查找同步处理函数。
             handler = handlers.get(block.name)
             # 执行工具，并把未知工具或执行异常转成结果文本。
-            output = file_tools.call_tool_handler(handler, block.input, block.name)
+            output = file_tools.call_tool_handler(
+                handler, block.input, block.name,
+                on_status=lambda status: result_states.update({block.id: status}))
             # 执行完成后通知 PostToolUse 钩子。
             hooks.trigger_hooks("PostToolUse", block, output)
             # 在终端显示截短的执行结果。

@@ -63,7 +63,7 @@ PYTHONPATH=src /home/gaogao/miniconda3/envs/learncc/bin/python -m agent_harness 
 ```
 
 界面仍使用项目 `.env` 中的真实模型配置，会消耗 API 额度。请在要工作的目录启动；
-会话、任务和其他运行时文件都跟随该目录。同一目录只运行一个交互进程。
+任务和其他运行时文件跟随该目录，会话文件位置见上方「真实 API 交互」。同一目录只运行一个交互进程。
 
 换环境时，在 WSL 的目标环境安装可选依赖即可；按源码运行无需安装项目包：
 
@@ -72,8 +72,9 @@ PYTHONPATH=src /home/gaogao/miniconda3/envs/learncc/bin/python -m agent_harness 
 ```
 
 **对话与布局：**顶部显示会话、模型和执行状态；左侧是对话和输入框，助手回复按 Markdown 显示；
-右侧展示 goal、TODO、子 Agent、Lead 用量和工具/运行事件。回复按完整文本块交付。
-对话保留最近 200 条展示消息，事件区保留最近 1000 行；会话文件仍保存完整的运行时历史。
+主对话依次显示消息、工具调用与结果、TODO、后台进度、审批和回合摘要，执行者标明来源。
+工具参数和结果全文默认收起，点击展开。右侧保留 goal、最新 TODO、子 Agent、Lead 用量和原始事件。
+默认挂载最近 80 条记录，点击「加载更早记录」继续查看；事件区保留最近 1000 行。显示上限不删除会话记录。
 终端宽度小于 85 列时默认隐藏右侧面板，可以按 F2 打开。点击对话区后用 Home/End、方向键、
 PageUp/PageDown 或鼠标滚轮查看历史。
 
@@ -99,8 +100,8 @@ PageUp/PageDown 或鼠标滚轮查看历史。
 | 退出 | Ctrl+D | 请求关闭，等待保存与资源清理后退出 |
 | 右侧面板 | F2 | 显示或隐藏状态和事件 |
 
-**审批：**Bash 和策略要求确认的 MCP 工具会弹出来源、工具名和完整参数，选择「批准」或「拒绝」；
-Esc 表示拒绝。弹窗期间 Ctrl+C 停止回合，Ctrl+D 退出，两者都会解除审批等待。
+**审批：**Bash 和策略要求确认的 MCP 工具在主对话显示来源、工具名和可展开的完整参数。
+按钮启用后选择「批准」或「拒绝」；Ctrl+C 停止回合，Ctrl+D 退出，两者都会解除审批等待。
 前台 Lead 及其同步 once 子 Agent 可以申请确认；后台 Lead、persistent 子 Agent、workflow 和
 无交互上下文的调用会直接拒绝需要确认的工具。文件路径、拒绝列表和工具白名单仍先行检查。
 
@@ -117,6 +118,8 @@ Esc 表示拒绝。弹窗期间 Ctrl+C 停止回合，Ctrl+D 退出，两者都�
 | `/quit` | 空闲时请求退出；执行期间使用 Ctrl+D |
 
 会话保存位置和恢复限制见上方「真实 API 交互」。恢复会重建对话显示，清空当前事件区和 Lead 用量。
+历史审批只读，工具结果未记录时提示核对当前状态；恢复不会重执行工具或启动旧后台线程。
+历史回合摘要按保存内容展示，模型压缩不删除展示历史。
 用量只统计当前激活期间 Lead 主模型的输入/输出 token 和请求数；不含 goal、memory、压缩、
 子 Agent 或 workflow 的调用，也不从历史恢复累计用量。
 
@@ -132,10 +135,11 @@ Ctrl+D 进入「正在关闭」，拒绝新输入，停止 cron，清理 shell�
 
 ```sh
 cd /mnt/d/01dpan/01project/life/learncc/agent-harness
-/home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q tests/test_interaction.py tests/test_interactive_runtime.py tests/test_tui_integration.py
+/home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q tests/test_interaction.py tests/test_interactive_runtime.py tests/test_tui_integration.py tests/test_conversation_records.py tests/test_conversation_frontends.py
 ```
 
 实现与验收记录见 [Textual 实施计划](../docs/plans/2026-10-09-02Textual交互界面实施计划.md)。
+统一对话与历史展示见 [统一对话展示实施计划](../docs/plans/2026-10-09-05统一对话展示与事件恢复实施计划.md)。
 当前已完成离线集成验证及 Linux PTY 的中文多行粘贴、发送和退出验证；真实 API 的 TUI 交互尚未实测。
 
 ## 二、离线自检：改完先跑这个
@@ -700,6 +704,7 @@ CLI 和 Textual 都将输入交给 [InteractiveRuntime](../src/agent_harness/run
 | `InteractiveRuntime._command` | 同上 | goal 查询、清除和设置；会话列表、恢复和删除 |
 | `InteractiveRuntime._resume` | 同上 | 按显式目标目录准备，再统一激活上下文；失败边界见 README |
 | `InteractiveRuntime._execute` | 同上 | hook、历史更新、会话记录、调用 host 和一次性回合结束 |
+| `InteractiveRuntime._checkpoint` | 同上 | 消费事实队列，按会话归属生成展示记录，统一保存并交付前端 |
 | `agent_loop` | [host.py](../src/agent_harness/host.py) | 模型、工具、停止检查、goal 和 memory 收尾 |
 | `CLIAdapter._render_events` | [cli.py](../src/agent_harness/frontends/cli.py) | 输出线程展示完成后调用 `acknowledge_event()`，始终不读取输入 |
 | `HarnessApp.consume` | [tui/app.py](../src/agent_harness/frontends/tui/app.py) | UI 线程分批展示并确认事件，再取可交付审批 |

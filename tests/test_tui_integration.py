@@ -12,7 +12,7 @@ from textual.widgets import Markdown, Static, TextArea
 from textual.widgets.text_area import Selection
 from textual.containers import VerticalScroll
 from agent_harness.frontends.tui.app import HarnessApp
-from agent_harness.frontends.tui.widgets import ApprovalScreen, CommandCandidates, SessionScreen
+from agent_harness.frontends.tui.widgets import ApprovalCard, CommandCandidates, SessionScreen
 from agent_harness.runtime.interaction import ExecutionContext
 from test_interactive_runtime import response, tool, runtime_factory
 
@@ -27,6 +27,11 @@ async def wait_for(pilot, predicate):
     raise AssertionError("UI did not reach the expected state")
 
 
+def approval_button(app, decision):
+    return next(card for card in app.query(ApprovalCard)
+                if card.request_id == app.approval.request_id).query_one("." + decision)
+
+
 def test_tui_dialogue_approval_sessions_and_shutdown(runtime_factory):
     runtime, host = runtime_factory([response("准备", tools=[tool("bash", command="printf hello")], stop="tool_use"), response("**你好**")])
     app = HarnessApp(runtime)
@@ -35,9 +40,9 @@ def test_tui_dialogue_approval_sessions_and_shutdown(runtime_factory):
             editor = app.query_one("#input", TextArea)
             editor.load_text("你好\n请执行")
             await pilot.click("#send")
-            await wait_for(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+            await wait_for(pilot, lambda: app.approval is not None)
             assert app.busy and app.turn_id
-            await pilot.click("#approve")
+            await pilot.click(approval_button(app, "approve"))
             await wait_for(pilot, lambda: not app.busy)
             await pilot.pause()
             assert len(app.query(Markdown)) == 2
@@ -61,11 +66,11 @@ def test_tui_stop_releases_approval_and_preserves_draft(runtime_factory):
             editor = app.query_one("#input", TextArea)
             editor.load_text("run")
             await pilot.click("#send")
-            await wait_for(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+            await wait_for(pilot, lambda: app.approval is not None)
             editor.load_text("next draft")
             await pilot.press("ctrl+c")
             await wait_for(pilot, lambda: not app.busy)
-            assert not isinstance(app.screen, ApprovalScreen)
+            assert app.approval is None and len(app.screen_stack) == 1
             assert editor.text == "next draft"
             assert not (host.core.WORKDIR / "unwanted").exists()
             await pilot.press("ctrl+d")
@@ -78,6 +83,9 @@ def test_tui_ignores_old_generation_after_resume(runtime_factory):
     target = runtime.session.store.create()
     target["goal"] = host.GOAL.snapshot()
     target["messages"] = [{"role": "assistant", "content": [{"type": "text", "text": "restored"}]}]
+    target["events"] = [{"id": "restored-record", "at": target["created_at"], "kind": "display",
+                         "type": "assistant_message", "source": "lead", "turn_id": None,
+                         "payload": {"text": "restored"}}]
     runtime.session.store.save(target)
     app = HarnessApp(runtime)
     async def exercise():
@@ -215,10 +223,10 @@ def test_tui_approval_after_large_batch_ignores_later_logs(runtime_factory, monk
     async def exercise():
         async with app.run_test(size=(100, 30)) as pilot:
             app._submit("run")
-            await wait_for(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+            await wait_for(pilot, lambda: app.approval is not None)
             assert len([event for event in shown if event.payload.get("text", "").startswith("Before ")]) == 206
             assert any(event.type == "tool_call" for event in shown)
-            await pilot.click("#deny")
+            await pilot.click(approval_button(app, "deny"))
             await wait_for(pilot, lambda: not app.busy)
             await pilot.press("ctrl+d")
             await wait_for(pilot, lambda: app.runtime_closed)
@@ -447,12 +455,12 @@ def test_command_runtime_rejection_busy_approval_and_resume_reset(runtime_factor
             await wait_for(pilot, lambda: app.generation == 3 and not app.busy)
             assert panel.display and panel.highlighted == 0 and editor.text == "/"
             app._submit("run")
-            await wait_for(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+            await wait_for(pilot, lambda: app.approval is not None)
             editor.load_text("/goal")
             editor.move_cursor((0, 5))
             assert not panel.display
             count = len(submissions)
-            await pilot.press("tab", "enter")
+            await pilot.click(approval_button(app, "deny"))
             await wait_for(pilot, lambda: not app.busy)
             assert len(submissions) == count and editor.text == "/goal"
             await pilot.pause(0.1)
@@ -511,8 +519,8 @@ def test_tui_approval_waits_for_preceding_event_batches(runtime_factory):
     app = HarnessApp(runtime)
     async def exercise():
         async with app.run_test(size=(100, 30)) as pilot:
-            await wait_for(pilot, lambda: isinstance(app.screen, ApprovalScreen))
-            await pilot.click("#approve")
+            await wait_for(pilot, lambda: app.approval is not None)
+            await pilot.click(approval_button(app, "approve"))
             await wait_for(pilot, lambda: not app.busy)
             await pilot.press("ctrl+d")
             await wait_for(pilot, lambda: app.runtime_closed)

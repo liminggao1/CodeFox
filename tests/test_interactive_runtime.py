@@ -20,6 +20,14 @@ def tool(tool_name, call_id="call", **arguments):
     return SimpleNamespace(type="tool_use", name=tool_name, id=call_id, input=arguments)
 
 
+def add_display_messages(snapshot):
+    for index, message in enumerate(snapshot["messages"]):
+        snapshot["events"].append({"id": f"fixture-{index}", "at": snapshot["created_at"],
+                                  "kind": "display", "type": "user_message",
+                                  "source": "lead", "turn_id": "fixture",
+                                  "payload": {"text": message["content"]}})
+
+
 def until(runtime, event_type, *, submission_id=None, timeout=5):
     events = []
     deadline = time.monotonic() + timeout
@@ -162,6 +170,7 @@ def test_commands_resume_generation_and_save_failure(runtime_factory, monkeypatc
     target = runtime.session.store.create()
     target["goal"] = host.GOAL.snapshot()
     target["messages"] = [{"role": "user", "content": "old"}]
+    add_display_messages(target)
     runtime.session.store.save(target)
     submission = runtime.submit("/goal")
     command, _ = until(runtime, "command_result", submission_id=submission.submission_id)
@@ -221,7 +230,7 @@ def test_cli_owns_all_reads_and_waits_for_goal_followup(runtime_factory, monkeyp
     CLIAdapter(runtime, reader, output.append).run()
     assert {ident for ident, _ in reads} == {threading.get_ident()}
     assert reads[1][1] == "Allow? [y/N] "
-    assert output.count("After") == 1
+    assert sum(text.endswith("After") for text in output) == 1
     assert "hello" in str(output)
 
 
@@ -452,6 +461,7 @@ def test_resume_target_save_failure_stays_target_and_retries(runtime_factory, mo
     until(runtime, "turn_finished", submission_id=submission.submission_id)
     target = runtime.session.store.create()
     target.update(goal=host.GOAL.snapshot(), messages=[{"role": "user", "content": "target"}])
+    add_display_messages(target)
     runtime.session.store.save(target)
     save = runtime.session.store.save
     def unavailable(snapshot):
@@ -487,6 +497,7 @@ def test_resume_mailbox_error_delivers_target_state_and_command_end(runtime_fact
     target = runtime.session.store.create()
     target.update(workdir=str(root), goal=host.GOAL.snapshot(),
                   messages=[{"role": "user", "content": "target history"}])
+    add_display_messages(target)
     runtime.session.store.save(target)
     result, events = resume_command(runtime, target["id"])
     assert result.payload["status"] == "failed"
@@ -495,7 +506,7 @@ def test_resume_mailbox_error_delivers_target_state_and_command_end(runtime_fact
     assert host.core.WORKDIR == root and Path.cwd() == root
     changed = next(event for event in events if event.type == "session_changed")
     state = [event for event in events if event.type == "state_snapshot"][-1]
-    assert changed.payload["history"] == target["messages"]
+    assert changed.payload["records"][0]["payload"]["text"] == "target history"
     assert result.generation == changed.generation == state.generation == 2
     assert state.payload["busy"] is False
     assert host.scheduler._runtime_thread.is_alive()
@@ -571,7 +582,7 @@ def test_cli_display_failure_closes_pending_approval(runtime_factory):
         reads.append(prompt)
         return "run"
     def write(text):
-        if text == "Before":
+        if text.endswith("Before"):
             raise OSError("terminal detached")
     CLIAdapter(runtime, reader, write).run()
     assert reads == [None]

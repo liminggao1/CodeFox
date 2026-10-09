@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .. import core
 from ..workspace import tasks
+from ..runtime import interaction
 
 # -- 基础工具 --
 
@@ -282,7 +283,7 @@ def run_agent_glob(pattern: str) -> str:
     return error or run_glob(pattern, cwd)
 
 
-def call_tool_handler(handler, args: dict, name: str) -> str:
+def call_tool_handler(handler, args: dict, name: str, *, on_status=None) -> str:
     """统一执行同步工具，将参数字典展开并把结果转换为文本。
 
     输入：handler 为查表得到的函数或 None；args 为关键字参数字典；name 为工具名称。
@@ -290,10 +291,17 @@ def call_tool_handler(handler, args: dict, name: str) -> str:
         本函数不执行权限检查，调用方须先经过相应 hooks。
     """
     if not handler:
+        if on_status:
+            on_status("failed")
         return f"Unknown tool: {name}"
     try:
-        return str(handler(**(args or {})))
+        output = str(handler(**(args or {})))
+        if on_status:
+            on_status("returned")
+        return output
     except Exception as exc:
+        if on_status:
+            on_status("failed")
         return f"Error: {type(exc).__name__}: {exc}"
 
 
@@ -328,6 +336,7 @@ def run_todo_write(todos: list) -> str:
         return error
     with tasks.task_lock:
         tasks.CURRENT_TODOS = todos
-        tasks.checkpoint_lead()
+        interaction.publish("todo_updated", todos=todos)
+    tasks.checkpoint_lead()
     core.terminal_print(f"  \033[33m[todo] updated {len(tasks.CURRENT_TODOS)} item(s)\033[0m")
     return f"Updated {len(tasks.CURRENT_TODOS)} todos"

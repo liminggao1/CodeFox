@@ -33,7 +33,14 @@ def test_first_event_creates_one_atomic_snapshot_and_round_trips_blocks(tmp_path
         SimpleNamespace(type="tool_use", id="call-1", name="bash", input={"command": "pwd"}),
         SimpleNamespace(type="text", text="完成"),
     ]})
-    assert session.record("user_input", "你好")
+    assert session.record("user_input", "你好", save=False)
+    for kind, payload in [("user_message", {"text": "你好"}),
+                          ("tool_call", {"id": "call-1", "name": "bash", "input": {"command": "pwd"}}),
+                          ("assistant_message", {"text": "完成"})]:
+        session.append_record({"id": kind, "at": session.snapshot["created_at"],
+                               "kind": "display", "type": kind, "source": "lead",
+                               "turn_id": "round", "payload": payload})
+    assert session.save()
     loaded = session.store.load(session.session_id)
     assert loaded["messages"][1]["content"][0]["name"] == "bash"
     assert loaded["events"][0]["type"] == "user_input"
