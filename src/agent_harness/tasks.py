@@ -24,21 +24,21 @@ fcntl = core.fcntl
 TASK_ID_ALLOCATION_ATTEMPTS = 100
 
 # 任务是小型持久化记录；归属、依赖、worktree 和子 agent都建立在同一份文件状态上。
-def _tasks_dir() -> Path:
+def _tasks_dir(workdir: Path | None = None) -> Path:
     """取得启动目录下的任务存储目录。
 
     返回：
         ``core.WORKDIR / '.tasks'``，这里只返回路径，不创建目录。
     """
-    return core.WORKDIR / ".tasks"
+    return (workdir or core.WORKDIR) / ".tasks"
 
-def _tasks_root() -> Path:
+def _tasks_root(workdir: Path | None = None) -> Path:
     """取得任务存储目录的真实路径，用于检查路径是否越界。
 
     返回：
         解析符号链接后的绝对路径 ``Path``。
     """
-    return _tasks_dir().resolve()
+    return _tasks_dir(workdir).resolve()
 
 
 TASK_ID_PATTERN = re.compile(r"^task_[0-9a-f]{8}$")
@@ -64,18 +64,18 @@ def lead_context() -> dict:
                 "worktree": lead_worktree, "todos": CURRENT_TODOS}
 
 
-def validate_lead_context(session_id: str, context: dict) -> dict | None:
+def validate_lead_context(session_id: str, context: dict, *, workdir: Path) -> dict | None:
     """Validate without changing the current assignment or session directory."""
     with task_lock:
-        cwd = core.WORKDIR
+        cwd = workdir
         name = context["worktree"]
         if name is not None:
-            cwd, error = worktrees._registered_worktree(name)
+            cwd, error = worktrees._registered_worktree(name, workdir=workdir)
             if error:
                 raise ValueError(error)
         if context["task_id"] is None:
             return None
-        task = load_task(context["task_id"])
+        task = load_task(context["task_id"], workdir=workdir)
         if task.owner != "agent" or task.session_id != session_id:
             raise ValueError(f"Task {task.id} belongs to another owner or session")
         if task.status not in {"in_progress", "completed"}:
@@ -159,7 +159,7 @@ class Task:
     session_id: str | None = None
 
 
-def _task_path(task_id: str) -> Path:
+def _task_path(task_id: str, workdir: Path | None = None) -> Path:
     """校验任务 ID，并取得任务存储目录内对应的 JSON 文件路径。
 
     输入：
@@ -171,9 +171,11 @@ def _task_path(task_id: str) -> Path:
     """
     if not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(task_id):
         raise ValueError(f"Invalid task ID: {task_id!r}")
-    path = (_tasks_dir() / f"{task_id}.json").resolve()
-    if (not _tasks_root().is_relative_to(core.WORKDIR.resolve())
-            or not path.is_relative_to(_tasks_root())):
+    root = (workdir or core.WORKDIR).resolve()
+    task_root = _tasks_root(root)
+    path = (_tasks_dir(root) / f"{task_id}.json").resolve()
+    if (not task_root.is_relative_to(root)
+            or not path.is_relative_to(task_root)):
         raise ValueError(f"Invalid task ID: {task_id!r}")
     return path
 
@@ -303,7 +305,7 @@ def save_task(task: Task):
             temporary.unlink(missing_ok=True)
 
 
-def load_task(task_id: str) -> Task:
+def load_task(task_id: str, *, workdir: Path | None = None) -> Task:
     """从 JSON 文件读取任务，并校验记录中的 ID 和生命周期状态。
 
     输入：
@@ -315,7 +317,7 @@ def load_task(task_id: str) -> Task:
         ValueError: ID、JSON 数据或记录中的状态不合法。
     """
     with task_lock:
-        data = json.loads(_task_path(task_id).read_text(encoding="utf-8"))
+        data = json.loads(_task_path(task_id, workdir).read_text(encoding="utf-8"))
         task = Task(**data)
         if task.id != task_id:
             raise ValueError(f"Task file ID does not match {task_id}")

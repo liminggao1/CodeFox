@@ -71,11 +71,24 @@ class CLIAdapter:
 
     def _render_events(self):
         # This adapter thread renders idle background output; it never reads stdin.
+        display_failed = False
         while not self.closed:
             event = self.runtime.channel.next_event(timeout=0.05)
             if event is None:
                 continue
-            self.render(event)
+            if display_failed:
+                self.closed = event.type == "runtime_closed"
+                self._changed.set()
+                continue
+            try:
+                self.render(event)
+            except Exception:
+                # Continue draining until owned execution has shut down.
+                display_failed = True
+                self.runtime.close()
+                self._changed.set()
+                continue
+            self.runtime.channel.acknowledge_event(event.sequence)
             if (event.type == "turn_finished" or
                     event.type == "command_result" and not event.payload.get("turn_id")):
                 self._completed.add(event.payload.get("submission_id"))

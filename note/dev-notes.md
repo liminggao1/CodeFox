@@ -135,7 +135,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 /home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q tests/test_interaction.py tests/test_interactive_runtime.py tests/test_tui_integration.py
 ```
 
-实现与验收记录见 [Textual 实施计划](../docs/plans/2026-10-09-Textual交互界面实施计划.md)。
+实现与验收记录见 [Textual 实施计划](../docs/plans/2026-10-09-02Textual交互界面实施计划.md)。
 当前已完成离线集成验证及 Linux PTY 的中文多行粘贴、发送和退出验证；真实 API 的 TUI 交互尚未实测。
 
 ## 二、离线自检：改完先跑这个
@@ -698,10 +698,12 @@ CLI 和 Textual 都将输入交给 [InteractiveRuntime](../src/agent_harness/int
 | `CLIAdapter.run` / `pump` | [cli.py](../src/agent_harness/cli.py) | 唯一输入读取者；普通输入和审批决定 |
 | `InteractiveRuntime._run` | [interactive_runtime.py](../src/agent_harness/interactive_runtime.py) | 启动服务，串行处理前台输入和后台唤醒 |
 | `InteractiveRuntime._command` | 同上 | goal 查询、清除和设置；会话列表、恢复和删除 |
+| `InteractiveRuntime._resume` | 同上 | 按显式目标目录准备，再统一激活上下文；失败边界见 README |
 | `InteractiveRuntime._execute` | 同上 | hook、历史更新、会话记录、调用 host 和一次性回合结束 |
 | `agent_loop` | [host.py](../src/agent_harness/host.py) | 模型、工具、停止检查、goal 和 memory 收尾 |
-| `CLIAdapter._render_events` | [cli.py](../src/agent_harness/cli.py) | 单独的输出线程，始终不读取输入 |
-| `HarnessApp.consume` | [tui/app.py](../src/agent_harness/tui/app.py) | UI 线程消费普通事件与审批请求 |
+| `CLIAdapter._render_events` | [cli.py](../src/agent_harness/cli.py) | 输出线程展示完成后调用 `acknowledge_event()`，始终不读取输入 |
+| `HarnessApp.consume` | [tui/app.py](../src/agent_harness/tui/app.py) | UI 线程分批展示并确认事件，再取可交付审批 |
+| `InteractionChannel.next_approval` | [interaction.py](../src/agent_harness/interaction.py) | 等待前置事件展示完成；统一过滤过期会话事件和审批，后续日志不阻挡请求 |
 
 旧 `async_event_loop` 和 `print_turn_assistants` 已移除。执行线程只发布普通数据，adapter 负责呈现。
 TUI 操作见[怎么跑](#textual-交互界面)，调试源码 TUI 可将现有交互配置的 `args` 改为 `["tui"]`。

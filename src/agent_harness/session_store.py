@@ -221,10 +221,10 @@ class InteractiveSession:
         return True
 
     def activate(self, snapshot: dict) -> None:
+        """Replace memory; the caller records and saves after activation completes."""
         self.history[:] = snapshot["messages"]
         self.snapshot = snapshot
         self.active_request = snapshot["active_user_request"]
-        self.record("resume", snapshot["id"])
 
     def finish_pending_tools(self) -> None:
         """Supply interrupted tool results without rerunning side effects."""

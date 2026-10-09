@@ -118,13 +118,33 @@ class InteractionChannel:
     def __init__(self):
         self._changed = threading.Condition()
         self._events: deque[InteractionEvent] = deque()
-        self._requests: deque[ApprovalRequest] = deque()
+        self._requests: deque[tuple[ApprovalRequest, int]] = deque()
+        self._unacknowledged: dict[int, InteractionEvent] = {}
+        self._delivered: set[int] = set()
         self._pending: dict[str, ApprovalRequest] = {}
         self._decisions: dict[str, ApprovalDecision] = {}
         self._cancelled_turns: set[str] = set()
         self._sequence = 0
+        self._generation = 0
         self._closed = False
         self._approvals_closed = False
+
+    def _stale(self, item) -> bool:
+        return item.generation < self._generation
+
+    def _advance_generation(self, context):
+        if context.scope != "session" or context.generation <= self._generation:
+            return
+        self._generation = context.generation
+        self._events = deque(event for event in self._events
+                             if event.scope == "runtime" or not self._stale(event))
+        for sequence, event in list(self._unacknowledged.items()):
+            if event.scope == "session" and self._stale(event):
+                del self._unacknowledged[sequence]
+                self._delivered.discard(sequence)
+        for request_id, request in self._pending.items():
+            if self._stale(request):
+                self._decisions[request_id] = "deny"
 
     def publish(self, context: ExecutionContext, event_type: str,
                 payload: dict) -> InteractionEvent:
@@ -132,11 +152,14 @@ class InteractionChannel:
         with self._changed:
             if self._closed:
                 raise RuntimeError("Interaction channel is closed")
+            self._advance_generation(context)
             self._sequence += 1
             event = InteractionEvent(self._sequence, context.session_id,
                                      context.generation, context.turn_id,
                                      context.source, event_type, copied, context.scope)
-            self._events.append(event)
+            if context.scope == "runtime" or not self._stale(event):
+                self._events.append(event)
+                self._unacknowledged[event.sequence] = event
             self._changed.notify_all()
             return replace(event, payload=data_copy(event.payload))
 
@@ -144,7 +167,22 @@ class InteractionChannel:
         """Return one notification; blocking reads belong to adapters, not publishers."""
         with self._changed:
             self._changed.wait_for(lambda: self._events or self._closed, timeout)
-            return self._events.popleft() if self._events else None
+            if not self._events:
+                return None
+            event = self._events.popleft()
+            self._delivered.add(event.sequence)
+            return event
+
+    def acknowledge_event(self, sequence: int) -> bool:
+        """Confirm successful display, in delivery order; dequeue is not display."""
+        with self._changed:
+            if (sequence not in self._delivered
+                    or sequence != next(iter(self._unacknowledged), None)):
+                return False
+            self._delivered.remove(sequence)
+            del self._unacknowledged[sequence]
+            self._changed.notify_all()
+            return True
 
     def request_approval(self, context: ExecutionContext, tool_name: str,
                          tool_call_id: str, arguments: dict) -> ApprovalDecision:
@@ -157,10 +195,12 @@ class InteractionChannel:
         with self._changed:
             if self._closed or self._approvals_closed:
                 return "closed"
-            if context.stopped() or context.turn_id in self._cancelled_turns:
+            self._advance_generation(context)
+            if (self._stale(request) or context.stopped()
+                    or context.turn_id in self._cancelled_turns):
                 return "deny"
             self._pending[request.request_id] = request
-            self._requests.append(request)
+            self._requests.append((request, self._sequence))
             self._changed.notify_all()
             try:
                 while request.request_id not in self._decisions:
@@ -172,15 +212,25 @@ class InteractionChannel:
                 self._pending.pop(request.request_id, None)
                 self._decisions.pop(request.request_id, None)
 
+    def _approval_ready(self) -> bool:
+        while self._requests:
+            request, preceding = self._requests[0]
+            if (request.request_id not in self._pending
+                    or request.request_id in self._decisions or self._stale(request)):
+                self._requests.popleft()
+                continue
+            first = next(iter(self._unacknowledged), None)
+            return first is None or first > preceding
+        return False
+
     def next_approval(self, timeout: float = 0) -> ApprovalRequest | None:
         with self._changed:
-            self._changed.wait_for(lambda: self._requests or self._closed, timeout)
-            while self._requests:
-                request = self._requests.popleft()
-                if (request.request_id in self._pending
-                        and request.request_id not in self._decisions):
-                    return replace(request, arguments=data_copy(request.arguments))
-            return None
+            self._changed.wait_for(lambda: self._approval_ready()
+                                   or self._closed or self._approvals_closed, timeout)
+            if self._closed or self._approvals_closed or not self._approval_ready():
+                return None
+            request, _ = self._requests.popleft()
+            return replace(request, arguments=data_copy(request.arguments))
 
     def respond(self, request_id: str, generation: int,
                 decision: ApprovalDecision) -> bool:
@@ -189,6 +239,7 @@ class InteractionChannel:
         with self._changed:
             request = self._pending.get(request_id)
             if (self._closed or self._approvals_closed or request is None or request.generation != generation
+                    or self._stale(request)
                     or request_id in self._decisions):
                 return False
             self._decisions[request_id] = decision

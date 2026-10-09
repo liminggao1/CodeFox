@@ -88,6 +88,27 @@ def test_offline_adapter_responds_to_exact_request_once():
         assert not channel.respond(request.request_id, 1, "approve")
 
 
+def test_approval_waits_for_display_not_dequeue_or_later_notifications():
+    channel = InteractionChannel()
+    context = frontend(channel)
+    context.publish("tool_call", name="bash")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            waiting = pool.submit(channel.request_approval, context, "bash", "tool-1", {})
+            assert channel.next_approval(timeout=0.05) is None
+            event = channel.next_event()
+            assert channel.next_approval(timeout=0.05) is None
+            context.publish("log", text="Later notification")
+            assert not channel.acknowledge_event(event.sequence + 1)
+            assert channel.acknowledge_event(event.sequence)
+            request = channel.next_approval(timeout=2)
+            assert request is not None
+            assert channel.respond(request.request_id, request.generation, "approve")
+            assert waiting.result(timeout=2) == "approve"
+        finally:
+            channel.close()
+
+
 def test_simultaneous_requests_cannot_release_each_other():
     channel = InteractionChannel()
     context = frontend(channel)
@@ -130,3 +151,51 @@ def test_close_drains_terminal_notification_and_rejects_late_publishers():
     assert channel.next_event(timeout=1) is None
     with pytest.raises(RuntimeError, match="closed"):
         context.publish("late_message", text="late")
+
+
+@pytest.mark.parametrize("operation,expected", [("stop", "deny"), ("close", "closed"), ("switch", "deny")])
+def test_unshown_event_cannot_trap_cancelled_or_stale_approval(operation, expected):
+    channel = InteractionChannel()
+    context = frontend(channel)
+    context.publish("tool_call", name="bash")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            waiting = pool.submit(channel.request_approval, context, "bash", "old", {})
+            assert channel.next_approval(timeout=0.05) is None
+            if operation == "stop":
+                channel.cancel_turn(context.turn_id)
+            elif operation == "close":
+                channel.close()
+            else:
+                current = replace(context, session_id="session-2", generation=2, turn_id="new-turn")
+                current.publish("session_changed")
+            assert waiting.result(timeout=2) == expected
+            assert channel.next_approval() is None
+            if operation == "switch":
+                stale = channel.next_event()
+                assert stale.type == "session_changed"
+                assert channel.acknowledge_event(stale.sequence)
+                context.publish("log", text="old session")
+                cron = replace(context, scope="runtime", generation=0)
+                cron.publish("log", text="runtime survives")
+                event = channel.next_event()
+                assert event.payload["text"] == "runtime survives"
+                assert channel.acknowledge_event(event.sequence)
+                new = pool.submit(channel.request_approval, current, "bash", "new", {})
+                request = channel.next_approval(timeout=2)
+                assert request is not None and request.session_id == "session-2"
+                assert channel.respond(request.request_id, 2, "approve")
+                assert new.result(timeout=2) == "approve"
+        finally:
+            channel.close()
+
+
+def test_confirmation_cannot_skip_earlier_delivered_events():
+    channel = InteractionChannel()
+    context = frontend(channel)
+    context.publish("assistant_message", text="First")
+    context.publish("tool_call", name="bash")
+    first, second = channel.next_event(), channel.next_event()
+    assert not channel.acknowledge_event(second.sequence)
+    assert channel.acknowledge_event(first.sequence)
+    assert channel.acknowledge_event(second.sequence)

@@ -227,10 +227,14 @@ class InteractiveRuntime:
                     self._busy = False
                     self._turn = None
                     self._stop = None
-                    context.publish("command_result" if kind == "command" else "turn_finished",
-                                    submission_id=submission_id, command=text.split()[0],
-                                    status="failed", data={"error": str(exc)},
-                                    outcome=asdict(interaction.TurnOutcome("failed", str(exc))))
+                if kind == "command":
+                    # A command may already have activated a different session.
+                    context = self._context()
+                self._snapshot(context)
+                context.publish("command_result" if kind == "command" else "turn_finished",
+                                submission_id=submission_id, command=text.split()[0],
+                                status="failed", data={"error": str(exc)},
+                                outcome=asdict(interaction.TurnOutcome("failed", str(exc))))
 
     def _command(self, text):
         parts = text.split()
@@ -267,55 +271,77 @@ class InteractiveRuntime:
             elif target == self.session.session_id:
                 self._command_data = {"text": f"Already using {target}"}
             else:
-                snapshot = self.session.store.load(target)
-                restored_goal = goal.GoalController.from_snapshot(host.GOAL.evaluator, snapshot["goal"], host.GOAL.block_cap)
-                restored_workdir = Path(snapshot["workdir"]).resolve()
-                if not restored_workdir.is_dir():
-                    raise SessionError(f"Session startup directory does not exist: {restored_workdir}")
-                if (host.scheduler.has_background_tasks() or host.subagent.list_subagents()
-                        or host.subagent.BUS.peek("lead")):
-                    raise SessionError("Background work or results remain; finish them and retry /resume")
-                # Keep cron from observing the temporary root used for read-only validation.
-                with host.scheduler.cron_lock, host.tasks.task_lock:
-                    if host.scheduler.cron_queue:
-                        raise SessionError("Scheduled results remain; finish them and retry /resume")
-                    previous_workdir = core.WORKDIR
-                    try:
-                        core.WORKDIR = restored_workdir
-                        restored_assignment = host.tasks.validate_lead_context(target, snapshot)
-                    finally:
-                        core.WORKDIR = previous_workdir
-                if not self.session.save():
-                    raise SessionError("Current session could not be saved; context was not switched")
-                directory_changed = restored_workdir != previous_workdir.resolve()
-                if directory_changed:
-                    host.scheduler.stop_runtime_services()
-                    try:
-                        with host.scheduler.cron_lock:
-                            if host.scheduler.cron_queue:
-                                raise SessionError("Scheduled results remain; finish them and retry /resume")
-                            os.chdir(restored_workdir)
-                    except Exception:
-                        host.scheduler.start_runtime_services(load_jobs=False)
-                        raise
-                    core.WORKDIR = restored_workdir
-                    self.session.store.workdir = restored_workdir
-                    host.scheduler.clear_runtime_jobs()
-                host.mcp_clients.clear()
-                host.rounds_since_todo = 0
-                host.GOAL = restored_goal
-                host.tasks.activate_lead_context(target, snapshot, restored_assignment)
-                self._usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
-                self._generation += 1
-                with interaction.execution_context(replace(self._context(), session_id=target)):
-                    self.session.activate(snapshot)
-                    if directory_changed:
-                        host.subagent.consume_lead_inbox(route_protocol=False)
-                        host.scheduler.start_runtime_services()
-                    self._context().publish("session_changed", history=json_value(self.session.history))
-                self._command_data = {"text": f"Resumed {target} at {core.WORKDIR}",
-                                      "workdir": str(core.WORKDIR)}
+                self._command_data = self._resume(target)
         return None
+
+    # -- Session switching: preparation is read-only; activation owns all state changes. --
+
+    def _prepare_resume(self, target):
+        snapshot = self.session.store.load(target)
+        restored_goal = goal.GoalController.from_snapshot(
+            host.GOAL.evaluator, snapshot["goal"], host.GOAL.block_cap)
+        root = Path(snapshot["workdir"]).resolve()
+        if not root.is_dir():
+            raise SessionError(f"Session startup directory does not exist: {root}")
+        if (host.scheduler.has_background_tasks() or host.subagent.list_subagents()
+                or host.subagent.BUS.peek("lead")):
+            raise SessionError("Background work or results remain; finish them and retry /resume")
+        with host.scheduler.cron_lock:
+            if host.scheduler.cron_queue:
+                raise SessionError("Scheduled results remain; finish them and retry /resume")
+        assignment = host.tasks.validate_lead_context(target, snapshot, workdir=root)
+        return snapshot, root, restored_goal, assignment
+
+    def _resume(self, target):
+        snapshot, root, restored_goal, assignment = self._prepare_resume(target)
+        if not self.session.save():
+            raise SessionError("Current session could not be saved; context was not switched")
+        directory_changed = root != core.WORKDIR.resolve()
+        # Do not join cron while holding its lock. Recheck after it has stopped.
+        if directory_changed:
+            host.scheduler.stop_runtime_services()
+        try:
+            with host.scheduler.cron_lock:
+                if host.scheduler.cron_queue:
+                    raise SessionError("Scheduled results remain; finish them and retry /resume")
+                if directory_changed:
+                    os.chdir(root)
+                self._activate_resume(snapshot, root, restored_goal, assignment)
+        except Exception:
+            if directory_changed and core.WORKDIR.resolve() != root:
+                host.scheduler.start_runtime_services(load_jobs=False)
+            raise
+        with interaction.execution_context(self._context()):
+            try:
+                saved = self.session.record("resume", target)
+                if directory_changed:
+                    host.scheduler.clear_runtime_jobs()
+                    try:
+                        host.subagent.consume_lead_inbox(route_protocol=False)
+                    finally:
+                        host.scheduler.start_runtime_services()
+            except Exception as exc:
+                # Do not repeatedly consume the same damaged background input.
+                with self._lifecycle:
+                    self._background_paused = True
+                raise SessionError(f"Resumed {target} at {root}; post-resume processing failed: {exc}") from exc
+            finally:
+                self._context().publish("session_changed", history=json_value(self.session.history))
+        text = f"Resumed {target} at {root}"
+        if not saved:
+            text += "; context could not be saved and will be retried on the next interaction"
+        return {"text": text, "workdir": str(root), "saved": saved}
+
+    def _activate_resume(self, snapshot, root, restored_goal, assignment):
+        core.WORKDIR = root
+        self.session.store.workdir = root
+        host.mcp_clients.clear()
+        host.rounds_since_todo = 0
+        host.GOAL = restored_goal
+        host.tasks.activate_lead_context(snapshot["id"], snapshot, assignment)
+        self.session.activate(snapshot)
+        self._usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
+        self._generation += 1
 
     def _shutdown(self):
         self.channel.close_approvals()

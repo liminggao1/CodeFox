@@ -9,22 +9,22 @@ from pathlib import Path
 from . import core
 
 
-def _worktrees_dir() -> Path:
+def _worktrees_dir(workdir: Path | None = None) -> Path:
     """取得启动目录下存放独立 Git 工作目录的父目录。
 
     返回：
         ``core.WORKDIR / '.worktrees'``，这里只返回路径，不创建目录。
     """
-    return core.WORKDIR / ".worktrees"
+    return (workdir or core.WORKDIR) / ".worktrees"
 
 
-def _worktrees_root() -> Path:
+def _worktrees_root(workdir: Path | None = None) -> Path:
     """取得 worktree 父目录的真实路径，用于检查路径是否越界。
 
     返回：
         解析符号链接后的绝对路径 ``Path``。
     """
-    return _worktrees_dir().resolve()
+    return _worktrees_dir(workdir).resolve()
 
 
 VALID_WORKTREE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -48,7 +48,7 @@ def validate_worktree_name(name: str) -> str | None:
     return None
 
 
-def _worktree_path(name: str) -> Path:
+def _worktree_path(name: str, workdir: Path | None = None) -> Path:
     """取得工作目录的真实路径，并确认它位于允许的 worktree 父目录内。
 
     输入：
@@ -58,10 +58,12 @@ def _worktree_path(name: str) -> Path:
     异常：
         ValueError: 路径越出允许范围，或指向 worktree 父目录本身。
     """
-    path = (_worktrees_dir() / name).resolve()
-    if (not _worktrees_root().is_relative_to(core.WORKDIR.resolve())
-            or not path.is_relative_to(_worktrees_root())
-            or path == _worktrees_root()):
+    root = (workdir or core.WORKDIR).resolve()
+    worktree_root = _worktrees_root(root)
+    path = (_worktrees_dir(root) / name).resolve()
+    if (not worktree_root.is_relative_to(root)
+            or not path.is_relative_to(worktree_root)
+            or path == worktree_root):
         raise ValueError(f"Worktree path escapes directory: {name!r}")
     return path
 
@@ -118,7 +120,7 @@ def run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
     return ok, output[:core.GIT_OUTPUT_CHAR_LIMIT]
 
 
-def _registered_worktrees() -> tuple[dict[Path, dict[str, str]], str | None]:
+def _registered_worktrees(workdir: Path | None = None) -> tuple[dict[Path, dict[str, str]], str | None]:
     """读取 Git 的 worktree 注册表，保留完整的 porcelain 格式输出。
 
     返回：
@@ -126,7 +128,7 @@ def _registered_worktrees() -> tuple[dict[Path, dict[str, str]], str | None]:
         例如 ``branch`` 和 ``HEAD``。成功时 error 为 None；Git 执行失败时
         返回空字典和错误字符串。
     """
-    ok, output = _run_git(["worktree", "list", "--porcelain"])
+    ok, output = _run_git(["worktree", "list", "--porcelain"], cwd=workdir)
     if not ok:
         return {}, f"cannot read Git worktree registry: {output}"
     entries: dict[Path, dict[str, str]] = {}
@@ -143,7 +145,7 @@ def _registered_worktrees() -> tuple[dict[Path, dict[str, str]], str | None]:
     return entries, None
 
 
-def _registered_worktree(name: str) -> tuple[Path | None, str | None]:
+def _registered_worktree(name: str, *, workdir: Path | None = None) -> tuple[Path | None, str | None]:
     """校验工作目录的路径、Git 注册信息和对应分支。
 
     输入：
@@ -153,10 +155,10 @@ def _registered_worktree(name: str) -> tuple[Path | None, str | None]:
         ``(None, 错误文本)``。任务归属和绑定关系由任务生命周期函数另行检查。
     """
     try:
-        path = _worktree_path(name)
+        path = _worktree_path(name, workdir)
     except ValueError as exc:
         return None, str(exc)
-    entries, error = _registered_worktrees()
+    entries, error = _registered_worktrees(workdir)
     if error:
         return None, error
     if path not in entries:

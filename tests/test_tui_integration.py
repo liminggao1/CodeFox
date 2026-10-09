@@ -188,6 +188,60 @@ async def command_draft(app, pilot, text):
     await pilot.pause()
     return editor
 
+
+def test_tui_approval_after_large_batch_ignores_later_logs(runtime_factory, monkeypatch):
+    from agent_harness.interaction import current_context
+    calls = []
+    def create(**kwargs):
+        if not calls:
+            calls.append(True)
+            for number in range(205):
+                current_context().publish("log", text=f"Before {number}")
+            return response("Before tool", tools=[tool("bash", command="printf hello")], stop="tool_use")
+        return response("After")
+    runtime, host = runtime_factory(client=create)
+    app = HarnessApp(runtime)
+    shown = []
+    event_handler = app._event
+    cron = ExecutionContext(runtime.channel, None, 0, source="cron", scope="runtime")
+    async def display(event):
+        await event_handler(event)
+        shown.append(event)
+        if app.busy and app.approval is None:
+            # A stream of later logs must not require an empty queue to show approval.
+            cron.publish("log", text="Later log A")
+            cron.publish("log", text="Later log B")
+    monkeypatch.setattr(app, "_event", display)
+    async def exercise():
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._submit("run")
+            await wait_for(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+            assert len([event for event in shown if event.payload.get("text", "").startswith("Before ")]) == 206
+            assert any(event.type == "tool_call" for event in shown)
+            await pilot.click("#deny")
+            await wait_for(pilot, lambda: not app.busy)
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    asyncio.run(exercise())
+
+
+def test_tui_display_error_closes_runtime(runtime_factory, monkeypatch):
+    runtime, host = runtime_factory()
+    app = HarnessApp(runtime)
+    async def exercise():
+        async with app.run_test(size=(100, 30)) as pilot:
+            async def unavailable(event):
+                raise RuntimeError("display failed")
+            with monkeypatch.context() as patch:
+                patch.setattr(app, "_event", unavailable)
+                ExecutionContext(runtime.channel, None, 1).publish("log", text="Cannot display")
+                with pytest.raises(RuntimeError, match="display failed"):
+                    await app.consume()
+            await wait_for(pilot, lambda: app.runtime_closed)
+            assert runtime.submit("next").status == "closed"
+    asyncio.run(exercise())
+
+
 def record_submissions(runtime, monkeypatch):
     submissions = []
     submit = runtime.submit
@@ -197,6 +251,7 @@ def record_submissions(runtime, monkeypatch):
         return result
     monkeypatch.setattr(runtime, "submit", record)
     return submissions
+
 
 def test_command_menu_navigation_fill_escape_and_editor_boundaries(runtime_factory):
     runtime, host = runtime_factory()
@@ -243,6 +298,7 @@ def test_command_menu_navigation_fill_escape_and_editor_boundaries(runtime_facto
             await pilot.press("ctrl+d")
             await wait_for(pilot, lambda: app.runtime_closed)
     asyncio.run(exercise())
+
 
 def test_command_enter_parameters_and_raw_submission(runtime_factory, monkeypatch):
     calls = []
@@ -313,6 +369,7 @@ def test_command_enter_parameters_and_raw_submission(runtime_factory, monkeypatc
             assert submissions[-1][0] == "/quit"
     asyncio.run(exercise())
 
+
 @pytest.mark.parametrize("size", [(55, 18), (35, 8)])
 def test_command_menu_mouse_small_layout_and_modal_focus(runtime_factory, monkeypatch, size):
     runtime, host = runtime_factory()
@@ -357,6 +414,7 @@ def test_command_menu_mouse_small_layout_and_modal_focus(runtime_factory, monkey
             await wait_for(pilot, lambda: app.runtime_closed)
             assert not panel.display
     asyncio.run(exercise())
+
 
 def test_command_runtime_rejection_busy_approval_and_resume_reset(runtime_factory, monkeypatch):
     runtime, host = runtime_factory([response(tools=[tool("bash", command="printf ok")], stop="tool_use"), response()])
@@ -404,6 +462,7 @@ def test_command_runtime_rejection_busy_approval_and_resume_reset(runtime_factor
             assert editor.text == "/goal" and submissions[-1][1].status == "closed"
             await wait_for(pilot, lambda: app.runtime_closed)
     asyncio.run(exercise())
+
 
 def test_command_draft_survives_actual_background_wakeup(runtime_factory, monkeypatch):
     started, release = threading.Event(), threading.Event()

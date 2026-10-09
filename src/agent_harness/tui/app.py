@@ -324,28 +324,23 @@ class HarnessApp(App):
             event = self.runtime.channel.next_event()
             if event is None:
                 break
-            if event.sequence <= self.sequence:
-                continue
             if event.scope == "session":
-                if event.generation < self.generation:
-                    continue
                 self.generation = event.generation
             self.sequence = event.sequence
-            await self._event(event)
-        else:
-            # Earlier turn notifications may still precede an approval in this batch.
-            return
+            try:
+                await self._event(event)
+            except Exception:
+                self.runtime.close()
+                raise
+            self.runtime.channel.acknowledge_event(event.sequence)
         if self.approval is None and not self.closing:
             request = self.runtime.channel.next_approval()
             if request is not None:
-                if request.generation != self.generation or request.turn_id != self.turn_id:
-                    self.runtime.channel.respond(request.request_id, request.generation, "deny")
-                else:
-                    self.approval = request
-                    def decide(decision):
-                        self.runtime.channel.respond(request.request_id, request.generation, decision)
-                        self.approval = None
-                    self.push_screen(ApprovalScreen(request), decide)
+                self.approval = request
+                def decide(decision):
+                    self.runtime.channel.respond(request.request_id, request.generation, decision)
+                    self.approval = None
+                self.push_screen(ApprovalScreen(request), decide)
         self._refresh_commands()
 
     async def _event(self, event):

@@ -27,9 +27,25 @@ def until(runtime, event_type, *, submission_id=None, timeout=5):
         event = runtime.channel.next_event(timeout=0.05)
         if event is not None:
             events.append(event)
+            runtime.channel.acknowledge_event(event.sequence)
             if event.type == event_type and (submission_id is None or event.payload.get("submission_id") == submission_id):
                 return event, events
     raise AssertionError(f"Missing {event_type}: {events}")
+
+
+def displayed_approval(runtime, timeout=3):
+    """Offline adapter displays preceding notifications before reading a request."""
+    events = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        event = runtime.channel.next_event(timeout=0.01)
+        if event is not None:
+            events.append(event)
+            runtime.channel.acknowledge_event(event.sequence)
+        request = runtime.channel.next_approval()
+        if request is not None:
+            return request, events
+    raise AssertionError(f"Missing approval: {events}")
 
 
 @pytest.fixture
@@ -90,19 +106,19 @@ def test_serial_submission_history_events_and_usage(runtime_factory):
 def test_approval_routes_to_matching_tool(runtime_factory, decision, expected):
     runtime, host = runtime_factory([response("Before", tools=[tool("bash", command="printf hello")], stop="tool_use"), response("After")])
     submission = runtime.submit("run")
-    request = runtime.channel.next_approval(timeout=3)
+    request, preceding = displayed_approval(runtime)
     assert request and request.tool_call_id == "call" and request.source == "lead"
     assert runtime.channel.respond(request.request_id, request.generation, decision)
     _, events = until(runtime, "turn_finished", submission_id=submission.submission_id)
     results = [event.payload["content"] for event in events if event.type == "tool_result"]
     assert expected in results[0]
-    assert [event.payload["text"] for event in events if event.type == "assistant_message"] == ["Before", "After"]
+    assert [event.payload["text"] for event in preceding + events if event.type == "assistant_message"] == ["Before", "After"]
 
 
 def test_stop_waiting_approval_completes_tools_and_pauses_background(runtime_factory):
     runtime, host = runtime_factory([response(tools=[tool("bash", command="touch unwanted"), tool("write_file", "write", path="unwanted", content="x")], stop="tool_use"), response("Next")])
     submission = runtime.submit("run")
-    request = runtime.channel.next_approval(timeout=3)
+    request, _ = displayed_approval(runtime)
     assert request is not None
     assert runtime.request_stop(request.turn_id)
     finished, events = until(runtime, "turn_finished", submission_id=submission.submission_id)
@@ -118,7 +134,7 @@ def test_stop_waiting_approval_completes_tools_and_pauses_background(runtime_fac
 def test_close_waiting_approval_is_nonblocking_and_terminal(runtime_factory):
     runtime, host = runtime_factory([response(tools=[tool("bash", command="touch unwanted")], stop="tool_use")])
     runtime.submit("run")
-    request = runtime.channel.next_approval(timeout=3)
+    request, _ = displayed_approval(runtime)
     assert request
     runtime.close()
     runtime.close()
@@ -367,7 +383,7 @@ def test_frontend_once_inherits_approval_and_workflow_does_not(runtime_factory):
                                      response(tools=[tool("bash", command="printf child")], stop="tool_use"),
                                      response("child done"), response("lead done")])
     submission = runtime.submit("run")
-    request = runtime.channel.next_approval(timeout=3)
+    request, _ = displayed_approval(runtime)
     assert request and request.source == "helper"
     assert runtime.channel.respond(request.request_id, request.generation, "approve")
     finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
@@ -430,6 +446,67 @@ def resume_command(runtime, session_id):
     return until(runtime, "command_result", submission_id=submission.submission_id)
 
 
+def test_resume_target_save_failure_stays_target_and_retries(runtime_factory, monkeypatch):
+    runtime, host = runtime_factory(client=lambda **kwargs: response())
+    submission = runtime.submit("original")
+    until(runtime, "turn_finished", submission_id=submission.submission_id)
+    target = runtime.session.store.create()
+    target.update(goal=host.GOAL.snapshot(), messages=[{"role": "user", "content": "target"}])
+    runtime.session.store.save(target)
+    save = runtime.session.store.save
+    def unavailable(snapshot):
+        if snapshot["id"] == target["id"]:
+            raise OSError("disk full")
+        save(snapshot)
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime.session.store, "save", unavailable)
+        result, events = resume_command(runtime, target["id"])
+        assert result.payload["status"] == "completed"
+        assert result.payload["data"]["saved"] is False
+        assert "could not be saved" in result.payload["data"]["text"]
+        assert any(event.type == "session_save_error" for event in events)
+        assert runtime.session.session_id == target["id"] and runtime.session.dirty
+        assert runtime.session.history == target["messages"]
+    submission = runtime.submit("continue target")
+    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    assert finished.payload["saved"] and not runtime.session.dirty
+    saved = runtime.session.store.load(target["id"])
+    assert any(event["type"] == "resume" for event in saved["events"])
+    assert saved["messages"][1]["content"] == "continue target"
+
+
+def test_resume_mailbox_error_delivers_target_state_and_command_end(runtime_factory):
+    runtime, host = runtime_factory(client=lambda **kwargs: response())
+    submission = runtime.submit("original")
+    until(runtime, "turn_finished", submission_id=submission.submission_id)
+    root = host.core.WORKDIR / "target"
+    root.mkdir()
+    mailbox = root / ".mailboxes" / "lead.jsonl"
+    mailbox.parent.mkdir()
+    mailbox.write_text("invalid json\n", encoding="utf-8")
+    target = runtime.session.store.create()
+    target.update(workdir=str(root), goal=host.GOAL.snapshot(),
+                  messages=[{"role": "user", "content": "target history"}])
+    runtime.session.store.save(target)
+    result, events = resume_command(runtime, target["id"])
+    assert result.payload["status"] == "failed"
+    assert "post-resume processing failed" in result.payload["data"]["error"]
+    assert runtime.session.session_id == target["id"]
+    assert host.core.WORKDIR == root and Path.cwd() == root
+    changed = next(event for event in events if event.type == "session_changed")
+    state = [event for event in events if event.type == "state_snapshot"][-1]
+    assert changed.payload["history"] == target["messages"]
+    assert result.generation == changed.generation == state.generation == 2
+    assert state.payload["busy"] is False
+    assert host.scheduler._runtime_thread.is_alive()
+    # Correct the damaged input, then continue the already restored session.
+    mailbox.write_text("", encoding="utf-8")
+    submission = runtime.submit("continue target")
+    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    assert finished.payload["outcome"]["status"] == "completed"
+    assert runtime.session.store.load(target["id"])["messages"][1]["content"] == "continue target"
+
+
 def test_resume_isolates_task_directory_and_todos(session_worktree):
     runtime, host, task, checkout = session_worktree
     a = runtime.session.session_id
@@ -460,6 +537,46 @@ def test_resume_isolates_task_directory_and_todos(session_worktree):
     assert host.run_agent_write("resumed.txt", "continued").startswith("Wrote")
     assert (checkout / "resumed.txt").read_text() == "continued"
     assert not (host.core.WORKDIR / "resumed.txt").exists()
+
+
+def test_target_worktree_validation_uses_target_root_without_switching(session_worktree, monkeypatch):
+    runtime, host, task, checkout = session_worktree
+    target = runtime.session.session_id
+    target_root = host.core.WORKDIR
+    other_root = target_root / "other"
+    other_root.mkdir()
+    other = runtime.session.store.create()
+    other.update(workdir=str(other_root), goal=host.GOAL.snapshot())
+    runtime.session.store.save(other)
+    result, _ = resume_command(runtime, other["id"])
+    assert result.payload["status"] == "completed"
+    observed = []
+    def git(args, cwd):
+        observed.append((host.core.WORKDIR, Path.cwd(), cwd))
+        result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        return result.returncode == 0, result.stdout + result.stderr
+    monkeypatch.setattr(host.worktrees, "run_git_impl", git)
+    result, _ = resume_command(runtime, target)
+    assert result.payload["status"] == "completed", result.payload
+    assert observed == [(other_root, other_root, target_root)]
+    assert host.assignment_cwd("agent") == checkout
+    assert host.load_task(task.id).session_id == target
+
+
+def test_cli_display_failure_closes_pending_approval(runtime_factory):
+    from agent_harness.cli import CLIAdapter
+    runtime, host = runtime_factory([response("Before", tools=[tool("bash", command="touch unwanted")], stop="tool_use")])
+    reads = []
+    def reader(prompt=None):
+        reads.append(prompt)
+        return "run"
+    def write(text):
+        if text == "Before":
+            raise OSError("terminal detached")
+    CLIAdapter(runtime, reader, write).run()
+    assert reads == [None]
+    assert not (host.core.WORKDIR / "unwanted").exists()
+    assert runtime.submit("next").status == "closed"
 
 
 @pytest.mark.parametrize("change", ["missing_task", "owner", "session", "binding", "directory", "startup"])
