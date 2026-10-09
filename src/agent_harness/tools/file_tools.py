@@ -221,66 +221,73 @@ def run_glob(pattern: str, cwd: Path | None = None) -> str:
         return f"Error: {e}"
 
 
-def _agent_cwd() -> tuple[Path | None, str | None]:
-    """取得主 agent 当前任务的有效工具目录。
-
-    返回：(目录, None)，无分配时使用启动目录；分配缺失或失效时返回 (None, 错误文本)。
-    """
+def tool_cwd(owner: str) -> tuple[Path | None, str | None]:
+    """Resolve the actor's current assignment on every invocation."""
     try:
-        return tasks.assignment_cwd("agent"), None
+        return tasks.assignment_cwd(owner), None
     except (FileNotFoundError, ValueError) as exc:
         return None, f"Error: Invalid task assignment: {exc}"
 
 
+def bind_file_tools(owner: str, *, allow_background: bool = False) -> dict:
+    """Bind five handlers to an owner, without selecting tools or authorizing.
+
+    Input: task owner; allow_background preserves the Lead's bash signature.
+    Return: handlers that resolve current cwd at execution, not construction.
+    """
+    def invoke(handler, *args, **kwargs):
+        cwd, error = tool_cwd(owner)
+        return error or handler(*args, cwd=cwd, **kwargs)
+
+    if allow_background:
+        def bash(command: str, run_in_background: bool = False) -> str:
+            return invoke(run_bash, command, run_in_background=run_in_background)
+    else:
+        def bash(command: str) -> str:
+            return invoke(run_bash, command)
+
+    def read(path: str, limit: int | None = None, offset: int = 0) -> str:
+        return invoke(run_read, path, limit=limit, offset=offset)
+
+    def write(path: str, content: str) -> str:
+        return invoke(run_write, path, content)
+
+    def edit(path: str, old_text: str, new_text: str) -> str:
+        return invoke(run_edit, path, old_text, new_text)
+
+    def glob(pattern: str) -> str:
+        return invoke(run_glob, pattern)
+
+    return {"bash": bash, "read_file": read, "write_file": write,
+            "edit_file": edit, "glob": glob}
+
+
+_LEAD_HANDLERS = bind_file_tools("agent", allow_background=True)
+
+
 def run_agent_bash(command: str, run_in_background: bool = False) -> str:
-    """按主 agent 当前分配执行 shell 工具。
-
-    输入：command 为命令；run_in_background 为交给外层调度器解释的后台标志。
-    返回：分配错误或 run_bash 的结果字符串。
-    """
-    cwd, error = _agent_cwd()
-    return error or run_bash(command, cwd, run_in_background)
+    """Execute bash with the Lead's current assignment."""
+    return _LEAD_HANDLERS["bash"](command, run_in_background)
 
 
-def run_agent_read(path: str, limit: int | None = None,
-                   offset: int = 0) -> str:
-    """按主 agent 当前分配读取文件。
-
-    输入：path 为路径；limit/offset 为读取行数上限和跳过行数。
-    返回：分配错误或 run_read 的文本结果；归档绝对路径遵循共享读取规则。
-    """
-    cwd, error = _agent_cwd()
-    return error or run_read(path, limit, offset, cwd)
+def run_agent_read(path: str, limit: int | None = None, offset: int = 0) -> str:
+    """Read with the Lead's current assignment."""
+    return _LEAD_HANDLERS["read_file"](path, limit, offset)
 
 
 def run_agent_write(path: str, content: str) -> str:
-    """按主 agent 当前分配写入文件。
-
-    输入：path 为文件路径；content 为正文。
-    返回：分配错误或写入结果字符串，成功时修改对应任务目录中的文件。
-    """
-    cwd, error = _agent_cwd()
-    return error or run_write(path, content, cwd)
+    """Write with the Lead's current assignment."""
+    return _LEAD_HANDLERS["write_file"](path, content)
 
 
 def run_agent_edit(path: str, old_text: str, new_text: str) -> str:
-    """按主 agent 当前分配替换文件文本。
-
-    输入：path 为路径；old_text/new_text 为原文和替换内容。
-    返回：分配错误或编辑结果字符串。
-    """
-    cwd, error = _agent_cwd()
-    return error or run_edit(path, old_text, new_text, cwd)
+    """Edit with the Lead's current assignment."""
+    return _LEAD_HANDLERS["edit_file"](path, old_text, new_text)
 
 
 def run_agent_glob(pattern: str) -> str:
-    """按主 agent 当前分配搜索文件。
-
-    输入：pattern 为 glob 模式。
-    返回：分配错误、匹配路径列表或无匹配提示。
-    """
-    cwd, error = _agent_cwd()
-    return error or run_glob(pattern, cwd)
+    """Search with the Lead's current assignment."""
+    return _LEAD_HANDLERS["glob"](pattern)
 
 
 def call_tool_handler(handler, args: dict, name: str, *, on_status=None) -> str:

@@ -2,16 +2,16 @@
 
 from .. import core
 from ..tools import file_tools
+from ..tools import shared_tools
 from ..runtime import hooks
 from ..workspace import tasks
 from ..context import compaction
 from . import recovery
 from ..providers import message_content
-from pathlib import Path
 
 
-BASE_TOOL_NAMES = ("bash", "read_file", "write_file", "edit_file", "glob")
-TASK_TOOL_NAMES = ("list_tasks", "claim_task", "complete_task")
+BASE_TOOL_NAMES = shared_tools.FILE_TOOL_NAMES
+TASK_TOOL_NAMES = shared_tools.TASK_TOOL_NAMES
 PERSISTENT_TOOL_NAMES = ("send_message", "submit_plan")
 
 
@@ -70,87 +70,14 @@ class SubagentSession:
         self.work_context = work_context or (lambda: "")
         self.active_request = ""
         self._reactive_claimed = False
-        def current_cwd() -> tuple[Path | None, str | None]:
-            try:
-                return tasks.assignment_cwd(name), None
-            except (FileNotFoundError, ValueError) as exc:
-                return None, f"Error: Invalid task assignment: {exc}"
-
-        def _run_bash(command: str) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_bash(command, cwd=cwd)
-
-        def _run_read(path: str, limit: int | None = None,
-                      offset: int = 0) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_read(path, limit=limit, offset=offset, cwd=cwd)
-
-        def _run_write(path: str, content: str) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_write(path, content, cwd=cwd)
-
-        def _run_edit(path: str, old_text: str, new_text: str) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_edit(path, old_text, new_text, cwd=cwd)
-
-        def _run_glob(pattern: str) -> str:
-            cwd, error = current_cwd()
-            return error or file_tools.run_glob(pattern, cwd=cwd)
-
-        def _run_list_tasks():
-            task_list = tasks.list_tasks()
-            if not task_list:
-                return "No tasks."
-            return "\n".join(
-                f"  {t.id}: {t.subject} [{t.status}]"
-                + (f" (wt:{t.worktree})" if t.worktree else "")
-                for t in task_list)
-
-        def _run_claim_task(task_id: str):
-            try:
-                return tasks.claim_task(task_id, owner=name)
-            except ValueError as exc:
-                return f"Error: {exc}"
-            except FileNotFoundError:
-                return f"Error: Task {task_id} not found"
-
-        def _run_complete_task(task_id: str):
-            try:
-                return tasks.complete_task(task_id, owner=name)
-            except ValueError as exc:
-                return f"Error: {exc}"
-            except FileNotFoundError:
-                return f"Error: Task {task_id} not found"
+        shared = shared_tools.shared_tool_definitions(name, profile="child")
 
         self.tools = [
-            {"name": "bash", "description": "Run a shell command.",
-             "input_schema": {"type": "object",
-                              "properties": {"command": {"type": "string"}},
-                              "required": ["command"]}},
-            {"name": "read_file", "description": "Read file.",
-             "input_schema": {"type": "object",
-                              "properties": {
-                                  "path": {"type": "string"},
-                                  "limit": {"type": "integer"},
-                                  "offset": {"type": "integer"}},
-                              "required": ["path"]}},
-            {"name": "write_file", "description": "Write file.",
-             "input_schema": {"type": "object",
-                              "properties": {"path": {"type": "string"},
-                                             "content": {"type": "string"}},
-                              "required": ["path", "content"]}},
-            {"name": "edit_file", "description": "Replace text in a file.",
-             "input_schema": {"type": "object",
-                              "properties": {
-                                  "path": {"type": "string"},
-                                  "old_text": {"type": "string"},
-                                  "new_text": {"type": "string"}},
-                              "required": ["path", "old_text", "new_text"]}},
-            {"name": "glob", "description": "Find files by glob pattern; ** matches recursively.",
-             "input_schema": {"type": "object",
-                              "properties": {
-                                  "pattern": {"type": "string"}},
-                              "required": ["pattern"]}},
+            shared["bash"].schema,
+            shared["read_file"].schema,
+            shared["write_file"].schema,
+            shared["edit_file"].schema,
+            shared["glob"].schema,
             {"name": "send_message",
              "description": "Send an intermediate message to 'lead' or an active subagent.",
              "input_schema": {"type": "object",
@@ -162,31 +89,16 @@ class SubagentSession:
              "input_schema": {"type": "object",
                               "properties": {"plan": {"type": "string"}},
                               "required": ["plan"]}},
-            {"name": "list_tasks",
-             "description": "List all tasks on the board.",
-             "input_schema": {"type": "object", "properties": {},
-                              "required": []}},
-            {"name": "claim_task",
-             "description": "Claim a pending task.",
-             "input_schema": {"type": "object",
-                              "properties": {"task_id": {"type": "string"}},
-                              "required": ["task_id"]}},
-            {"name": "complete_task",
-             "description": "Mark an in-progress task as completed.",
-             "input_schema": {"type": "object",
-                              "properties": {"task_id": {"type": "string"}},
-                              "required": ["task_id"]}},
+            shared["list_tasks"].schema,
+            shared["claim_task"].schema,
+            shared["complete_task"].schema,
         ]
 
         self.handlers = {
-            "bash": _run_bash, "read_file": _run_read,
-            "write_file": _run_write, "edit_file": _run_edit,
-            "glob": _run_glob,
+            **{name: shared[name].handler for name in BASE_TOOL_NAMES},
             "send_message": lambda to, content: send_message(to, content),
             "submit_plan": lambda plan: submit_plan(plan),
-            "list_tasks": _run_list_tasks,
-            "claim_task": _run_claim_task,
-            "complete_task": _run_complete_task,
+            **{name: shared[name].handler for name in TASK_TOOL_NAMES},
         }
 
         selected = selected_tool_names(tools, mode=mode, task_tools=task_tools)

@@ -92,7 +92,7 @@ def start_background_task(block, handlers: dict) -> str:
             background_results[bg_id] = str(result)
 
     with tasks.task_lock:
-        cwd, cwd_error = file_tools._agent_cwd()
+        cwd, cwd_error = file_tools.tool_cwd("agent")
         with background_lock:
             _bg_counter += 1
             bg_id = f"bg_{_bg_counter:04d}"

@@ -1,5 +1,7 @@
 """Tool snapshots preserve source ordering, closures and policy ownership."""
 
+import subprocess
+
 import pytest
 
 from agent_harness.tools import tool_registry
@@ -45,3 +47,70 @@ def test_task_listing_runs_through_actual_tool_handler(host_factory, actor):
     listed = handler()
     assert task.id in listed
     assert "List this task [pending]" in listed
+
+
+def test_tool_schema_changes_do_not_leak_to_other_callers(host_factory):
+    host = host_factory()
+    first, _ = host.assemble_tool_pool()
+    read = next(tool for tool in first if tool["name"] == "read_file")
+    read["input_schema"]["properties"]["path"]["type"] = "integer"
+    read["input_schema"]["required"].clear()
+
+    second, _ = host.assemble_tool_pool()
+    child = host.subagent.create_subagent_session("alice")
+    for tools in (second, child.tools):
+        read = next(tool for tool in tools if tool["name"] == "read_file")
+        assert read["input_schema"]["properties"]["path"] == {"type": "string"}
+        assert read["input_schema"]["required"] == ["path"]
+
+
+@pytest.mark.parametrize("owner", ["agent", "alice"])
+def test_bound_tools_follow_claim_complete_and_assignment_switch(host_factory, owner):
+    host = host_factory()
+    root = host.core.WORKDIR
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "tracked.txt").write_text("initial", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True)
+    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "commit", "-qm", "initial"], cwd=root, check=True)
+    handlers = (host.assemble_tool_pool()[1] if owner == "agent"
+                else host.subagent.create_subagent_session(owner).handlers)
+    handlers["write_file"]("actor.txt", "startup")
+
+    for name in ("first", "second"):
+        task = host.create_task(f"Work in {name}")
+        assert host.create_worktree(name, task.id).startswith("Worktree")
+        assert handlers["claim_task"](task.id).startswith("Claimed")
+        assert handlers["write_file"]("actor.txt", name).startswith("Wrote")
+        assert handlers["read_file"]("actor.txt") == name
+        assert handlers["edit_file"]("actor.txt", name, "edited").startswith("Edited")
+        assert handlers["read_file"]("actor.txt") == "edited"
+        assert "actor.txt" in handlers["glob"]("actor.*")
+        assert str(root / ".worktrees" / name) in handlers["bash"]("pwd")
+        assert handlers["complete_task"](task.id).startswith("Completed")
+        assert host.release_completed_assignment(owner)
+        assert handlers["read_file"]("actor.txt") == ("edited" if owner == "agent" else "startup")
+
+    host.tasks.assignments[owner] = {"task_id": "task_00000000", "worktree": "missing"}
+    assert handlers["write_file"]("actor.txt", "wrong").startswith("Error: Invalid task assignment:")
+    assert (root / "actor.txt").read_text(encoding="utf-8") == "startup"
+
+
+def test_child_bash_rejects_background_parameter_at_the_handler_boundary(host_factory):
+    host = host_factory()
+    child = host.subagent.create_subagent_session("alice")
+    bash = next(tool for tool in child.tools if tool["name"] == "bash")
+    assert "run_in_background" not in bash["input_schema"]["properties"]
+    result = host.call_tool_handler(child.handlers["bash"],
+                                    {"command": "touch forbidden.txt", "run_in_background": True}, "bash")
+    assert result.startswith("Error: TypeError:")
+    assert not (host.core.WORKDIR / "forbidden.txt").exists()
+
+
+@pytest.mark.parametrize("owner, label", [("agent", "task"), ("alice", "Task")])
+def test_shared_task_tools_preserve_missing_task_text(host_factory, owner, label):
+    host = host_factory()
+    handlers = (host.assemble_tool_pool()[1] if owner == "agent"
+                else host.subagent.create_subagent_session(owner).handlers)
+    for name in ("claim_task", "complete_task"):
+        assert handlers[name]("task_00000000") == f"Error: {label} task_00000000 not found"

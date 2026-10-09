@@ -1,6 +1,6 @@
 """工具 schema 与处理器映射表。
 
-工具名称与 Python 实现统一在这里映射，装配由 tool_registry 负责。
+组合 Lead 专有和共用工具，共用定义由 shared_tools 维护；装配由 tool_registry 负责。
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from .workspace import task_worktrees
 from .context import skills
 from .agents import subagent
 from .tools import file_tools
+from .tools import shared_tools
 from .runtime import scheduler
 from .tools import mcp_tools
 from .tools.tool_registry import ToolDefinition
@@ -80,19 +81,8 @@ def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
 
 
 def run_list_tasks() -> str:
-    """为主模型的 ``list_tasks`` 请求生成任务板文本。
-
-    返回：
-        每个任务一行，包含 ID、标题、状态和可选的 worktree 名称。
-        无任务时返回 ``'No tasks.'``，不修改任务记录。
-    """
-    task_list = tasks.list_tasks()
-    if not task_list:
-        return "No tasks."
-    return "\n".join(
-        f"  {t.id}: {t.subject} [{t.status}]"
-        + (f" (wt:{t.worktree})" if t.worktree else "")
-        for t in task_list)
+    """Return the shared task board text for the Lead."""
+    return shared_tools.run_list_tasks()
 
 
 def run_get_task(task_id: str) -> str:
@@ -112,36 +102,14 @@ def run_get_task(task_id: str) -> str:
         return f"Error: task {task_id} not found"
 
 def run_claim_task(task_id: str) -> str:
-    """以主 agent 的身份 ``'agent'`` 处理 ``claim_task`` 请求。
+    """Claim with Lead task ownership and the existing error text."""
+    return shared_tools.run_claim_task(task_id)
 
-    输入：
-        task_id: 主 agent 要认领的任务 ID。
-    返回：
-        成功或拒绝原因的字符串；任务不合法或缺失时转为错误文本。
-        成功时保存任务归属，并登记工具工作目录。
-    """
-    try:
-        return tasks.claim_task(task_id, owner="agent")
-    except ValueError as exc:
-        return f"Error: {exc}"
-    except FileNotFoundError:
-        return f"Error: task {task_id} not found"
 
 def run_complete_task(task_id: str) -> str:
-    """以主 agent 的身份 ``'agent'`` 处理 ``complete_task`` 请求。
+    """Complete with Lead task ownership; tasks retains validation."""
+    return shared_tools.run_complete_task(task_id)
 
-    输入：
-        task_id: 主 agent 正在处理的任务 ID。
-    返回：
-        完成结果或拒绝原因；任务不合法或缺失时转为错误文本。
-        成功时保存 ``completed``，分配记录在工作回合结束时另行释放。
-    """
-    try:
-        return tasks.complete_task(task_id, owner="agent")
-    except ValueError as exc:
-        return f"Error: {exc}"
-    except FileNotFoundError:
-        return f"Error: task {task_id} not found"
 
 def run_spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
                        task_id: str | None = None, require_plan: bool = False, tools=None) -> str:
@@ -171,39 +139,14 @@ def run_connect_mcp(name: str) -> str:
 
 # -- 工具定义 --
 
-# 模型看到工具 schema，Python 执行处理器。两张表明确列出新增的每项能力。
+# Model schemas and handlers share definitions; preserve the Lead's order.
+_SHARED = shared_tools.shared_tool_definitions("agent", profile="lead")
 BUILTIN_DEFINITIONS = [
-    ToolDefinition({"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object",
-                      "properties": {"command": {"type": "string"},
-                                     "run_in_background": {"type": "boolean"}},
-                      "required": ["command"]}},
-                   file_tools.run_agent_bash, "built-in tool 'bash'"),
-    ToolDefinition({"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object",
-                      "properties": {"path": {"type": "string"},
-                                     "limit": {"type": "integer"},
-                                     "offset": {"type": "integer"}},
-                      "required": ["path"]}},
-                   file_tools.run_agent_read, "built-in tool 'read_file'"),
-    ToolDefinition({"name": "write_file", "description": "Write content to a file.",
-     "input_schema": {"type": "object",
-                      "properties": {"path": {"type": "string"},
-                                     "content": {"type": "string"}},
-                      "required": ["path", "content"]}},
-                   file_tools.run_agent_write, "built-in tool 'write_file'"),
-    ToolDefinition({"name": "edit_file", "description": "Replace exact text in a file once.",
-     "input_schema": {"type": "object",
-                      "properties": {"path": {"type": "string"},
-                                     "old_text": {"type": "string"},
-                                     "new_text": {"type": "string"}},
-                      "required": ["path", "old_text", "new_text"]}},
-                   file_tools.run_agent_edit, "built-in tool 'edit_file'"),
-    ToolDefinition({"name": "glob", "description": "Find files matching a glob pattern; ** matches recursively.",
-     "input_schema": {"type": "object",
-                      "properties": {"pattern": {"type": "string"}},
-                      "required": ["pattern"]}},
-                   file_tools.run_agent_glob, "built-in tool 'glob'"),
+    _SHARED["bash"],
+    _SHARED["read_file"],
+    _SHARED["write_file"],
+    _SHARED["edit_file"],
+    _SHARED["glob"],
     ToolDefinition({"name": "todo_write",
      "description": "Create and manage a task list for the current session.",
      "input_schema": {"type": "object",
@@ -250,24 +193,14 @@ BUILTIN_DEFINITIONS = [
                       "required": ["task_id", "addBlockedBy"],
                       "additionalProperties": False}},
                    run_update_task, "built-in tool 'update_task'"),
-    ToolDefinition({"name": "list_tasks", "description": "List all tasks.",
-     "input_schema": {"type": "object", "properties": {}, "required": []}},
-                   run_list_tasks, "built-in tool 'list_tasks'"),
+    _SHARED["list_tasks"],
     ToolDefinition({"name": "get_task", "description": "Get full task details.",
      "input_schema": {"type": "object",
                       "properties": {"task_id": {"type": "string"}},
                       "required": ["task_id"]}},
                    run_get_task, "built-in tool 'get_task'"),
-    ToolDefinition({"name": "claim_task", "description": "Claim a pending task.",
-     "input_schema": {"type": "object",
-                      "properties": {"task_id": {"type": "string"}},
-                      "required": ["task_id"]}},
-                   run_claim_task, "built-in tool 'claim_task'"),
-    ToolDefinition({"name": "complete_task", "description": "Complete an in-progress task.",
-     "input_schema": {"type": "object",
-                      "properties": {"task_id": {"type": "string"}},
-                      "required": ["task_id"]}},
-                   run_complete_task, "built-in tool 'complete_task'"),
+    _SHARED["claim_task"],
+    _SHARED["complete_task"],
     ToolDefinition({"name": "schedule_cron",
      "description": ("Schedule a cron job. cron is 5-field: min hour dom "
                      "month dow. For one-shot reminders, compute the target "
@@ -375,6 +308,7 @@ BUILTIN_HANDLERS = {
 def builtin_definitions() -> list[ToolDefinition]:
     """提供内置工具的统一定义，供注册器装配。
 
-    返回：保持声明顺序的新列表，元素为已有 ToolDefinition，不执行工具处理器。
+    返回：保持声明顺序的新列表，共用工具含独立 schema；不执行处理器。
     """
-    return list(BUILTIN_DEFINITIONS)
+    shared = shared_tools.shared_tool_definitions("agent", profile="lead")
+    return [shared.get(entry.schema["name"], entry) for entry in BUILTIN_DEFINITIONS]
