@@ -4,10 +4,37 @@ from __future__ import annotations
 
 import json
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, ListItem, ListView, Static
+from textual.widgets import Button, Label, ListItem, ListView, OptionList, Static
+from textual.widgets.option_list import Option
+
+
+class CommandCandidates(OptionList):
+    """A display-only list that leaves keyboard focus in the editor."""
+
+    can_focus = False
+    DEFAULT_CSS = """
+    CommandCandidates { display: none; height: 4; border: none; padding: 0;
+        background: $surface; }
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.names = ()
+
+    def show_commands(self, commands):
+        names = tuple(command.name for command in commands)
+        if names != self.names:
+            self.names = names
+            self.clear_options()
+            self.add_options(Option(Text(f"{command.name}  {command.description}",
+                                         no_wrap=True, overflow="ellipsis"), id=command.name)
+                             for command in commands)
+            self.highlighted = 0 if names else None
+        self.display = bool(names)
 
 
 class ApprovalScreen(ModalScreen[str]):

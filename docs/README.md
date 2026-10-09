@@ -16,9 +16,10 @@
 | [plans/2026-10-08-统一子agent实施计划.md](plans/2026-10-08-统一子agent实施计划.md) | 统一创建与生命周期、复核修正及工作流接入扩展 | 阶段 0–6 已实施 |
 | [plans/2026-10-09-交互会话保存与恢复计划.md](plans/2026-10-09-交互会话保存与恢复计划.md) | CLI/TUI 上下文保存、`/resume` 恢复、`/delete` 清理和任务、工作目录关联 | 两阶段已实施 |
 | [plans/2026-10-09-Textual交互界面实施计划.md](plans/2026-10-09-Textual交互界面实施计划.md) | Textual 界面、共享交互驱动、事件、审批与关闭协议 | 阶段一至七已实施；真实 API 的 TUI 尚未实测 |
+| [plans/2026-10-09-03Textual命令补全实施计划.md](plans/2026-10-09-03Textual命令补全实施计划.md) | 当前前端与接口调查、`/` 候选菜单、回车执行、参数提示及职责边界 | 已实施；离线 UI 与 Linux PTY 已验证 |
 | `adr/` | 架构决策记录，`<四位序号>-<短名称>.md` | 空，预留 |
 | `plans/` | 有明确交付与完成条件的路线、里程碑 | 有内容 |
-| `research/` | 外部一手来源的调研笔记 | 空，预留 |
+| `research/` | 外部一手来源的调研笔记；实施计划的调查依据随对应计划保存 | 空，预留 |
 | `handoff/` | 独立会话的交接记录；计划实施和验收结果写回对应计划 | [2026-10-04 结构初始化](handoff/2026-10-04-structure-init-handoff.md) |
 | `guides/` | 可复现的安装、导入和操作说明 | 空，预留 |
 | `agents/` | agent 协作约定 | [issue-tracker.md](agents/issue-tracker.md)、[triage-labels.md](agents/triage-labels.md)、[domain.md](agents/domain.md) |

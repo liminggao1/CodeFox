@@ -9,9 +9,10 @@ import pytest
 pytest.importorskip("textual")
 
 from textual.widgets import Markdown, Static, TextArea
+from textual.widgets.text_area import Selection
 from textual.containers import VerticalScroll
 from agent_harness.tui.app import HarnessApp
-from agent_harness.tui.widgets import ApprovalScreen, SessionScreen
+from agent_harness.tui.widgets import ApprovalScreen, CommandCandidates, SessionScreen
 from agent_harness.interaction import ExecutionContext
 from test_interactive_runtime import response, tool, runtime_factory
 
@@ -20,6 +21,7 @@ async def wait_for(pilot, predicate):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if predicate():
+            await pilot.pause()
             return
         await pilot.pause(0.05)
     raise AssertionError("UI did not reach the expected state")
@@ -142,7 +144,7 @@ def test_tui_subagent_panel_updates_while_background_lead_is_paused(runtime_fact
         async with app.run_test(size=(100, 30)) as pilot:
             app._submit("work")
             await wait_for(pilot, lambda: child_started.is_set() and lead_started.is_set())
-            await wait_for(pilot, lambda: any(child["status"] == "working" for child in app.snapshot["subagents"]))
+            await wait_for(pilot, lambda: any(child["status"] == "working" for child in app.snapshot.get("subagents", [])))
             await pilot.press("ctrl+c")
             lead_release.set()
             await wait_for(pilot, lambda: not app.busy)
@@ -176,6 +178,269 @@ def test_tui_failed_command_finishes_status_and_accepts_next_input(runtime_facto
             await pilot.press("ctrl+d")
             await wait_for(pilot, lambda: app.runtime_closed)
     asyncio.run(exercise())
+
+
+async def command_draft(app, pilot, text):
+    editor = app.query_one("#input", TextArea)
+    editor.focus()
+    editor.load_text(text)
+    editor.move_cursor((0, len(text)))
+    await pilot.pause()
+    return editor
+
+def record_submissions(runtime, monkeypatch):
+    submissions = []
+    submit = runtime.submit
+    def record(text):
+        result = submit(text)
+        submissions.append((text, result))
+        return result
+    monkeypatch.setattr(runtime, "submit", record)
+    return submissions
+
+def test_command_menu_navigation_fill_escape_and_editor_boundaries(runtime_factory):
+    runtime, host = runtime_factory()
+    app = HarnessApp(runtime)
+    async def exercise():
+        async with app.run_test(size=(80, 25)) as pilot:
+            editor = await command_draft(app, pilot, "/")
+            panel = app.query_one(CommandCandidates)
+            assert panel.display and panel.names == ("/goal", "/resume", "/delete", "/quit")
+            assert panel.highlighted == 0 and app.focused is editor
+            await pilot.press("up")
+            assert panel.highlighted == 3 and app.focused is editor
+            await pilot.press("down", "down", "tab")
+            assert editor.text == "/resume" and not app.busy
+            assert panel.names == ("/resume",) and panel.highlighted == 0
+            await pilot.press("escape")
+            assert not panel.display and editor.text == "/resume"
+            editor.move_cursor((0, 0))
+            editor.move_cursor((0, len(editor.text)))
+            await pilot.pause(0.1)
+            assert not panel.display
+            await pilot.press("backspace")
+            assert panel.display and panel.names == ("/resume",)
+            editor.move_cursor((0, 1))
+            await pilot.pause()
+            assert not panel.display
+            await pilot.press("enter")
+            assert editor.text == "/\nresum"
+            await command_draft(app, pilot, "/goal")
+            editor.selection = Selection((0, 0), (0, 5))
+            await pilot.pause()
+            assert not panel.display
+            for text in ("中文 /goal", "/tmp/file", "C:\\tmp", "/goal\n多行"):
+                editor.load_text(text)
+                editor.move_cursor(editor.document.end)
+                await pilot.pause()
+                assert not panel.display
+            editor.load_text("你好")
+            editor.move_cursor((0, 2))
+            await pilot.press("enter")
+            assert editor.text == "你好\n"
+            await pilot.press("ctrl+l")
+            assert editor.text == "" and not panel.display
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    asyncio.run(exercise())
+
+def test_command_enter_parameters_and_raw_submission(runtime_factory, monkeypatch):
+    calls = []
+    def create(**kwargs):
+        calls.append(True)
+        return response("done")
+    runtime, host = runtime_factory(client=create)
+    monkeypatch.setattr(host, "evaluate_goal", lambda messages: None)
+    submissions = record_submissions(runtime, monkeypatch)
+    app = HarnessApp(runtime)
+    async def exercise():
+        async with app.run_test(size=(100, 30)) as pilot:
+            panel = app.query_one(CommandCandidates)
+            editor = await command_draft(app, pilot, "  /go")
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert [text for text, _ in submissions] == ["  /goal"]
+            assert editor.text == "" and not panel.display and not calls
+            await command_draft(app, pilot, "/goal")
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert len(submissions) == 2 and not calls
+            await command_draft(app, pilot, "/goal 写中文报告")
+            assert not panel.display
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert submissions[-1][0] == "/goal 写中文报告" and len(calls) == 1
+            await command_draft(app, pilot, "/goal clear")
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert not host.GOAL.snapshot()["active"] and len(calls) == 1
+            count = len(submissions)
+            await command_draft(app, pilot, "/del")
+            await pilot.press("enter")
+            assert editor.text == "/delete " and len(submissions) == count
+            assert "请输入会话 ID" in str(app.query_one("#command-hint", Static).content)
+            await pilot.press("ctrl+enter")
+            await pilot.click("#send")
+            assert editor.text == "/delete " and len(submissions) == count
+            target = runtime.session.store.create()
+            runtime.session.store.save(target)
+            await command_draft(app, pilot, "/delete " + target["id"])
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert submissions[-1][0] == "/delete " + target["id"]
+            assert target["id"] not in [entry["id"] for entry in runtime.session.store.list_sessions()[0]]
+            count = len(submissions)
+            await command_draft(app, pilot, "/resumx")
+            assert not panel.display and panel.highlighted is None
+            await pilot.press("enter")
+            assert len(submissions) == count and editor.text == "/resumx"
+            await pilot.press("escape", "up", "down", "enter")
+            assert len(submissions) == count and editor.text == "/resumx"
+            await pilot.press("ctrl+enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert submissions[-1][0] == "/resumx" and submissions[-1][1].kind == "turn"
+            await command_draft(app, pilot, "/tmp/file")
+            await pilot.click("#send")
+            await wait_for(pilot, lambda: not app.busy)
+            assert submissions[-1][0] == "/tmp/file" and len(calls) == 3
+            await command_draft(app, pilot, "/re")
+            await pilot.press("ctrl+enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert submissions[-1][0] == "/re" and len(calls) == 4
+            await command_draft(app, pilot, "/quit")
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: app.runtime_closed)
+            assert submissions[-1][0] == "/quit"
+    asyncio.run(exercise())
+
+@pytest.mark.parametrize("size", [(55, 18), (35, 8)])
+def test_command_menu_mouse_small_layout_and_modal_focus(runtime_factory, monkeypatch, size):
+    runtime, host = runtime_factory()
+    submissions = record_submissions(runtime, monkeypatch)
+    app = HarnessApp(runtime)
+    async def exercise():
+        async with app.run_test(size=size) as pilot:
+            editor = await command_draft(app, pilot, "/")
+            panel = app.query_one(CommandCandidates)
+            assert not app.query_one("#side").display
+            assert panel.region.height >= 1
+            assert panel.region.bottom <= editor.region.y
+            assert editor.region.bottom <= size[1] and app.focused is editor
+            await pilot.press("up")
+            assert panel.highlighted == 3
+            await pilot.press("down")
+            assert panel.highlighted == 0
+            assert await pilot.click(panel, offset=(1, 0))
+            await wait_for(pilot, lambda: not app.busy)
+            assert [text for text, _ in submissions] == ["/goal"] and editor.text == ""
+            await command_draft(app, pilot, "/re")
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: isinstance(app.screen, SessionScreen))
+            assert not panel.display and editor.text == ""
+            editor.load_text("/goal")
+            editor.move_cursor((0, 5))
+            count = len(submissions)
+            await pilot.press("up", "down")
+            assert len(submissions) == count
+            app.screen.query_one("#cancel").focus()
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: len(app.screen_stack) == 1)
+            assert len(submissions) == count
+            await pilot.press("ctrl+r")
+            await wait_for(pilot, lambda: isinstance(app.screen, SessionScreen))
+            await pilot.press("escape")
+            await wait_for(pilot, lambda: len(app.screen_stack) == 1)
+            await pilot.pause(0.1)
+            assert app.focused is editor and panel.display
+            assert editor.text == "/goal"
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+            assert not panel.display
+    asyncio.run(exercise())
+
+def test_command_runtime_rejection_busy_approval_and_resume_reset(runtime_factory, monkeypatch):
+    runtime, host = runtime_factory([response(tools=[tool("bash", command="printf ok")], stop="tool_use"), response()])
+    target = runtime.session.store.create()
+    target["goal"] = host.GOAL.snapshot()
+    runtime.session.store.save(target)
+    other = runtime.session.store.create()
+    other["goal"] = host.GOAL.snapshot()
+    runtime.session.store.save(other)
+    submissions = record_submissions(runtime, monkeypatch)
+    app = HarnessApp(runtime)
+    async def exercise():
+        async with app.run_test(size=(100, 30)) as pilot:
+            editor = await command_draft(app, pilot, "/go")
+            panel = app.query_one(CommandCandidates)
+            # A background wakeup may set runtime busy before the UI sees a snapshot.
+            with runtime._lifecycle:
+                runtime._busy = True
+            await pilot.press("enter")
+            assert editor.text == "/goal" and submissions[-1][1].status == "busy"
+            with runtime._lifecycle:
+                runtime._busy = False
+            await command_draft(app, pilot, "/resume " + target["id"])
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: app.generation == 2 and not app.busy)
+            await command_draft(app, pilot, "/")
+            await pilot.press("down", "escape")
+            assert not panel.display
+            app._submit("/resume " + other["id"])
+            await wait_for(pilot, lambda: app.generation == 3 and not app.busy)
+            assert panel.display and panel.highlighted == 0 and editor.text == "/"
+            app._submit("run")
+            await wait_for(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+            editor.load_text("/goal")
+            editor.move_cursor((0, 5))
+            assert not panel.display
+            count = len(submissions)
+            await pilot.press("tab", "enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert len(submissions) == count and editor.text == "/goal"
+            await pilot.pause(0.1)
+            assert panel.display
+            runtime.close()
+            app.action_command_enter()
+            assert editor.text == "/goal" and submissions[-1][1].status == "closed"
+            await wait_for(pilot, lambda: app.runtime_closed)
+    asyncio.run(exercise())
+
+def test_command_draft_survives_actual_background_wakeup(runtime_factory, monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    calls = []
+    def create(**kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            started.set()
+            assert release.wait(10)
+        return response()
+    runtime, host = runtime_factory(client=create)
+    submissions = record_submissions(runtime, monkeypatch)
+    app = HarnessApp(runtime)
+    async def exercise():
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._submit("initial")
+            await wait_for(pilot, lambda: not app.busy)
+            editor = await command_draft(app, pilot, "/goal clear")
+            host.subagent.BUS.send("child", "lead", "Background result")
+            await wait_for(pilot, lambda: started.is_set() and app.busy)
+            assert not app.query_one(CommandCandidates).display
+            count = len(submissions)
+            await pilot.press("enter")
+            assert len(submissions) == count and editor.text == "/goal clear\n"
+            await pilot.press("backspace", "ctrl+enter")
+            assert editor.text == "/goal clear" and submissions[-1][1].status == "busy"
+            release.set()
+            await wait_for(pilot, lambda: not app.busy)
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert editor.text == "" and submissions[-1][0] == "/goal clear"
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
 
 
 def test_tui_approval_waits_for_preceding_event_batches(runtime_factory):

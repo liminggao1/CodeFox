@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -11,13 +12,19 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Markdown, RichLog, Static, TextArea
 
 from ..interactive_runtime import InteractiveRuntime
-from .widgets import ApprovalScreen, SessionScreen
+from ..local_commands import LOCAL_COMMANDS, find_command
+from .widgets import ApprovalScreen, CommandCandidates, SessionScreen
 
 
 class HarnessApp(App):
     TITLE = "Agent Harness"
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
+        Binding("up", "command_up", show=False, priority=True),
+        Binding("down", "command_down", show=False, priority=True),
+        Binding("tab", "command_fill", show=False, priority=True),
+        Binding("enter", "command_enter", show=False, priority=True),
+        Binding("escape", "command_hide", show=False, priority=True),
         Binding("ctrl+enter", "send", "发送", priority=True),
         Binding("ctrl+l", "clear_input", "清空", priority=True),
         Binding("ctrl+r", "sessions", "会话", priority=True),
@@ -39,9 +46,12 @@ class HarnessApp(App):
     #events-title { height: 1; padding-left: 1; color: #efb45b; }
     #events { height: 1fr; padding: 0 1; background: #1b1e21; }
     #input { height: 5; margin-top: 1; border: solid #55595d; }
+    #command-hint { display: none; height: 1; color: #80cbc4; }
     #actions { height: 3; align-horizontal: right; }
     #actions Button { min-width: 8; margin-left: 1; }
     .compact #side { display: none; }
+    .short #input { height: 3; margin-top: 0; }
+    .short #actions { display: none; }
     Footer { background: #23272b; }
     """
 
@@ -56,12 +66,15 @@ class HarnessApp(App):
         self.runtime_closed = False
         self.approval = None
         self.snapshot = {}
+        self._hidden_command_text = None
 
     def compose(self) -> ComposeResult:
         yield Static("Agent Harness · 启动中", id="status", markup=False)
         with Horizontal(id="body"):
             with Vertical(id="conversation"):
                 yield VerticalScroll(id="chat")
+                yield CommandCandidates(id="commands")
+                yield Static(id="command-hint", markup=False)
                 yield TextArea(id="input", soft_wrap=True, placeholder="消息或 /goal、/resume 命令")
                 with Horizontal(id="actions"):
                     yield Button("停止", id="stop", disabled=True)
@@ -79,10 +92,146 @@ class HarnessApp(App):
 
     def on_resize(self, event):
         self.set_class(event.size.width < 85, "compact")
+        self.set_class(event.size.height < 16, "short")
 
     def _controls(self):
         self.query_one("#send", Button).disabled = self.busy or self.closing
         self.query_one("#stop", Button).disabled = self.turn_id is None or self.closing
+        self._refresh_commands()
+
+    # Command input decisions are local; the runtime remains the execution authority.
+    def _command_context(self):
+        if len(self.screen_stack) != 1 or self.busy or self.closing:
+            return None
+        editor = self.query_one("#input", TextArea)
+        text = editor.text
+        if (self.focused is not editor or "\n" in text or "\r" in text
+                or not editor.selection.is_empty or editor.cursor_location != (0, len(text))):
+            return None
+        stripped = text.lstrip()
+        name = stripped.split(maxsplit=1)[0] if stripped else ""
+        if not re.fullmatch(r"/[a-z]*", name):
+            return None
+        return name, find_command(name), stripped == name
+
+    def _refresh_commands(self):
+        editor = self.query_one("#input", TextArea)
+        if editor.text != self._hidden_command_text:
+            self._hidden_command_text = None
+        panel = self.query_one(CommandCandidates)
+        hint = self.query_one("#command-hint", Static)
+        context = self._command_context()
+        commands = ()
+        message = ""
+        if context and self._hidden_command_text is None:
+            name, command, in_name = context
+            if in_name:
+                commands = tuple(item for item in LOCAL_COMMANDS if item.name.startswith(name))
+                if not commands:
+                    message = "没有匹配命令；Ctrl+Enter 可发送原文"
+            elif command:
+                message = command.usage
+                if command.requires_argument and len(editor.text.split()) == 1:
+                    message = "请输入会话 ID · " + command.usage
+        panel.show_commands(commands)
+        if commands:
+            index = panel.highlighted if panel.highlighted is not None else 0
+            message = commands[index].usage
+        if hint.content != message:
+            hint.update(message)
+        hint.display = bool(message)
+        reserved = 7 if self.size.height < 16 else 13
+        panel.styles.height = max(1, min(len(commands), self.size.height - reserved))
+
+    def on_text_area_changed(self, event: TextArea.Changed):
+        self._refresh_commands()
+
+    def on_text_area_selection_changed(self, event: TextArea.SelectionChanged):
+        self._refresh_commands()
+
+    def on_descendant_focus(self, event):
+        self._refresh_commands()
+
+    def on_descendant_blur(self, event):
+        self.call_after_refresh(self._refresh_commands)
+
+    def check_action(self, action, parameters):
+        if not action.startswith("command_"):
+            return True
+        self._refresh_commands()
+        context = self._command_context()
+        if context is None:
+            return False
+        panel = self.query_one(CommandCandidates)
+        if action == "command_enter":
+            return True
+        if action == "command_hide":
+            return panel.display or self.query_one("#command-hint").display
+        return panel.display and bool(panel.names)
+
+    def action_command_up(self):
+        self.query_one(CommandCandidates).action_cursor_up()
+        self._refresh_commands()
+
+    def action_command_down(self):
+        self.query_one(CommandCandidates).action_cursor_down()
+        self._refresh_commands()
+
+    def action_command_hide(self):
+        self._hidden_command_text = self.query_one("#input", TextArea).text
+        self._refresh_commands()
+
+    def _choose_command(self, name, *, execute):
+        self._refresh_commands()
+        context = self._command_context()
+        panel = self.query_one(CommandCandidates)
+        if not context or not context[2] or name not in panel.names:
+            return
+        editor = self.query_one("#input", TextArea)
+        command = find_command(name)
+        prefix = editor.text[:len(editor.text) - len(editor.text.lstrip())]
+        editor.load_text(prefix + name + (" " if command.requires_argument else ""))
+        editor.move_cursor((0, len(editor.text)))
+        if execute:
+            self._send_draft()
+        self._refresh_commands()
+
+    def action_command_fill(self):
+        panel = self.query_one(CommandCandidates)
+        if panel.highlighted is not None:
+            self._choose_command(panel.names[panel.highlighted], execute=False)
+
+    def action_command_enter(self):
+        self._refresh_commands()
+        context = self._command_context()
+        if context is None:
+            return
+        panel = self.query_one(CommandCandidates)
+        if panel.display and panel.highlighted is not None:
+            self._choose_command(panel.names[panel.highlighted], execute=True)
+        elif context[1]:
+            self._send_draft()
+        else:
+            self.notify("没有匹配命令；Ctrl+Enter 可发送原文", severity="warning")
+
+    def on_option_list_option_selected(self, event: CommandCandidates.OptionSelected):
+        if event.option_list.id == "commands":
+            self._choose_command(event.option_id, execute=True)
+
+    def _send_draft(self):
+        editor = self.query_one("#input", TextArea)
+        words = editor.text.split()
+        command = find_command(words[0]) if words else None
+        if command and command.requires_argument and len(words) == 1:
+            editor.load_text(editor.text.rstrip() + " ")
+            editor.move_cursor((0, len(editor.text)))
+            self.notify("请输入会话 ID", severity="warning")
+            self._refresh_commands()
+            return
+        if self._submit(editor.text):
+            editor.clear()
+            self._hidden_command_text = None
+            self._refresh_commands()
 
     def _status(self, label="就绪"):
         session = self.snapshot.get("session_id") or "新会话"
@@ -104,9 +253,7 @@ class HarnessApp(App):
     def action_send(self):
         if len(self.screen_stack) != 1:
             return
-        editor = self.query_one("#input", TextArea)
-        if self._submit(editor.text):
-            editor.clear()
+        self._send_draft()
 
     def _submit(self, text):
         if not text or not text.strip():
@@ -121,7 +268,11 @@ class HarnessApp(App):
         return True
 
     def action_clear_input(self):
+        if len(self.screen_stack) != 1:
+            return
+        self._hidden_command_text = None
         self.query_one("#input", TextArea).clear()
+        self._refresh_commands()
 
     def action_sessions(self):
         if len(self.screen_stack) == 1:
@@ -195,6 +346,7 @@ class HarnessApp(App):
                         self.runtime.channel.respond(request.request_id, request.generation, decision)
                         self.approval = None
                     self.push_screen(ApprovalScreen(request), decide)
+        self._refresh_commands()
 
     async def _event(self, event):
         data = event.payload
@@ -219,6 +371,8 @@ class HarnessApp(App):
         elif kind == "assistant_message":
             await self._message("Lead", data["text"], markdown=True)
         elif kind == "session_changed":
+            self._hidden_command_text = None
+            self.query_one(CommandCandidates).show_commands(())
             await self.query_one("#chat", VerticalScroll).remove_children()
             self.query_one("#events", RichLog).clear()
             for message in data["history"]:

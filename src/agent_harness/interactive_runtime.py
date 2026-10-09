@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from . import core, goal, host, interaction
+from .local_commands import find_command
 from .session_store import InteractiveSession, SessionError, SessionStore, json_value
 
 
@@ -59,7 +60,7 @@ class InteractiveRuntime:
                 return interaction.SubmissionResult("invalid", reason="Runtime is not started")
             if self._busy:
                 return interaction.SubmissionResult("busy", reason="A turn or command is running")
-            kind = "command" if text.split()[0] in {"/goal", "/resume", "/delete", "/quit"} else "turn"
+            kind = "command" if find_command(text.split()[0]) else "turn"
             submission_id = uuid.uuid4().hex
             self._busy = True
             self._pending = (submission_id, kind, text)
