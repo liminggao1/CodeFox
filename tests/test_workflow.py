@@ -26,7 +26,7 @@ from agent_harness.workflows import workflow_demo
 
 @pytest.fixture(autouse=True)
 def deterministic_runner(monkeypatch):
-    """导入 agent.host 会连接 API runner；这些测试保持离线。"""
+    """Explicitly register the sample and select its offline runner."""
     workflow_demo.register_workflows()
     monkeypatch.setattr(workflow, "RUNNER_FACTORY",
                         lambda: workflow.SubagentRunner(workflow_demo.DemoModelClient()))
@@ -544,9 +544,11 @@ def test_host_tool_pool_ships_the_workflow_tool(host_factory) -> None:
     )
 
 
-def test_host_wires_the_workflow_runner_to_its_own_client(host_factory) -> None:
+def test_default_workflow_runner_uses_current_client_and_model(host_factory, monkeypatch) -> None:
     host = host_factory()
-
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", workflow.SubagentRunner)
+    monkeypatch.setattr(host.core, "client", object())
+    monkeypatch.setattr(host.core, "MODEL", "current-model")
     runner = host.workflow_runtime.RUNNER_FACTORY()
 
     assert isinstance(runner, workflow.SubagentRunner)

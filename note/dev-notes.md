@@ -24,6 +24,17 @@ $PY scripts/debug_pass.py                 # 端到端自检，9 项
 
 `pytest` 和自检不需要 `PYTHONPATH`（前者由 `tests/conftest.py` 注入 `src`，后者自己插入）。
 
+直接在脚本中调用 host 的主循环或工具池时，先显式初始化。初始化不请求模型或启动服务，也不覆盖已注入的 workflow runner；CLI/TUI 由 `InteractiveRuntime.start()` 自动调用。
+
+```python
+from agent_harness import host
+
+host.initialize_runtime()
+tools, handlers = host.assemble_tool_pool()
+```
+
+导入 host 时 `GOAL` 尚未创建。需要自定义目标评估器时先 `host.configure_goal(...)`，随后初始化会保留它；初始化失败后修正配置可重试。workflow demo 路由独立注册示例并选择离线 runner。
+
 ### 两者的分工
 
 |      | `pytest`                                                      | `scripts/debug_pass.py`                                           |

@@ -98,19 +98,6 @@ from .registrations import (  # noqa: F401
 )
 from .agents.recovery import RecoveryState  # noqa: F401
 
-workflow_demo.register_workflows()
-workflow_runtime.RUNNER_FACTORY = (
-    lambda: workflow_runtime.SubagentRunner(core.client, core.MODEL)
-)
-
-tool_registry.REGISTRY.configure(
-    registrations.builtin_definitions,
-    mcp_tools.discover_tools,
-    lambda: [tool_registry.ToolDefinition(
-        workflow_runtime.WORKFLOW_TOOL, workflow_runtime.run_workflow_sync, "Workflow")],
-)
-
-
 def assemble_tool_pool() -> tuple[list[dict], dict]:
     """从同一个注册器快照取得模型工具描述和处理器映射。
     返回：(tools, handlers)，分别为新列表和新字典；装配或名称冲突异常继续抛出。
@@ -119,15 +106,12 @@ def assemble_tool_pool() -> tuple[list[dict], dict]:
     return list(snapshot.tools), dict(snapshot.handlers)
 
 GOAL = None
+_initialized = False
+_initialization_lock = threading.Lock()
 
 
-def configure_goal(evaluator_model: str | None = None):
-    """创建并替换会话级目标控制器。
-
-    输入：evaluator_model 为可选评估模型；未指定时按环境变量和 core.MODEL 选择。
-    返回：新 GoalController，同时写入全局 GOAL；这里只配置评估器，不请求模型。
-    """
-    global GOAL
+def _create_goal(evaluator_model: str | None = None):
+    """Prepare a controller without publishing application state or requesting a model."""
     import os
     model = (evaluator_model
              or os.getenv("GOAL_EVALUATOR_MODEL_ID")
@@ -136,11 +120,36 @@ def configure_goal(evaluator_model: str | None = None):
     evaluator = goal_module.PromptGoalEvaluator(client=core.client, model=model)
     block_cap = int(os.getenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",
                               str(goal_module.DEFAULT_STOP_HOOK_BLOCK_CAP)))
-    GOAL = goal_module.GoalController(evaluator=evaluator, block_cap=block_cap)
+    return goal_module.GoalController(evaluator=evaluator, block_cap=block_cap)
+
+
+def configure_goal(evaluator_model: str | None = None):
+    """Explicitly replace the goal; invalid configuration leaves the old goal intact."""
+    global GOAL
+    GOAL = _create_goal(evaluator_model)
     return GOAL
 
 
-configure_goal()
+def initialize_runtime() -> None:
+    """Configure the application once, without choosing a runner or starting services.
+
+    Prepare the goal before publishing workflow/registry configuration. Failures
+    remain retryable; preserve explicitly configured goals and injected runners.
+    """
+    global GOAL, _initialized
+    with _initialization_lock:
+        if _initialized:
+            return
+        goal = GOAL if GOAL is not None else _create_goal()
+        workflow_demo.register_workflows()
+        tool_registry.REGISTRY.configure(
+            registrations.builtin_definitions,
+            mcp_tools.discover_tools,
+            lambda: [tool_registry.ToolDefinition(
+                workflow_runtime.WORKFLOW_TOOL, workflow_runtime.run_workflow_sync, "Workflow")],
+        )
+        GOAL = goal
+        _initialized = True
 
 
 def remember_after_turn(messages: list) -> None:

@@ -24,7 +24,7 @@
 | [__init__.py](__init__.py) | 标识 Python 包，不执行装配 |
 | [__main__.py](__main__.py) | `python -m agent_harness` 入口，交给 `frontends.cli.main` |
 | [core.py](core.py) | 启动目录、配置、模型客户端、常量、控制台协调器及技能资源路径 |
-| [host.py](host.py) | Lead 的 `agent_loop`；接入工具、上下文、goal、子 agent 和工作流，保留现有调用入口 |
+| [host.py](host.py) | Lead 的 `agent_loop` 与显式 `initialize_runtime`；接入工具、上下文、goal、子 agent 和工作流，保留现有调用入口 |
 | [registrations.py](registrations.py) | 组合 Lead 工具清单与专有定义，共用工具定义委托 `tools/shared_tools.py` |
 | [runtime_context.py](runtime_context.py) | 每次模型调用前，从 memory、MCP 和子 agent 状态构造上下文快照 |
 

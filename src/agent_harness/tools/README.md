@@ -11,7 +11,7 @@
 
 共用工具定义由 `shared_tools` 维护；Lead 清单在根目录 [registrations.py](../registrations.py) 组合，child 模式与白名单由 [subagent_session.py](../agents/subagent_session.py) 选择。
 `file_tools.bind_file_tools` 只绑定身份，每次调用通过 `tool_cwd` 解析当前任务目录；后台命令启动时用同一入口固定目录。
-[host.py](../host.py) 配置注册表，再向模型开放工具并调度调用。
+[host.initialize_runtime](../host.py) 显式配置注册表，再由主循环向模型开放工具并调度调用；导入 host 不配置应用。
 工具权限和审批接入 [runtime/hooks.py](../runtime/hooks.py)，不在前端重建一套检查。
 
 任务板和工作树操作由 [workspace/](../workspace/README.md) 实现，工具层通过装配暴露这些操作。

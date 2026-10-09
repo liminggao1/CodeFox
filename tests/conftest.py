@@ -62,6 +62,7 @@ def host_factory(tmp_path, monkeypatch):
         host.scheduler.cron_queue.clear()
         host.scheduler.background_tasks.clear()
         host.scheduler.background_results.clear()
+        host.initialize_runtime()
         # 记忆提取会调用模型，测试中由用例显式控制。
         if not enable_memory:
             monkeypatch.setattr(host, "remember_after_turn", lambda messages: None)

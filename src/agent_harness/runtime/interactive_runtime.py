@@ -52,6 +52,7 @@ class InteractiveRuntime:
         with self._lifecycle:
             if self._started or self._closing:
                 return
+            host.initialize_runtime()
             self._started = True
             self._thread = threading.Thread(target=self._run, name="interactive-lead", daemon=True)
             self._thread.start()

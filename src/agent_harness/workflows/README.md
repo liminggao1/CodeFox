@@ -8,8 +8,8 @@
 | [workflow_runtime.py](workflow_runtime.py) | 工作流注册、schema 校验、执行状态、`ctx.agent/parallel/pipeline/workflow`、预算、journal、锁和恢复；提供 `WorkflowTool` 与执行入口 |
 | [workflow_demo.py](workflow_demo.py) | 示例工作流和 schema、`DemoModelClient`、显式注册函数，以及 CLI 离线演示/恢复 |
 
-[host.py](../host.py) 显式注册示例、配置真实模型的 runner，并将工作流接入工具清单。
-[frontends/cli.py](../frontends/cli.py) 的 `workflow` 路由使用离线 client。
+[host.initialize_runtime](../host.py) 显式注册示例并将工作流接入工具清单，不覆盖调用方已选的 runner。
+默认 `SubagentRunner` 构造时读取当前 client/model；[frontends/cli.py](../frontends/cli.py) 的 `workflow` 路由显式注册示例并选择离线 client。
 单独导入 `workflow_runtime.py` 不会自动注册 demo。
 
 工作流 agent 步骤通过 [agents/subagent.py](../agents/subagent.py) 的统一入口执行 once 子 agent。

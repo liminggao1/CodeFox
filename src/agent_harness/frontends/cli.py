@@ -178,6 +178,7 @@ def run_cli():
 def main(argv: list[str] | None = None):
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "workflow":
+        workflow_demo.register_workflows()
         workflow_runtime.RUNNER_FACTORY = lambda: workflow_runtime.SubagentRunner(
             workflow_demo.DemoModelClient(), core.MODEL)
         asyncio.run(workflow_demo.run_demo(argv[1:]))

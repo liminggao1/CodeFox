@@ -87,6 +87,7 @@ def worktree_child() -> int:
     """在独立进程中执行 worktree 流程，此时 cwd 是 Git 仓库。"""
     import agent_harness.host as host
 
+    host.initialize_runtime()
     repo = Path.cwd()
     task = host.create_task("worktree debug")
     assert host.create_worktree("dbg", task.id).startswith("Worktree"), "create failed"
@@ -121,6 +122,7 @@ def main() -> int:
     import agent_harness.host as host
     from agent_harness.agents import goal as goal_module
 
+    host.initialize_runtime()
     host.remember_after_turn = lambda messages: None  # 保持记忆功能离线
 
     def t_tool_pool():
