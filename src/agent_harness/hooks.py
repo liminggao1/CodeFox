@@ -6,10 +6,9 @@ Hooks 位于工具处理器之外，因此权限、日志和 Stop 行为可独�
 
 from __future__ import annotations
 
-import threading
-
 from . import core
 from . import tool_registry
+from . import interaction
 
 # -- Hooks 与权限检查 --
 
@@ -42,13 +41,24 @@ def trigger_hooks(event: str, *args):
 
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
+
+
+def _confirm(block, kind):
+    context = interaction.current_context()
+    if context is None or context.origin != "frontend":
+        return f"Permission denied: interactive {kind} approval is unavailable in this execution context"
+    decision = context.channel.request_approval(
+        context, block.name, getattr(block, "id", ""), block.input)
+    return None if decision == "approve" else "Permission denied by user"
+
+
 def permission_hook(block):
     """在工具执行前检查命令、文件路径和 MCP 工具权限。
 
     输入：block 为工具请求，包含 name 和 input。
     返回：放行时为 None，拒绝时为原因字符串。
-        bash 先按子串检查拒绝列表，再在主线程询问用户；文件路径必须在启动目录内。
-        未明确允许的 MCP 工具也需主线程确认；其他线程无法交互确认，因此拒绝。
+        Shell and unknown MCP approvals require explicit frontend context.
+        File paths must remain within the startup workspace.
         任务目录的进一步限制由文件工具执行器检查。
     """
     # 权限层在分发前检查原始 tool_use，可拒绝、询问用户或放行。
@@ -59,14 +69,7 @@ def permission_hook(block):
         for pattern in DENY_LIST:
             if pattern in command:
                 return f"Permission denied: '{pattern}' is on the deny list"
-        if threading.current_thread() is not threading.main_thread():
-            return ("Permission denied: interactive shell approval is unavailable "
-                    "during an asynchronous turn")
-        core.terminal_print("\n\033[33m[permission] shell command\033[0m")
-        core.terminal_print(f"  {command}")
-        choice = core.CONSOLE.ask("  Allow? [y/N] ").strip().lower()
-        if choice not in ("y", "yes"):
-            return "Permission denied by user"
+        return _confirm(block, "shell")
     if block.name in ("read_file", "write_file", "edit_file"):
         path = block.input.get("path", "")
         if not isinstance(path, str):
@@ -75,30 +78,24 @@ def permission_hook(block):
             return "Permission denied: path is outside the workspace"
     if (block.name.startswith("mcp__")
             and tool_registry.REGISTRY.policy_for(block.name) != "allow"):
-        if threading.current_thread() is not threading.main_thread():
-            return ("Permission denied: interactive MCP approval is unavailable "
-                    "during an asynchronous turn")
-        core.terminal_print(f"\n\033[33m[permission] MCP tool: {block.name}\033[0m")
-        choice = core.CONSOLE.ask("  Allow? [y/N] ").strip().lower()
-        if choice not in ("y", "yes"):
-            return "Permission denied by user"
+        return _confirm(block, "MCP")
     return None
 
 
 def log_hook(block):
-    print(f"\033[90m[HOOK] {block.name}\033[0m")
+    core.terminal_print(f"\033[90m[HOOK] {block.name}\033[0m")
     return None
 
 
 def large_output_hook(block, output):
     if len(str(output)) > core.LARGE_OUTPUT_WARNING_CHARS:
-        print(f"\033[33m[HOOK] large output from {block.name}: "
+        core.terminal_print(f"\033[33m[HOOK] large output from {block.name}: "
               f"{len(str(output))} chars\033[0m")
     return None
 
 
 def user_prompt_hook(query: str):
-    print(f"\033[90m[HOOK] UserPromptSubmit: {core.WORKDIR}\033[0m")
+    core.terminal_print(f"\033[90m[HOOK] UserPromptSubmit: {core.WORKDIR}\033[0m")
     return None
 
 
@@ -110,7 +107,7 @@ def stop_hook(messages: list):
             tool_count += sum(1 for item in content
                               if isinstance(item, dict)
                               and item.get("type") == "tool_result")
-    print(f"\033[90m[HOOK] Stop: {tool_count} tool result(s)\033[0m")
+    core.terminal_print(f"\033[90m[HOOK] Stop: {tool_count} tool result(s)\033[0m")
     return None
 
 

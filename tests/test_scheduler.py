@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import threading
 import time
 from datetime import datetime
@@ -146,10 +147,41 @@ def test_pending_one_shot_is_requeued_after_restart(host_factory) -> None:
     host.scheduler.load_durable_jobs()
 
     assert [queued.id for queued in host.scheduler.cron_queue] == [job.id]
-    host.acknowledge_cron_jobs(host.consume_cron_queue())
+    restored = host.scheduler.scheduled_jobs[job.id]
+    host.scheduler.load_durable_jobs()
+    assert host.scheduler.cron_queue == [restored]
+    assert host.scheduler.scheduled_jobs[job.id] is restored
+    delivered = host.consume_cron_queue()
+    # Reinitialization must not requeue a delivery already being processed.
+    host.scheduler.load_durable_jobs()
+    assert not host.scheduler.cron_queue
+    host.acknowledge_cron_jobs(delivered)
     host.scheduler.scheduled_jobs.clear()
     host.scheduler.load_durable_jobs()
     assert host.scheduler.scheduled_jobs == {}
+
+
+def test_only_runtime_startup_loads_pending_cron(host_factory, monkeypatch) -> None:
+    host = host_factory()
+    job = host.schedule_job("0 9 * * *", "persist me", recurring=False)
+    host.scheduler._enqueue_due_job(job)
+    host.scheduler.scheduled_jobs.clear()
+    host.scheduler.cron_queue.clear()
+    load = host.scheduler.load_durable_jobs
+    calls = []
+    def load_once():
+        calls.append(True)
+        load()
+    monkeypatch.setattr(host.scheduler, "load_durable_jobs", load_once)
+    importlib.reload(host)
+    assert calls == [] and not host.scheduler.cron_queue
+    try:
+        host.start_runtime_services()
+        host.start_runtime_services()
+        assert calls == [True]
+        assert [queued.id for queued in host.scheduler.cron_queue] == [job.id]
+    finally:
+        host.scheduler.stop_runtime_services()
 
 
 def test_schedule_write_failure_does_not_register_job(host_factory, monkeypatch) -> None:

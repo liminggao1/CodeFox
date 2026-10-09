@@ -107,7 +107,7 @@ CLI_ACTIVE = False                  # 是否处于 CLI 模式（run_cli 里会�
 
 
 class ConsoleBroker:
-    """让普通输入和工作线程的权限确认依次使用同一个标准输入。"""
+    """The CLI adapter owns all normal and approval reads."""
     def __init__(self):
         self._lock = threading.Lock()       # 互斥锁：保证同时只有一个线程读输入
         self.reader = None                  # 可替换的输入函数（默认用内置 input）
@@ -133,6 +133,10 @@ CONSOLE = ConsoleBroker()           # 全局唯一的控制台入口
 
 def terminal_print(text: str):
     """向终端打印文本；若在工作线程且 CLI 活跃，先清行再打印，避免把用户正在输入的内容冲掉。"""
+    from . import interaction
+    if interaction.current_context() is not None:
+        interaction.publish("log", text=str(text))
+        return
     if threading.current_thread() is threading.main_thread() or not CLI_ACTIVE:
         # 主线程打印：直接输出（没有输入框冲突）
         print(text)

@@ -30,6 +30,7 @@ from pathlib import Path
 
 from . import core
 from . import subagent
+from . import interaction
 from .subagent_session import selected_tool_names
 
 try:
@@ -301,9 +302,12 @@ class SubagentRunner:
                 "\n\nReturn only one JSON object matching this schema:\n"
                 + json.dumps(schema, ensure_ascii=True, sort_keys=True)
             )
-        result = subagent.spawn_subagent(
-            f"wf-{uuid.uuid4().hex}", request, "once", role="workflow", tools=tools,
-            client=self.client, model=self.model, max_tokens=core.WORKFLOW_AGENT_MAX_TOKENS)
+        parent = interaction.current_context()
+        context = parent.delegate("workflow", "workflow") if parent else None
+        with interaction.execution_context(context):
+            result = subagent.spawn_subagent(
+                f"wf-{uuid.uuid4().hex}", request, "once", role="workflow", tools=tools,
+                client=self.client, model=self.model, max_tokens=core.WORKFLOW_AGENT_MAX_TOKENS)
         tokens = result["usage"]["tokens"]
         if result["status"] != "completed":
             raise WorkflowStepError(result["text"], tokens)
@@ -476,12 +480,20 @@ class LocalWorkflowTask:
 
     def event(self, name, **data):
         line = " ".join(f"{k}={v}" for k, v in data.items())
-        print(f"  event      {name:<18} {line}")
+        context = interaction.current_context()
+        if context is not None:
+            context.delegate("workflow").publish("workflow_event", run_id=self.run_id, event=name, data=data)
+        else:
+            print(f"  event      {name:<18} {line}")
 
     def progress_event(self, ptype, **data):
         self.progress.append({"type": ptype, **data})
         line = " ".join(f"{k}={v}" for k, v in data.items())
-        print(f"  progress   {ptype:<16} {line}")
+        context = interaction.current_context()
+        if context is not None:
+            context.delegate("workflow").publish("workflow_progress", run_id=self.run_id, phase=ptype, data=data)
+        else:
+            print(f"  progress   {ptype:<16} {line}")
 
 
 # -- 工作流原语 --

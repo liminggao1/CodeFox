@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+tui = ["textual>=8.2.8,<9"]
 
 [project.scripts]
 agent-harness = "agent_harness.cli:main"

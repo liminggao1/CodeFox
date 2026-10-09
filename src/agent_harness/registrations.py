@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from . import core
+
 import json
 
 from . import tasks
@@ -52,7 +54,7 @@ def run_create_task(subject: str, description: str = "") -> str:
         校验和存储异常继续抛给通用工具执行器处理。
     """
     task = tasks.create_task(subject, description)
-    print(f"  \033[34m[create] {task.subject}\033[0m")
+    core.terminal_print(f"  \033[34m[create] {task.subject}\033[0m")
     return f"Created {task.id}: {task.subject}"
 
 
@@ -73,7 +75,7 @@ def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
     except FileNotFoundError:
         return f"Error: Task {task_id} not found"
     dependencies = ", ".join(task.blockedBy) or "(none)"
-    print(f"  \033[34m[update] {task.subject} blockedBy: {dependencies}\033[0m")
+    core.terminal_print(f"  \033[34m[update] {task.subject} blockedBy: {dependencies}\033[0m")
     return f"Updated {task.id} blockedBy: {dependencies}"
 
 

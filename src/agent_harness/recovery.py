@@ -123,16 +123,16 @@ def with_retry(fn, state: RecoveryState):
             if "ratelimit" in name or "429" in msg:
                 state.note_rate_limit()
                 delay = retry_delay(attempt)
-                print(f"  \033[33m[429] retry {attempt + 1}/{core.MAX_RETRIES} "
+                core.terminal_print(f"  \033[33m[429] retry {attempt + 1}/{core.MAX_RETRIES} "
                       f"after {delay:.1f}s\033[0m")
                 time.sleep(delay)
                 continue
             # 捕获529服务过载错误，累计失败次数，达到阈值切换备用模型
             if "overloaded" in name or "529" in msg or "overloaded" in msg:
                 if state.note_overload():
-                    print(f"  \033[31m[529] switching to {state.current_model}\033[0m")
+                    core.terminal_print(f"  \033[31m[529] switching to {state.current_model}\033[0m")
                 delay = retry_delay(attempt)
-                print(f"  \033[33m[529] retry {attempt + 1}/{core.MAX_RETRIES} "
+                core.terminal_print(f"  \033[33m[529] retry {attempt + 1}/{core.MAX_RETRIES} "
                       f"after {delay:.1f}s\033[0m")
                 time.sleep(delay)
                 continue

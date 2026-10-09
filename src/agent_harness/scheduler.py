@@ -22,6 +22,7 @@ from . import file_tools
 from . import hooks
 from . import tasks
 from . import compaction
+from . import interaction
 
 # -- 后台任务 --
 BACKGROUND_SUMMARY_CHARS = 200
@@ -31,6 +32,7 @@ _bg_counter = 0
 background_tasks: dict[str, dict] = {}
 background_results: dict[str, str] = {}
 background_lock = threading.Lock()
+_background_threads: list[threading.Thread] = []
 
 
 def should_run_background(tool_name: str, tool_input: dict) -> bool:
@@ -54,6 +56,8 @@ def start_background_task(block, handlers: dict) -> str:
     """
     global _bg_counter
     command = block.input.get("command", block.name)
+    parent_context = interaction.current_context()
+    context = parent_context.delegate("background", "background") if parent_context else None
 
     def worker():
         """在固定的任务目录执行后台命令，并登记最终结果。
@@ -99,7 +103,15 @@ def start_background_task(block, handlers: dict) -> str:
                 "cwd": str(cwd) if cwd else None,
                 "output_id": "background_" + uuid.uuid4().hex,
             }
-    thread = threading.Thread(target=worker, daemon=True)
+    def run_worker():
+        with interaction.execution_context(context):
+            interaction.publish("background_status", task_id=bg_id, status="running")
+            worker()
+            with background_lock:
+                status = background_tasks.get(bg_id, {}).get("status", "finished")
+            interaction.publish("background_status", task_id=bg_id, status=status)
+
+    thread = threading.Thread(target=run_worker, daemon=True)
     try:
         thread.start()
     except Exception:
@@ -107,8 +119,21 @@ def start_background_task(block, handlers: dict) -> str:
             background_tasks.pop(bg_id, None)
             background_results.pop(bg_id, None)
         raise
-    print(f"  \033[33m[background] {bg_id}: {str(command)[:60]}\033[0m")
+    if context is not None:
+        with background_lock:
+            _background_threads[:] = [item for item in _background_threads if item.is_alive()]
+            _background_threads.append(thread)
+    core.terminal_print(f"  \033[33m[background] {bg_id}: {str(command)[:60]}\033[0m")
     return bg_id
+
+
+def wait_for_background_tasks():
+    with background_lock:
+        threads = list(_background_threads)
+    for thread in threads:
+        thread.join()
+    with background_lock:
+        _background_threads.clear()
 
 
 def collect_background_results() -> list[str]:
@@ -304,17 +329,18 @@ def load_durable_jobs():
     """启动时从文件恢复持久化 cron 及尚未确认交付的任务。
 
     返回：None。有效记录加入 scheduled_jobs；pending_delivery 记录同时加入队列。
-        文件缺失时不操作，读取或解析异常忽略；调用方保证只初始化一次。
+        文件缺失时不操作，读取或解析异常忽略；已登记 ID 保留内存状态。
     """
     if not _durable_path().exists():
         return
     try:
-        for item in json.loads(_durable_path().read_text(encoding="utf-8")):
-            job = CronJob(**item)
-            if not validate_cron(job.cron):
-                scheduled_jobs[job.id] = job
-                if job.pending_delivery:
-                    cron_queue.append(job)
+        with cron_lock:
+            for item in json.loads(_durable_path().read_text(encoding="utf-8")):
+                job = CronJob(**item)
+                if job.id not in scheduled_jobs and not validate_cron(job.cron):
+                    scheduled_jobs[job.id] = job
+                    if job.pending_delivery:
+                        cron_queue.append(job)
     except Exception:
         pass
 
@@ -390,14 +416,13 @@ def _enqueue_due_job(job: CronJob):
     cron_queue.append(job)
 
 
-def cron_scheduler_loop():
+def cron_scheduler_loop(stop_event):
     """按 core.CRON_POLL_SECONDS 检查到期 cron，在同一分钟内避免重复入队。
 
     返回：正常情况下持续循环。按本地时间匹配，跳过等待交付的一次性任务；
         单个任务出错时打印原因并继续处理其他任务，不在这里请求模型。
     """
-    while True:
-        time.sleep(core.CRON_POLL_SECONDS)
+    while not stop_event.wait(core.CRON_POLL_SECONDS):
         now = datetime.now()
         marker = now.strftime("%Y-%m-%d %H:%M")
         with cron_lock:
@@ -409,7 +434,7 @@ def cron_scheduler_loop():
                         _enqueue_due_job(job)
                         _last_fired[job.id] = marker
                 except Exception as e:
-                    print(f"  \033[31m[cron error] {job.id}: {e}\033[0m")
+                    core.terminal_print(f"  \033[31m[cron error] {job.id}: {e}\033[0m")
 
 
 def consume_cron_queue() -> list[CronJob]:
@@ -503,17 +528,48 @@ def run_cancel_cron(job_id: str) -> str:
 
 _runtime_services_started = False
 _runtime_services_lock = threading.Lock()
+_runtime_stop = threading.Event()
+_runtime_thread = None
 
 
-def start_runtime_services():
+def start_runtime_services(*, load_jobs=True):
     """在当前进程内只初始化一次 cron 服务。
 
     返回：None。恢复持久化任务并启动调度守护线程，之后的调用直接返回。
     """
-    global _runtime_services_started
+    global _runtime_services_started, _runtime_thread
     with _runtime_services_lock:
         if _runtime_services_started:
             return
-        load_durable_jobs()
-        threading.Thread(target=cron_scheduler_loop, daemon=True).start()
+        if load_jobs:
+            load_durable_jobs()
+        _runtime_stop.clear()
+        parent = interaction.current_context()
+        # Cron belongs to this runtime instance, not the session active at startup.
+        context = (interaction.ExecutionContext(parent.channel, None, 0,
+                                                source="cron", scope="runtime")
+                   if parent else None)
+        def run_cron():
+            with interaction.execution_context(context):
+                cron_scheduler_loop(_runtime_stop)
+        _runtime_thread = threading.Thread(target=run_cron, daemon=True)
+        _runtime_thread.start()
         _runtime_services_started = True
+
+
+def stop_runtime_services():
+    global _runtime_services_started, _runtime_thread
+    with _runtime_services_lock:
+        _runtime_stop.set()
+        if _runtime_thread is not None:
+            _runtime_thread.join()
+        _runtime_thread = None
+        _runtime_services_started = False
+
+
+def clear_runtime_jobs():
+    """Discard the old directory's in-memory schedule after stopping services."""
+    with cron_lock:
+        scheduled_jobs.clear()
+        cron_queue.clear()
+        _last_fired.clear()

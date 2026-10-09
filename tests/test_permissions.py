@@ -30,28 +30,22 @@ def test_deny_list_blocks_dangerous_commands(host_factory, command) -> None:
 
 
 def test_permission_matches_substrings_not_whitespace(
-    host_factory, monkeypatch
+    host_factory, approval_hook
 ) -> None:
     host = host_factory()
-    monkeypatch.setattr(host.CONSOLE, "ask", lambda prompt=None: "y")
-
-    assert host.permission_hook(block("bash", command="echo hello")) is None
+    assert approval_hook(host.permission_hook, block("bash", command="echo hello"), "approve") is None
     assert "deny list" in host.permission_hook(
         block("bash", command="echo sudo")
     )
 
 
-def test_only_yes_releases_the_shell_gate(host_factory, monkeypatch) -> None:
+def test_only_approval_releases_the_shell_gate(host_factory, approval_hook) -> None:
     host = host_factory()
     prompt = block("bash", command="echo hi")
 
-    for answer in ("", "no", "n", "N", "yesss"):
-        monkeypatch.setattr(host.CONSOLE, "ask", lambda prompt=None, a=answer: a)
-        assert host.permission_hook(prompt) == "Permission denied by user"
-
-    for answer in ("y", "Y", "yes", "YES"):
-        monkeypatch.setattr(host.CONSOLE, "ask", lambda prompt=None, a=answer: a)
-        assert host.permission_hook(prompt) is None
+    assert approval_hook(host.permission_hook, prompt, "deny") == "Permission denied by user"
+    assert approval_hook(host.permission_hook, prompt, "closed") == "Permission denied by user"
+    assert approval_hook(host.permission_hook, prompt, "approve") is None
 
 
 def test_non_string_shell_command_is_rejected(host_factory) -> None:
@@ -87,16 +81,15 @@ def test_scheduled_turns_cannot_ask_for_approval(host_factory) -> None:
 
     assert results == [
         "Permission denied: interactive shell approval is unavailable "
-        "during an asynchronous turn"
+        "in this execution context"
     ]
 
 
-def test_mcp_tools_default_to_confirmation(host_factory, monkeypatch) -> None:
+def test_mcp_tools_default_to_confirmation(host_factory, approval_hook) -> None:
     host = host_factory()
     call = block("mcp__deploy__status", service="web")
 
-    monkeypatch.setattr(host.CONSOLE, "ask", lambda prompt=None: "no")
-    assert host.permission_hook(call) == "Permission denied by user"
+    assert approval_hook(host.permission_hook, call, "deny") == "Permission denied by user"
 
     host.connect_mcp("deploy")
     host.assemble_tool_pool()

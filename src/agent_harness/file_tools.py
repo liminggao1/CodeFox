@@ -323,10 +323,11 @@ def run_todo_write(todos: list) -> str:
     输入：todos 为包含 content 和 status 的条目列表，也支持规范化器接受的字符串。
     返回：更新数量的确认或错误文本；成功时替换 tasks.CURRENT_TODOS，不写任务 JSON。
     """
-    global CURRENT_TODOS
     todos, error = _normalize_todos(todos)
     if error:
         return error
-    tasks.CURRENT_TODOS = todos
-    print(f"  \033[33m[todo] updated {len(tasks.CURRENT_TODOS)} item(s)\033[0m")
+    with tasks.task_lock:
+        tasks.CURRENT_TODOS = todos
+        tasks.checkpoint_lead()
+    core.terminal_print(f"  \033[33m[todo] updated {len(tasks.CURRENT_TODOS)} item(s)\033[0m")
     return f"Updated {len(tasks.CURRENT_TODOS)} todos"

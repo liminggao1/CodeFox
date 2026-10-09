@@ -96,7 +96,7 @@ def create_worktree(name: str, task_id: str) -> str:
                     f"{path} on branch '{branch}', but task binding failed: "
                     f"{exc}. Git data was retained for manual recovery.")
 
-    print(f"  \033[33m[worktree] created: {name} at {path}\033[0m")
+    core.terminal_print(f"  \033[33m[worktree] created: {name} at {path}\033[0m")
     return f"Worktree '{name}' created at {path} for task {task_id}"
 
 
@@ -168,17 +168,20 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
 
             try:
                 # 只有 Git 已移除目录后才结束 Lead 的分配，失败时保留原 cwd。
+                if tasks.lead_worktree == name:
+                    tasks.lead_worktree = None
                 if release_lead:
                     tasks.release_completed_assignment("agent")
                 for task in bound:
                     task.worktree = None
                     tasks.save_task(task)
+                tasks.checkpoint_lead()
             except Exception as exc:
                 return (f"Partial success: Worktree '{name}' was removed and "
                         f"branch '{worktrees._worktree_branch(name)}' retained, "
                         f"but task cleanup failed: {exc}. Manual recovery is required.")
 
-    print(f"  \033[33m[worktree] removed: {name}; branch retained\033[0m")
+    core.terminal_print(f"  \033[33m[worktree] removed: {name}; branch retained\033[0m")
     result = (f"Worktree '{name}' removed; branch "
               f"'{worktrees._worktree_branch(name)}' retained")
     if release_lead:

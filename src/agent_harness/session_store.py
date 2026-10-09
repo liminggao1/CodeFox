@@ -11,9 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .goal import GoalController, GoalError
+from . import interaction
 
 
-VERSION = 1
 SESSION_ID = re.compile(r"\d{8}-\d{6}-[a-f0-9]{8}")
 
 
@@ -23,6 +23,10 @@ class SessionError(Exception):
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def sessions_dir() -> Path:
+    return Path.home() / ".agent-harness" / "sessions"
 
 
 def json_value(value):
@@ -42,7 +46,8 @@ def json_value(value):
 
 class SessionStore:
     def __init__(self, workdir: Path):
-        self.directory = workdir / ".transcripts" / "sessions"
+        self.workdir = workdir.resolve()
+        self.directory = sessions_dir()
 
     def path(self, session_id: str) -> Path:
         if not SESSION_ID.fullmatch(session_id):
@@ -52,9 +57,11 @@ class SessionStore:
     def create(self) -> dict:
         session_id = (datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-")
                       + uuid.uuid4().hex[:8])
-        return {"version": VERSION, "id": session_id,
+        return {"id": session_id,
                 "created_at": utc_now(), "updated_at": utc_now(),
                 "messages": [], "events": [], "goal": None,
+                "workdir": str(self.workdir), "task_id": None,
+                "worktree": None, "todos": [],
                 "active_user_request": "(no active user request)"}
 
     def save(self, snapshot: dict) -> None:
@@ -80,14 +87,29 @@ class SessionStore:
         path = self.path(session_id)
         try:
             snapshot = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(snapshot, dict) or snapshot.get("version") != VERSION:
-                raise SessionError("Unsupported session version")
+            if not isinstance(snapshot, dict):
+                raise SessionError("Invalid session context")
             if snapshot.get("id") != session_id:
                 raise SessionError("Session ID does not match its filename")
             for key in ("created_at", "updated_at"):
                 datetime.fromisoformat(snapshot[key])
             if not isinstance(snapshot["active_user_request"], str):
                 raise SessionError("Invalid active user request")
+            if not isinstance(snapshot["workdir"], str) or not Path(snapshot["workdir"]).is_absolute():
+                raise SessionError("Invalid startup directory")
+            from . import tasks, worktrees
+            if snapshot["task_id"] is not None and (
+                    not isinstance(snapshot["task_id"], str)
+                    or not tasks.TASK_ID_PATTERN.fullmatch(snapshot["task_id"])):
+                raise SessionError("Invalid task ID")
+            if snapshot["worktree"] is not None and worktrees.validate_worktree_name(snapshot["worktree"]):
+                raise SessionError("Invalid worktree name")
+            todos = snapshot["todos"]
+            if not isinstance(todos, list) or not all(
+                    isinstance(todo, dict) and isinstance(todo.get("content"), str)
+                    and todo.get("status") in {"pending", "in_progress", "completed"}
+                    for todo in todos):
+                raise SessionError("Invalid TODO context")
             messages, events = snapshot["messages"], snapshot["events"]
             if (not isinstance(messages, list) or not isinstance(events, list)
                     or not all(isinstance(event, dict) for event in events)):
@@ -145,15 +167,17 @@ class SessionStore:
 class InteractiveSession:
     """Own the active snapshot; host mutations share a single save callback.
 
-    The CLI and background event loop call this object under agent_lock.
+    The shared interactive driver calls this object under agent_lock.
     Failed writes retain memory and retry at the next checkpoint.
     """
 
-    def __init__(self, store: SessionStore, history: list, goal_getter, report):
+    def __init__(self, store: SessionStore, history: list, goal_getter, report,
+                 context_getter=None):
         self.store = store
         self.history = history
         self.goal_getter = goal_getter
         self.report = report
+        self.context_getter = context_getter
         self.snapshot: dict | None = None
         self.dirty = False
         self.active_request = "(no active user request)"
@@ -178,15 +202,22 @@ class InteractiveSession:
         if self.snapshot is None:
             return True
         self.dirty = True
-        self.snapshot.update(messages=self.history,
-                             goal=self.goal_getter().snapshot(), updated_at=utc_now(),
-                             active_user_request=self.active_request)
         try:
+            self.snapshot.update(messages=self.history,
+                                 goal=self.goal_getter().snapshot(), updated_at=utc_now(),
+                                 active_user_request=self.active_request)
+            if self.context_getter is not None:
+                self.snapshot.update(self.context_getter())
             self.store.save(self.snapshot)
         except (OSError, ValueError, TypeError, SessionError) as exc:
-            self.report(f"[session error] Could not save {self.session_id}: {exc}")
+            error = f"Could not save {self.session_id}: {exc}"
+            if interaction.current_context() is None:
+                self.report(f"[session error] {error}")
+            else:
+                interaction.publish("session_save_error", session_id=self.session_id, error=error)
             return False
         self.dirty = False
+        interaction.publish("session_saved", session_id=self.session_id)
         return True
 
     def activate(self, snapshot: dict) -> None:

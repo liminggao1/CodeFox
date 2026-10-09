@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import core
+from . import interaction
 from . import tasks
 from . import prompts
 from . import message_content
@@ -75,7 +76,7 @@ class MessageBus:
             with self._path(to_agent).open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(msg, ensure_ascii=True) + "\n")
             self._changed.notify_all()
-        print(f"  \033[33m[bus] {from_agent} -> {to_agent}: "
+        core.terminal_print(f"  \033[33m[bus] {from_agent} -> {to_agent}: "
               f"({msg_type}) {content[:50]}\033[0m")
 
     def read_inbox(self, agent: str) -> list[dict]:
@@ -127,6 +128,16 @@ plan_gates: dict[str, str] = {}
 plan_request_ids: dict[str, str] = {}
 plan_gate_versions: dict[str, int] = {}
 subagent_lock = threading.RLock()
+_persistent_threads: list[threading.Thread] = []
+
+
+def wait_for_subagents():
+    with subagent_lock:
+        threads = list(_persistent_threads)
+    for thread in threads:
+        thread.join()
+    with subagent_lock:
+        _persistent_threads.clear()
 
 
 # -- 协议状态 --
@@ -166,25 +177,25 @@ def match_response(response_type: str, request_id: str, approve: bool,
     with subagent_lock:
         state = pending_requests.get(request_id)
         if not state:
-            print(f"  \033[31m[protocol] unknown request_id: {request_id}\033[0m")
+            core.terminal_print(f"  \033[31m[protocol] unknown request_id: {request_id}\033[0m")
             return False
         expected = {
             "shutdown": "shutdown_response",
             "plan_approval": "plan_approval_response",
         }[state.type]
         if response_type != expected:
-            print(f"  \033[31m[protocol] expected {expected}, "
+            core.terminal_print(f"  \033[31m[protocol] expected {expected}, "
                   f"got {response_type}\033[0m")
             return False
         if from_agent != state.target or to_agent != state.sender:
-            print(f"  \033[31m[protocol] {request_id} responder mismatch\033[0m")
+            core.terminal_print(f"  \033[31m[protocol] {request_id} responder mismatch\033[0m")
             return False
         if state.status != "pending":
             return False
         state.status = "approved" if approve else "rejected"
     icon = "approved" if approve else "rejected"
     color = "32" if approve else "31"
-    print(f"  \033[{color}m[protocol] {state.type} {icon} "
+    core.terminal_print(f"  \033[{color}m[protocol] {state.type} {icon} "
           f"({request_id}: {state.status})\033[0m")
     return True
 
@@ -414,6 +425,7 @@ def _execute_work(record, session):
                 record.status = "waiting_approval"
                 _wait_for_work(record, session)
         record.status = "working"
+        interaction.publish("subagent_status", name=record.name, mode=record.mode, status=record.status)
         response = session.run(record.messages)
         if not message_content.has_tool_use(response.content):
             return message_content.extract_text(response.content)
@@ -461,6 +473,7 @@ def _persistent_loop(record, session):
                     plan_request_ids.pop(record.name, None)
                     plan_gate_versions[record.name] = tasks.assignment_versions.get(record.name, 0)
             record.status = "idle"
+            interaction.publish("subagent_status", name=record.name, mode=record.mode, status=record.status)
             BUS.send(record.name, "lead",
                      "Waiting for guidance on the unfinished Task." if unfinished else "Waiting for more work.",
                      "idle_notification")
@@ -563,10 +576,25 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
         record.usage = session.usage
         session.begin_work(prompt)
         if mode == "persistent":
-            threading.Thread(target=lambda: _persistent_loop(record, session), daemon=True).start()
+            parent = interaction.current_context()
+            context = parent.delegate(name, "persistent") if parent else None
+            def run_persistent():
+                with interaction.execution_context(context):
+                    _persistent_loop(record, session)
+                    interaction.publish("subagent_status", name=name, mode=mode, status="closed", usage=dict(session.usage))
+            thread = threading.Thread(target=run_persistent, daemon=True)
+            thread.start()
+            if context is not None:
+                with subagent_lock:
+                    _persistent_threads[:] = [item for item in _persistent_threads if item.is_alive()]
+                    _persistent_threads.append(thread)
             result.update(status="started", text="Started; the runtime will deliver results and idle events.")
             return result
-        summary = _execute_work(record, session)
+        parent = interaction.current_context()
+        context = parent.delegate(name) if parent else None
+        with interaction.execution_context(context):
+            summary = _execute_work(record, session)
+            interaction.publish("subagent_status", name=name, mode=mode, status="completed", usage=dict(session.usage))
         assignment = tasks.assignments.get(name)
         if assignment and tasks.load_task(str(assignment["task_id"])).status != "completed":
             raise RuntimeError("Task is unfinished; ownership released to pending")
@@ -634,7 +662,7 @@ def run_request_shutdown(name: str) -> str:
     BUS.send("lead", name, "Finish the current step and shut down.",
              "shutdown_request",
              {"request_id": req_id})
-    print(f"  \033[35m[protocol] shutdown_request -> {name} "
+    core.terminal_print(f"  \033[35m[protocol] shutdown_request -> {name} "
           f"({req_id})\033[0m")
     return f"Shutdown requested from {name} ({req_id})"
 
@@ -689,5 +717,5 @@ def run_review_plan(request_id: str, approve: bool,
              "plan_approval_response",
              {"request_id": request_id, "approve": approve})
     icon = "approved" if approve else "rejected"
-    print(f"  \033[32m[protocol] plan {icon} ({request_id})\033[0m")
+    core.terminal_print(f"  \033[32m[protocol] plan {icon} ({request_id})\033[0m")
     return f"Plan {state.status} ({request_id})"

@@ -46,10 +46,88 @@ PYTHONPATH=src /home/gaogao/miniconda3/envs/learncc/bin/python -m agent_harness
 
 提示符 `agent-harness >>` 下输入一句话回车发送；`/goal` 看目标状态；`/resume` 列出会话，`/resume <id>` 恢复会话，`/delete <id>` 删除非活动会话；`q` 退出。**每轮都消耗额度。**
 
-首次有效交互会在启动目录 `.transcripts/sessions/` 创建一个 JSON 快照。历史追加、工具结果、压缩替换和 goal 状态都会更新同一文件；退出或 Ctrl+C 不删除它。恢复前需要当前模型回合、后台任务、子 agent 和 Lead 信箱都已结束。恢复只加载历史和 goal，任务板与仍有效的 worktree 继续使用，旧线程和 MCP 连接不会恢复。
+首次有效交互会在 WSL 用户目录 `~/.agent-harness/sessions/` 创建一个上下文文件；退出或 Ctrl+C 不删除它。
+`/resume <id>` 可从任意目录恢复历史、goal、Lead 活动任务、工作树和 TODO，并自动回到原启动目录。任务完成后继续使用原工作树。
+恢复前提、会话隔离和存储规则统一见 [README 的交互会话说明](../README.md#行为要点)。
 
 装过包（`pip install -e .`）时可省掉 `PYTHONPATH`，并用命令 `agent-harness` 代替 `python -m agent_harness`。
 本机**未安装**，走的是上面这条。
+
+### Textual 交互界面
+
+本机已在 WSL 的 `learncc` 中安装 Textual 8.2.8。先打开 WSL 终端，然后执行：
+
+```sh
+cd /mnt/d/01dpan/01project/life/learncc/agent-harness
+PYTHONPATH=src /home/gaogao/miniconda3/envs/learncc/bin/python -m agent_harness tui
+```
+
+界面仍使用项目 `.env` 中的真实模型配置，会消耗 API 额度。请在要工作的目录启动；
+会话、任务和其他运行时文件都跟随该目录。同一目录只运行一个交互进程。
+
+换环境时，在 WSL 的目标环境安装可选依赖即可；按源码运行无需安装项目包：
+
+```sh
+/home/gaogao/miniconda3/envs/learncc/bin/python -m pip install 'textual>=8.2.8,<9'
+```
+
+**对话与布局：**顶部显示会话、模型和执行状态；左侧是对话和输入框，助手回复按 Markdown 显示；
+右侧展示 goal、TODO、子 Agent、Lead 用量和工具/运行事件。回复按完整文本块交付。
+对话保留最近 200 条展示消息，事件区保留最近 1000 行；会话文件仍保存完整的运行时历史。
+终端宽度小于 85 列时默认隐藏右侧面板，可以按 F2 打开。点击对话区后用 Home/End、方向键、
+PageUp/PageDown 或鼠标滚轮查看历史。
+
+输入框支持中文和多行粘贴。Enter 换行，点击「发送」或按 Ctrl+Enter 提交。
+部分终端不能区分 Ctrl+Enter，此时使用发送按钮。空白提交会忽略。
+运行期间只保留当前草稿，不排队第二条请求；忙碌时提交被拒绝，草稿保留。
+
+| 操作 | 快捷键 / 按钮 | 行为 |
+| --- | --- | --- |
+| 发送 | Ctrl+Enter / 发送 | 提交消息或本地命令，接受后清空输入 |
+| 清空草稿 | Ctrl+L | 只清空输入框 |
+| 会话列表 | Ctrl+R | 空闲时打开会话列表 |
+| 停止回合 | Ctrl+C / 停止 | 请求停止当前回合，保留已有结果和输入草稿 |
+| 退出 | Ctrl+D | 请求关闭，等待保存与资源清理后退出 |
+| 右侧面板 | F2 | 显示或隐藏状态和事件 |
+
+**审批：**Bash 和策略要求确认的 MCP 工具会弹出来源、工具名和完整参数，选择「批准」或「拒绝」；
+Esc 表示拒绝。弹窗期间 Ctrl+C 停止回合，Ctrl+D 退出，两者都会解除审批等待。
+前台 Lead 及其同步 once 子 Agent 可以申请确认；后台 Lead、persistent 子 Agent、workflow 和
+无交互上下文的调用会直接拒绝需要确认的工具。文件路径、拒绝列表和工具白名单仍先行检查。
+
+**目标与会话：**下列命令在 CLI/TUI 中由同一个运行时处理，忙碌时拒绝新命令。
+
+| 命令 | 行为 |
+| --- | --- |
+| `/goal` | 查看目标状态，不调用主模型 |
+| `/goal <condition>` | 设置目标，并把条件交给模型执行 |
+| `/goal clear` | 清除目标 |
+| `/resume` | 列出会话；TUI 中弹出列表，选中会话并确认即可恢复 |
+| `/resume <id>` | 恢复指定会话的上下文，包括 goal、任务、工作目录和 TODO |
+| `/delete <id>` | 删除非活动会话；列表也提供删除按钮 |
+| `/quit` | 空闲时请求退出；执行期间使用 Ctrl+D |
+
+会话保存位置和恢复限制见上方「真实 API 交互」。恢复会重建对话显示，清空当前事件区和 Lead 用量。
+用量只统计当前激活期间 Lead 主模型的输入/输出 token 和请求数；不含 goal、memory、压缩、
+子 Agent 或 workflow 的调用，也不从历史恢复累计用量。
+
+**停止与退出：**停止是合作式请求。等待审批会立即解除；已开始的同步模型、重试、工具、
+goal 评估或记忆抽取需要先返回，再到检查点停止。已完成的文件操作和记忆写入保留。
+它不递归取消独立子 Agent 或 workflow。停止后暂停后台结果自动唤醒 Lead，下一次显式提交恢复。
+子 Agent 状态仍会更新侧栏。主模型报上下文过长错误时，已请求停止不会再启动恢复摘要；
+原始模型异常仍报告失败。cron 通知属于当前运行实例，恢复会话后仍显示新的调度错误。
+Ctrl+D 进入「正在关闭」，拒绝新输入，停止 cron，清理 shell，等待所属后台线程退出并保存会话；
+关闭期间界面继续响应。保存失败会报告错误，TUI 退出码为 1。
+
+**离线验证：**下面使用 fake client 和 Textual 无头测试，不联网；实际 TUI 启动仍使用真实 API。
+
+```sh
+cd /mnt/d/01dpan/01project/life/learncc/agent-harness
+/home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q tests/test_interaction.py tests/test_interactive_runtime.py tests/test_tui_integration.py
+```
+
+实现与验收记录见 [Textual 实施计划](../docs/plans/2026-10-09-Textual交互界面实施计划.md)。
+当前已完成离线集成验证及 Linux PTY 的中文多行粘贴、发送和退出验证；真实 API 的 TUI 交互尚未实测。
 
 ## 二、离线自检：改完先跑这个
 
@@ -602,39 +680,22 @@ journal 的方法都是工作流内部调用。恢复通过 CLI 的 `workflow re
 
 #### 15. 启动与 `/goal` 拦截
 
-选择「Agent 交互（真实 API）」。仅输入 `/goal`、`/goal clear` 和 `q` 可观察本地命令；
-普通问题直接交给模型；/goal <条件> 保存目标后，也把条件交给模型执行。
-`/goal` 是 CLI 识别的用户命令，不是 LLM 工具。目标控制器方法由 CLI 或主循环调用。
+CLI 和 Textual 都将输入交给 [InteractiveRuntime](../src/agent_harness/interactive_runtime.py)。
+`/goal` 是共享驱动识别的本地命令，不是 LLM 工具。查询和清除只交付命令结果；
+设置条件后继续执行关联模型回合，CLI 等到该回合结束才恢复普通输入。
 
-**启动与读取输入：**
+| 断点 / 入口 | 实现位置 | 观察内容 |
+| --- | --- | --- |
+| `CLIAdapter.run` / `pump` | [cli.py](../src/agent_harness/cli.py) | 唯一输入读取者；普通输入和审批决定 |
+| `InteractiveRuntime._run` | [interactive_runtime.py](../src/agent_harness/interactive_runtime.py) | 启动服务，串行处理前台输入和后台唤醒 |
+| `InteractiveRuntime._command` | 同上 | goal 查询、清除和设置；会话列表、恢复和删除 |
+| `InteractiveRuntime._execute` | 同上 | hook、历史更新、会话记录、调用 host 和一次性回合结束 |
+| `agent_loop` | [host.py](../src/agent_harness/host.py) | 模型、工具、停止检查、goal 和 memory 收尾 |
+| `CLIAdapter._render_events` | [cli.py](../src/agent_harness/cli.py) | 单独的输出线程，始终不读取输入 |
+| `HarnessApp.consume` | [tui/app.py](../src/agent_harness/tui/app.py) | UI 线程消费普通事件与审批请求 |
 
-| 顺序 | 函数                     | 调用身份        | 调用 / 触发位置                                                                                                | 实现位置                                                   | 作用                           |
-| ---- | ------------------------ | --------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------ |
-| 1    | `run_cli`                | CLI 入口        | [cli.py:120](../src/agent_harness/cli.py#L120)                                                                 | [cli.py:50](../src/agent_harness/cli.py#L50)               | 启动交互会话                   |
-| 2    | `start_runtime_services` | 内部·跨文件     | [cli.py:58](../src/agent_harness/cli.py#L58)                                                                   | [scheduler.py:502](../src/agent_harness/scheduler.py#L502) | 恢复定时任务并启动调度线程     |
-| 3    | `async_event_loop`       | 线程入口·跨文件 | [cli.py:70](../src/agent_harness/cli.py#L70)（线程目标）→ [cli.py:73](../src/agent_harness/cli.py#L73)（启动） | [host.py:505](../src/agent_harness/host.py#L505)           | 后台线程轮询事件并唤醒主 agent |
-| 4    | `handle_goal_command`    | CLI 本地命令    | [cli.py:85](../src/agent_harness/cli.py#L85)                                                                   | [cli.py:22](../src/agent_harness/cli.py#L22)               | 读取输入后识别 /goal 命令      |
-
-**`/goal` 的三个分支：**
-
-| 顺序 | 函数                      | 调用身份    | 调用 / 触发位置                              | 实现位置                                         | 作用                                  |
-| ---- | ------------------------- | ----------- | -------------------------------------------- | ------------------------------------------------ | ------------------------------------- |
-| 1    | `GoalController.status`   | 内部·跨文件 | [cli.py:37](../src/agent_harness/cli.py#L37) | [goal.py:326](../src/agent_harness/goal.py#L326) | /goal 查看状态，跳过主循环            |
-| 2    | `GoalController.clear`    | 内部·跨文件 | [cli.py:41](../src/agent_harness/cli.py#L41) | [goal.py:307](../src/agent_harness/goal.py#L307) | /goal clear 清除目标，跳过主循环      |
-| 3    | `GoalController.set_goal` | 内部·跨文件 | [cli.py:44](../src/agent_harness/cli.py#L44) | [goal.py:275](../src/agent_harness/goal.py#L275) | /goal <条件> 设置目标，随后进入主循环 |
-
-**普通问题或设置目标后：**
-
-| 顺序 | 函数                    | 调用身份      | 调用 / 触发位置                              | 实现位置                                         | 作用                     |
-| ---- | ----------------------- | ------------- | -------------------------------------------- | ------------------------------------------------ | ------------------------ |
-| 1    | `trigger_hooks`         | 内部·跨文件   | [cli.py:91](../src/agent_harness/cli.py#L91) | [hooks.py:30](../src/agent_harness/hooks.py#L30) | 触发 UserPromptSubmit    |
-| 2    | `agent_loop`            | 主循环·跨文件 | [cli.py:95](../src/agent_harness/cli.py#L95) | [host.py:260](../src/agent_harness/host.py#L260) | 处理已写入历史的用户请求 |
-| 3    | `print_turn_assistants` | 内部·跨文件   | [cli.py:96](../src/agent_harness/cli.py#L96) | [host.py:491](../src/agent_harness/host.py#L491) | 展示本轮助手回复         |
-
-`async_event_loop` 是在线程中运行的普通函数，不是 asyncio 协程。
-
-
-行号会随源码变化；链接不对时按函数名搜索。
+旧 `async_event_loop` 和 `print_turn_assistants` 已移除。执行线程只发布普通数据，adapter 负责呈现。
+TUI 操作见[怎么跑](#textual-交互界面)，调试源码 TUI 可将现有交互配置的 `args` 改为 `["tui"]`。
 
 ### 用法要点
 
@@ -675,7 +736,7 @@ Remote-WSL 已让断点自动生效，一般不需要。真要 attach：在 WSL 
 - **worktree 清理只供 Lead 模型请求**，使用规则和分配释放时机见[第 8 节](#8-任务与-worktree-绑定)。
   工具只接受名称，不提供 `discard_changes`；内部 Python 接口仍允许显式丢弃改动。
 - **运行目录以 `core.WORKDIR` 为准**。任务、worktree、memory、workflow、transcript 和工具结果目录
-  都在调用时从它解析；实际使用仍应在目标目录启动进程。调试时不要修改旧的 `host.WORKDIR`。
+  都在调用时从它解析；首次交互使用当前启动目录，恢复时由后端切回原目录。会话上下文的用户目录位置见 README。调试时不要修改旧的 `host.WORKDIR`。
 - **`.env` 与启动目录无关**。`load_dotenv()` 从包文件位置逐级向上查找，所以在任何目录启动
   都能读到项目根的 `.env`。
 
@@ -689,8 +750,8 @@ Remote-WSL 已让断点自动生效，一般不需要。真要 attach：在 WSL 
   ```
 - **断点是空心圆（不命中）**：多半是 frozen modules 或源码路径不一致。五个配置都带了
   `pythonArgs: ["-Xfrozen_modules=off"]`（Python 3.11+ 必需）；路径问题请确认开的是 WSL 窗口。
-- **`cli.py` 会起一个 daemon 线程** `async_event_loop`（cron / 子 agent）。断点若打在里面可能被
-  非用户输入触发，排查交互流程时只打在 `agent_loop` 及其下游。
+- **共享驱动线程** `interactive-lead` 同时执行用户回合和后台唤醒回合；`cli-output` 只呈现事件。
+  排查输入来源时观察 `InteractiveRuntime._execute` 的 `kind`，再沿 `agent_loop` 跟踪执行。
 - **集成终端里方向键/中文输入偶尔异常**，改用「外部终端」那条配置。
 
 ## 五、未覆盖（需要真实 API）

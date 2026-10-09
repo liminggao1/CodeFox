@@ -1,60 +1,45 @@
-# agent-harness 术语表与项目上下文
+# agent-harness 术语表
 
-## Glossary
+本文统一项目概念的名称。运行方式、代码布局和实现进度分别见 [README](README.md) 与 [文档索引](docs/README.md)。
 
-- **host**：`host.py`，把模型能做的事集中在一起；入口在 `cli.py`。
-- **子 agent**：Lead 通过 `spawn_subagent` 创建的独立 agent；统一名称下包含两种固定生命周期。
-- **once**：完成一次委派后结束，创建工具同步返回最终结果；可执行多个模型回合，不接收后续消息。
-- **persistent**：跨委派保留历史，通过信箱接收后续工作；生命周期限当前进程。完成任务只释放分配，不停止实例。
-- **assignment**：tasks 管理的执行者与任务目录分配；认领时建立，最终回答后释放已完成任务，失败/关闭时释放未完成归属。
-- **workflow runtime**：`workflow_runtime.py`，可 resume 的多 agent 工作流；每次 `agent()` 调用进 journal。
-- **goal**：`goal.py`，接在 agent 循环的 Stop 边界；模型不再请求工具时决定放行还是继续。
-- **交互会话**：从第一次有效用户交互创建的持久化 Lead 对话上下文，保存于启动目录 `.transcripts/sessions/<id>.json`；可用 `/resume <id>` 恢复。
-- **runner**：`SubagentRunner`，将工作流步骤接入统一子 agent 的 adapter；真实客户端与离线 DemoModelClient 都经过同一 once 执行路径。
-- **journal**：workflow 按调用键记录结果与 token 用量；resume 命中缓存时不重复计费。
-- **WORKDIR**：运行时状态目录的基准，取启动时的 `Path.cwd()`；与随包的 `skills/` 相对。
+## 交互与执行
 
-## Scope
+**Lead（主 agent）**：直接与用户交互，并组织工具执行和子 agent 工作的 agent。
 
-一个本地 code agent 运行环境：提供 agent 主循环、内置工具、团队协作、工作流运行时与目标
-控制，打包成可安装、可继续开发的 Python 包。目标是可长期演进的本地 agent harness，
-保存完整机制，不做裁剪。
+**会话**：用户开始交互后形成的一段可持续恢复的对话，可以包含多轮问答。
+当前会话是 CLI 正在使用的会话；退出或切换不会删除已保存的上下文。
 
-## Current State
+**上下文**：会话继续交互所需的信息，包括消息历史、目标、TODO 和工作目录关联。
+叙述会话保存与恢复时统一使用“上下文”，不另称“快照”或“会话数据”。
 
-- 结构：`src/agent_harness/`（源码 + 包内 `skills/`）、`scripts/`、`tests/`、`docs/`、`note/`。
-- 运行：本地以源码方式运行，环境约定见 `AGENTS.md`；通用安装步骤见 `note/env-setup.md`。
-- 验证：完整离线测试；workflow `demo` / `resume` 离线运行；离线自检 9 项。
-- 已验证：fake 模型驱动的真实持久线程、跨任务目录/历史、通信和关闭；离线自检包含两种子 agent 模式。
-- 未实测：真实 API 交互问答、memory 抽取。
-- 不做打包发布，不引入 linter/formatter。
+**回合**：一次用户请求引发的 agent 执行过程，可包含多次模型调用和工具执行。
+一个会话可以包含多个回合。
 
-## Layout
+**目标（goal）**：当前请求需要满足的结束条件。
 
-| 路径 | 内容 |
-| --- | --- |
-| `src/agent_harness/host.py` | 集成宿主：agent 主循环、上下文刷新、模块接线 |
-| `src/agent_harness/core.py` | 共享配置：启动目录、client、模型 id、常量 |
-| `src/agent_harness/tasks.py` | 任务板：任务、依赖、认领/完成、assignment 注册表 |
-| `src/agent_harness/worktrees.py` | Git worktree 路径、注册表和 Git 调用 |
-| `src/agent_harness/task_worktrees.py` | 任务与 Git worktree 的绑定和移除 |
-| `src/agent_harness/skills.py` | 技能加载 |
-| `src/agent_harness/prompts.py` | 系统提示词拼装 |
-| `src/agent_harness/file_tools.py` | 基础工具：bash / 文件 / glob / todo |
-| `src/agent_harness/hooks.py` | Hooks 与权限检查 |
-| `src/agent_harness/subagent.py` | 统一子 agent 创建、生命周期和通信协议 |
-| `src/agent_harness/compaction.py` | 分层上下文压缩 |
-| `src/agent_harness/recovery.py` | 重试与错误恢复 |
-| `src/agent_harness/scheduler.py` | 后台任务与 cron 调度 |
-| `src/agent_harness/mcp_tools.py` | MCP 工具接入 |
-| `src/agent_harness/registrations.py` | 工具 schema 与 handler 表 |
-| `src/agent_harness/workflow_runtime.py` | 工作流运行时：定义、journal 缓存、预算、resume、并行 agent |
-| `src/agent_harness/workflow_demo.py` | 运行时之外的示例编排和离线模型客户端 |
-| `src/agent_harness/goal.py` | 目标层：GoalController + PromptGoalEvaluator |
-| `src/agent_harness/memory_runtime.py` | memory 运行时：相关记忆选取与抽取 |
-| `src/agent_harness/runtime_context.py` | RuntimeContext：每次模型调用前构造的只读运行时快照 |
-| `src/agent_harness/tool_registry.py` | ToolRegistry：内置、MCP 和 Workflow 工具的装配 seam |
-| `src/agent_harness/message_content.py` | 共享文本提取和工具请求判断；不依赖生命周期 |
-| `src/agent_harness/subagent_session.py` | SubagentSession：不拥有 mailbox 或线程生命周期的执行 adapter |
-| `src/agent_harness/llm_client.py` | 客户端 shim：Anthropic Messages / OpenAI Responses 双协议 |
-| `src/agent_harness/cli.py` | 入口：交互 + `/goal` + workflow demo |
+**子 agent**：由 Lead 委派工作的独立 agent，有一次性和持久两种模式。
+统一称“子 agent”，不另称“队友”或“子代理”。
+
+**一次性子 agent（once）**：完成一次委派后结束的子 agent，不接收后续委派。
+
+**持久子 agent（persistent）**：在当前进程中保留历史、可接收后续委派的子 agent。
+任务完成不等于子 agent 结束。
+
+## 任务与目录
+
+**任务**：任务板中可认领、可完成的工作单元，可带有依赖和工作树关联。
+
+**任务分配（assignment）**：执行者与其当前任务的关联。
+
+**启动目录（WORKDIR）**：会话开始时所在的目录，也是该会话本地运行记录的基准目录。恢复会话时回到它的原启动目录。
+
+**工作目录**：文件和命令工具执行当前工作的目录，可以是启动目录或工作树。
+
+**工作树（worktree）**：同一 Git 仓库中用于隔离任务文件改动的独立检出目录。
+
+## 工作流
+
+**工作流（workflow）**：由程序组织步骤、agent 调用和预算的执行流程。
+工作流恢复与交互会话恢复是不同操作。
+
+**调用记录（journal）**：工作流保存的调用结果和用量，供恢复时复用已完成调用。

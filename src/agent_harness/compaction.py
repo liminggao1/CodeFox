@@ -526,7 +526,7 @@ def compact_history(messages: list, active_request: str, *, client=None,
     # 把完整历史写入转录文件（落盘归档，原始对话可追溯），返回保存路径
     transcript = write_transcript(messages)
     # 青色打印转录文件保存位置，方便用户事后查找
-    print(f"  \033[36m[compact] transcript saved: {transcript}\033[0m")
+    core.terminal_print(f"  \033[36m[compact] transcript saved: {transcript}\033[0m")
     # 调用模型生成历史摘要（提炼关键事实，供压缩后的上下文参考）
     tail_start = _tail_start(messages) if preserve_tail else len(messages)
     options = {"client": client, "model": model} if client is not None else {}
@@ -567,7 +567,7 @@ def _reactive_history(messages: list, active_request: str, *, client=None,
     """
     # 将完整原始对话落盘归档，保留完整可追溯记录
     transcript = write_transcript(messages)
-    print(f"  \033[31m[reactive compact] transcript saved: {transcript}\033[0m")
+    core.terminal_print(f"  \033[31m[reactive compact] transcript saved: {transcript}\033[0m")
     # 按配置保留最近消息作为对话尾部。
     tail_start = _tail_start(messages)
     options = {"client": client, "model": model} if client is not None else {}

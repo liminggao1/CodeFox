@@ -16,6 +16,7 @@ cp .env.example .env         # 填好 key
 ```sh
 # 交互会话（调用真实 API，读 .env）
 agent-harness
+agent-harness tui            # Textual 界面，需安装 tui 可选依赖
 
 # 离线演示工作流：fake client，不联网
 agent-harness workflow demo
@@ -27,15 +28,23 @@ agent-harness workflow resume
 ```sh
 export PYTHONPATH=src        # Windows PowerShell: $env:PYTHONPATH="src"
 python -m agent_harness
+python -m agent_harness tui
 python -m agent_harness workflow demo
 python -m agent_harness workflow resume
 ```
+
+Textual 的本机安装、启动、快捷键、审批和会话操作见
+[开发笔记：Textual 交互界面](note/dev-notes.md#textual-交互界面)。包安装方式可使用
+`pip install -e ".[dev,tui]"`；默认 CLI 和离线 workflow 不加载 Textual。
 
 ## 目录
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/agent_harness/cli.py` | 入口：交互循环 + `/goal`、`/resume`、`/delete` 本地处理 + workflow demo |
+| `src/agent_harness/cli.py` | 入口路由与 CLI adapter；唯一标准输入读取者，呈现事件和审批 |
+| `src/agent_harness/interactive_runtime.py` | CLI/TUI 共用的输入、命令、串行 Lead 回合、会话切换、停止与关闭 |
+| `src/agent_harness/interaction.py` | 前端无关的事件通道、审批关联、执行上下文与回合结果 |
+| `src/agent_harness/tui/` | Textual 界面、多行输入、审批与会话弹窗；只维护显示状态 |
 | `src/agent_harness/__main__.py` | `python -m agent_harness` 入口 |
 | `src/agent_harness/llm_client.py` | 客户端 shim：Anthropic Messages 或 OpenAI Responses 双协议 |
 | `src/agent_harness/host.py` | 集成宿主：agent 主循环 + 上下文刷新 + 把各模块接线起来；状态路径由各模块按 `core.WORKDIR` 实时解析，换 cwd 无需重新绑定 |
@@ -61,7 +70,7 @@ python -m agent_harness workflow resume
 | `src/agent_harness/workflow_runtime.py` | 工作流运行时：journal、预算、resume、并行 agent |
 | `src/agent_harness/workflow_demo.py` | 保存的示例工作流、schema 与离线 DemoModelClient；由 host/CLI 显式接线 |
 | `src/agent_harness/goal.py` | 目标层：GoalController / PromptGoalEvaluator |
-| `src/agent_harness/session_store.py` | 本地交互会话的一文件快照、原子保存、读取、列出和删除 |
+| `src/agent_harness/session_store.py` | 本地会话上下文的原子保存、读取、列出和删除，每个会话一个文件 |
 | `src/agent_harness/skills/` | 技能资产（随包分发） |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
 | `tests/` | 离线测试，按模块拆分（协议、任务、压缩、调度、权限、编码、技能等） |
@@ -70,21 +79,23 @@ python -m agent_harness workflow resume
 | `tmp/` | 本地临时文件，不入库（需要时手动 `mkdir tmp`） |
 | `.vscode/` | VS Code 调试配置（launch/settings/extensions） |
 | `AGENTS.md` | 本仓库的 agent 约定：环境、命令、编码、不变量 |
-| `GLOSSARY.md` | 项目术语表，另含范围、现状与布局 |
+| `GLOSSARY.md` | 项目术语表：会话、上下文、任务、工作目录等概念的统一名称 |
 | `pyproject.toml` | 元数据、依赖、console 入口、pytest 配置 |
 
 ## 行为要点
 
 - **资源归属**：运行时状态（`.tasks` / `.memory` / `.runtime` / `.mailboxes` / `.worktrees` /
-  `.scheduled_tasks.json` / `.transcripts` / `.task_outputs`）跟随**启动目录**；`skills/` 随包分发。
+  `.scheduled_tasks.json` / `.transcripts` / `.task_outputs`）跟随**当前会话的启动目录**；会话上下文统一存放在用户目录 `~/.agent-harness/sessions/`；`skills/` 随包分发。
 - **子 agent**：统一用 `spawn_subagent(name, prompt, mode)` 创建；模式、通信和后续任务由模型决定。
   能力与生命周期见 [调试笔记第 9 节](note/dev-notes.md#9-统一子-agent-生命周期与协议)。
 - **工作流步骤**：`ctx.agent` 通过同一入口执行 once 子 agent，默认开放五项基础工具；
   `tools=[]` 只处理文本，名单可限制工具。预算、格式重试与缓存恢复仍由工作流管理，见 [调试笔记第 12 节](note/dev-notes.md#12-工作流单次-agent-调用)。
 - **goal 接在 Stop 边界**：模型不再请求工具时先问目标控制器，返回 `block` 就补一条
   `[Goal still active]` 消息，继续同一条循环。
-- **交互会话**：第一次有效用户交互创建 `.transcripts/sessions/<id>.json`，每次历史变化都保存；`/resume` 列出会话，`/resume <id>` 恢复历史和 goal，`/delete <id>` 删除非活动会话。
-- **会话切换**：恢复前必须没有正在运行或待交付的后台任务、子 agent 或 Lead 信箱事件；当前会话先保存，失败则不切换。旧线程和连接不恢复，任务板和有效 worktree 记录继续保留。
+- **交互会话**：第一次有效用户交互创建 `~/.agent-harness/sessions/<id>.json`，历史、goal、任务关联、工作目录和 TODO 变化都更新同一文件；`/resume` 列出会话，`/resume <id>` 恢复上下文，`/delete <id>` 删除非活动会话。CLI 与 TUI 共用后端命令。
+- **会话切换**：可从任意目录启动，按 ID 恢复后自动回到原启动目录，工具继续使用原任务工作树。恢复前必须没有正在运行或待交付的后台任务、子 agent、Lead 信箱事件或定时任务结果；先校验目标，再保存当前上下文，失败不切换。跨目录切换时停止旧目录的调度，加载原目录的持久化定时任务，旧目录的非持久化定时任务不保留。Lead 任务按会话归属隔离，切换和退出保留未完成任务；完成任务后会话继续使用原工作树，成功移除工作树后回到启动目录。原目录不存在、任务归属、绑定或工作树失效时拒绝恢复，旧线程和连接不恢复。
+- **会话格式**：只维护一种 JSON 上下文格式，不保存版本号；读取时校验必要字段，包括启动目录、任务 ID、工作树名称和 TODO。缺少必要字段的文件提示错误并保留。
+- **旧存储位置**：原启动目录的 `.transcripts/sessions/` 不再扫描，不自动迁移或删除。其中必要字段齐全的会话文件可手动移入 `~/.agent-harness/sessions/`；目录移动后的恢复不支持。
 - **响应有效性**：Responses 失败状态和非法、截断的工具调用会交付明确错误；不执行部分工具。
 - **历史压缩**：失败保留原历史，自动或手动失败后继续主请求；真正超限时只尝试一次被动恢复。
 - **后台结果**：超过 200 字符的通知保留全文路径，全文随启动目录保存；绑定 worktree 的任务仍可通过 `read_file` 读取运行时归档，保存失败后整批等待重试。
@@ -117,6 +128,9 @@ python -m pytest -q
 - `tests/test_shared_session.py`：共享执行、截断与上下文恢复。
 - `tests/test_subagent_options.py`：工具白名单、依赖注入及模型/摘要用量计数。
 - `tests/test_worktree_cleanup.py`：Lead 同轮清理、目录切换，以及拒绝和失败后的分配保留。
+- `tests/test_interaction.py`：事件顺序与数据副本、审批关联、来源权限、停止和关闭解除等待。
+- `tests/test_interactive_runtime.py`：实际共享驱动、命令/会话、四种回合结果、停止边界、cron 确认、后台交付和 CLI 读取归属。
+- `tests/test_tui_integration.py`：无头界面的中文多行对话、审批、停止、恢复、窄屏和滚动；未安装 Textual 时跳过。
 
 离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、子 agent），说明见
 [note/dev-notes.md](note/dev-notes.md)：

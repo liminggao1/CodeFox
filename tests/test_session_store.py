@@ -76,3 +76,17 @@ def test_save_failure_keeps_dirty_context_for_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(session.store, "save", real_save)
     assert session.save()
     assert not session.dirty
+
+
+@pytest.mark.parametrize("field,value", [
+    ("workdir", "relative"), ("task_id", "unknown"),
+    ("worktree", "../outside"), ("todos", [{"content": "verify", "status": "unknown"}]),
+])
+def test_invalid_context_fields_are_rejected(tmp_path, field, value):
+    session, _, _, _ = make_session(tmp_path)
+    session.record("goal_query")
+    saved = session.store.load(session.session_id)
+    saved[field] = value
+    session.store.save(saved)
+    with pytest.raises(SessionError):
+        session.store.load(session.session_id)

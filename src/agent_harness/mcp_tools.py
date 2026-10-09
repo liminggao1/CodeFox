@@ -139,7 +139,7 @@ def connect_mcp(name: str) -> str:
     mcp_client = factory()
     mcp_clients[name] = mcp_client
     tool_names = [tool["name"] for tool in mcp_client.tools]
-    print(f"  \033[31m[mcp] connected: {name} -> {tool_names}\033[0m")
+    core.terminal_print(f"  \033[31m[mcp] connected: {name} -> {tool_names}\033[0m")
     return (f"Connected to MCP server '{name}'. "
             f"Discovered {len(mcp_client.tools)} tools: {', '.join(tool_names)}")
 

@@ -13,7 +13,8 @@
 - 改动后除 `python -m pytest -q` 外，再跑 `python scripts/debug_pass.py`（离线端到端自检），
   操作说明见 `note/dev-notes.md`。
 - 运行时状态（`.tasks` / `.memory` / `.runtime` / `.mailboxes` / `.worktrees` / `.transcripts`
-  / `.task_outputs` / `.scheduled_tasks.json`）跟随**启动目录**；`skills/` 随包，位于
+  / `.task_outputs` / `.scheduled_tasks.json`）跟随**当前会话的启动目录**；`/resume` 可切回原目录。
+  会话上下文统一存放在 `~/.agent-harness/sessions/`；`skills/` 随包，位于
   `src/agent_harness/skills`。
 - 代码保持现有风格与分段注释：不做异步化重构，不引入 linter/formatter。
 
@@ -40,7 +41,7 @@
 - `.scratch/`：本地 Markdown 议题与规格的存放目录。
 - `tmp/`：本地临时文件，不入库（需要时手动创建）。
 - `note/`：环境、操作等个人笔记。
-- `GLOSSARY.md`：项目术语表，另含范围、现状与布局。
+- `GLOSSARY.md`：项目术语表；运行和代码布局见 `README.md`，实施进度见 `docs/README.md`。
   
 ## 项目提示
 - Git 提交是本项目的默认收尾动作：每次完成一个开发任务（代码改动 + 测试通过）后，默认直接

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -24,11 +25,20 @@ def _reload_host() -> None:
     sys.modules.pop("agent_harness.host", None)
 
 
+@pytest.fixture(autouse=True)
+def isolated_session_directory(tmp_path, monkeypatch):
+    from agent_harness import session_store
+
+    directory = tmp_path / "session-store"
+    monkeypatch.setattr(session_store, "sessions_dir", lambda: directory)
+    return directory
+
+
 @pytest.fixture
 def host_factory(tmp_path, monkeypatch):
     """在 tmp_path 下重新加载 agent.host，使状态目录跟随测试目录。"""
 
-    def load():
+    def load(*, enable_memory=False):
         monkeypatch.chdir(tmp_path)
         _reload_host()
         import agent_harness.host as host
@@ -43,6 +53,9 @@ def host_factory(tmp_path, monkeypatch):
         host.subagent.pending_requests.clear()
         host.tasks.assignments.clear()
         host.tasks.assignment_versions.clear()
+        host.tasks.lead_session_id = None
+        host.tasks.lead_worktree = None
+        host.tasks.save_lead_context = None
         host.tasks.CURRENT_TODOS.clear()
         host.mcp_clients.clear()
         host.scheduler.scheduled_jobs.clear()
@@ -50,7 +63,8 @@ def host_factory(tmp_path, monkeypatch):
         host.scheduler.background_tasks.clear()
         host.scheduler.background_results.clear()
         # 记忆提取会调用模型，测试中由用例显式控制。
-        monkeypatch.setattr(host, "remember_after_turn", lambda messages: None)
+        if not enable_memory:
+            monkeypatch.setattr(host, "remember_after_turn", lambda messages: None)
         return host
 
     return load
@@ -61,3 +75,29 @@ def workflow_module():
     from agent_harness import workflow_runtime as workflow
 
     return workflow
+
+
+@pytest.fixture
+def approval_hook():
+    from agent_harness.interaction import ExecutionContext, InteractionChannel, execution_context
+
+    def check(hook, block, decision):
+        channel = InteractionChannel()
+        context = ExecutionContext(channel, "session", 1, "turn", origin="frontend")
+        results = []
+        def execute():
+            with execution_context(context):
+                results.append(hook(block))
+        worker = threading.Thread(target=execute)
+        worker.start()
+        try:
+            request = channel.next_approval(timeout=2)
+            assert request is not None
+            assert channel.respond(request.request_id, request.generation, decision)
+            worker.join(timeout=2)
+        finally:
+            channel.close()
+            worker.join(timeout=2)
+        assert not worker.is_alive()
+        return results[0]
+    return check

@@ -127,6 +127,7 @@ def test_task_record_round_trips_through_json(host_factory) -> None:
         "owner": None,
         "blockedBy": [],
         "worktree": None,
+        "session_id": None,
     }
 
 

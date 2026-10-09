@@ -1,0 +1,226 @@
+"""Frontend-neutral notifications, execution context and approval rendezvous.
+
+This module owns delivery only. Session history, permissions and execution
+remain with their existing owners. All payloads crossing the seam are JSON data.
+"""
+
+from __future__ import annotations
+
+from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
+import json
+import threading
+from typing import Literal
+import uuid
+
+
+# -- Execution and submission contracts --
+
+EventScope = Literal["session", "runtime"]
+
+@dataclass(frozen=True)
+class TurnOutcome:
+    status: Literal["completed", "failed", "stopped", "truncated"]
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class SubmissionResult:
+    status: Literal["accepted", "busy", "invalid", "closed"]
+    submission_id: str | None = None
+    kind: Literal["command", "turn"] | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class InteractionEvent:
+    sequence: int
+    session_id: str | None
+    generation: int
+    turn_id: str | None
+    source: str
+    type: str
+    payload: dict
+    scope: EventScope = "session"
+
+
+@dataclass(frozen=True)
+class ApprovalRequest:
+    request_id: str
+    session_id: str | None
+    generation: int
+    turn_id: str
+    source: str
+    tool_name: str
+    tool_call_id: str
+    arguments: dict
+
+
+ApprovalDecision = Literal["approve", "deny", "closed"]
+ExecutionOrigin = Literal["frontend", "background", "persistent", "workflow"]
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    channel: InteractionChannel
+    session_id: str | None
+    generation: int
+    turn_id: str | None = None
+    source: str = "lead"
+    origin: ExecutionOrigin = "background"
+    stop_event: threading.Event | None = None
+    scope: EventScope = "session"
+
+    def stopped(self) -> bool:
+        return self.stop_event is not None and self.stop_event.is_set()
+
+    def delegate(self, source: str, origin: ExecutionOrigin | None = None):
+        """Synchronous once inherits origin; independent work sets it explicitly."""
+        return replace(self, source=source, origin=origin or self.origin)
+
+    def publish(self, event_type: str, **payload) -> InteractionEvent:
+        return self.channel.publish(self, event_type, payload)
+
+
+_context: ContextVar[ExecutionContext | None] = ContextVar("interaction_context", default=None)
+
+
+def current_context() -> ExecutionContext | None:
+    return _context.get()
+
+
+@contextmanager
+def execution_context(context: ExecutionContext | None):
+    token = _context.set(context)
+    try:
+        yield context
+    finally:
+        _context.reset(token)
+
+
+def publish(event_type: str, **payload) -> InteractionEvent | None:
+    context = current_context()
+    if context is not None:
+        return context.publish(event_type, **payload)
+    return None
+
+
+def data_copy(value):
+    """Reject live SDK/business objects and detach nested mutable JSON values."""
+    return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
+
+
+# -- One adapter's notification and approval channel --
+
+class InteractionChannel:
+    def __init__(self):
+        self._changed = threading.Condition()
+        self._events: deque[InteractionEvent] = deque()
+        self._requests: deque[ApprovalRequest] = deque()
+        self._pending: dict[str, ApprovalRequest] = {}
+        self._decisions: dict[str, ApprovalDecision] = {}
+        self._cancelled_turns: set[str] = set()
+        self._sequence = 0
+        self._closed = False
+        self._approvals_closed = False
+
+    def publish(self, context: ExecutionContext, event_type: str,
+                payload: dict) -> InteractionEvent:
+        copied = data_copy(payload)
+        with self._changed:
+            if self._closed:
+                raise RuntimeError("Interaction channel is closed")
+            self._sequence += 1
+            event = InteractionEvent(self._sequence, context.session_id,
+                                     context.generation, context.turn_id,
+                                     context.source, event_type, copied, context.scope)
+            self._events.append(event)
+            self._changed.notify_all()
+            return replace(event, payload=data_copy(event.payload))
+
+    def next_event(self, timeout: float = 0) -> InteractionEvent | None:
+        """Return one notification; blocking reads belong to adapters, not publishers."""
+        with self._changed:
+            self._changed.wait_for(lambda: self._events or self._closed, timeout)
+            return self._events.popleft() if self._events else None
+
+    def request_approval(self, context: ExecutionContext, tool_name: str,
+                         tool_call_id: str, arguments: dict) -> ApprovalDecision:
+        if context.scope != "session" or context.origin != "frontend" or context.turn_id is None:
+            return "deny"
+        request = ApprovalRequest(uuid.uuid4().hex, context.session_id,
+                                  context.generation, context.turn_id,
+                                  context.source, tool_name, tool_call_id,
+                                  data_copy(arguments))
+        with self._changed:
+            if self._closed or self._approvals_closed:
+                return "closed"
+            if context.stopped() or context.turn_id in self._cancelled_turns:
+                return "deny"
+            self._pending[request.request_id] = request
+            self._requests.append(request)
+            self._changed.notify_all()
+            try:
+                while request.request_id not in self._decisions:
+                    if self._closed or context.stopped():
+                        return "closed" if self._closed else "deny"
+                    self._changed.wait(timeout=0.1)
+                return self._decisions.pop(request.request_id)
+            finally:
+                self._pending.pop(request.request_id, None)
+                self._decisions.pop(request.request_id, None)
+
+    def next_approval(self, timeout: float = 0) -> ApprovalRequest | None:
+        with self._changed:
+            self._changed.wait_for(lambda: self._requests or self._closed, timeout)
+            while self._requests:
+                request = self._requests.popleft()
+                if (request.request_id in self._pending
+                        and request.request_id not in self._decisions):
+                    return replace(request, arguments=data_copy(request.arguments))
+            return None
+
+    def respond(self, request_id: str, generation: int,
+                decision: ApprovalDecision) -> bool:
+        if decision not in {"approve", "deny", "closed"}:
+            raise ValueError("Unknown approval decision")
+        with self._changed:
+            request = self._pending.get(request_id)
+            if (self._closed or self._approvals_closed or request is None or request.generation != generation
+                    or request_id in self._decisions):
+                return False
+            self._decisions[request_id] = decision
+            self._changed.notify_all()
+            return True
+
+    def cancel_turn(self, turn_id: str) -> None:
+        """Deny both pending and future requests belonging to a stopped turn."""
+        with self._changed:
+            self._cancelled_turns.add(turn_id)
+            for request_id, request in self._pending.items():
+                if request.turn_id == turn_id:
+                    self._decisions[request_id] = "deny"
+            self._changed.notify_all()
+
+    def close(self) -> None:
+        """Detach the adapter and release all approval waiters without approval."""
+        with self._changed:
+            self._closed = True
+            for request_id in self._pending:
+                self._decisions[request_id] = "closed"
+            self._changed.notify_all()
+
+    def close_approvals(self) -> None:
+        """Closing execution still publishes notifications until runtime_closed."""
+        with self._changed:
+            self._approvals_closed = True
+            for request_id in self._pending:
+                self._decisions[request_id] = "closed"
+            self._changed.notify_all()
+
+
+def stopped() -> bool:
+    context = current_context()
+    return context is not None and context.stopped()

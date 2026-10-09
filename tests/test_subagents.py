@@ -196,7 +196,7 @@ def test_system_prompt_uses_refreshed_runtime_context(host_factory) -> None:
     assert "Active subagents: alice" in prompt
 
 
-def test_mcp_permission_uses_host_policy(host_factory, monkeypatch) -> None:
+def test_mcp_permission_uses_host_policy(host_factory, approval_hook) -> None:
     host = host_factory()
     host.connect_mcp("deploy")
     host.assemble_tool_pool()
@@ -209,9 +209,8 @@ def test_mcp_permission_uses_host_policy(host_factory, monkeypatch) -> None:
     )
 
     assert host.permission_hook(status) is None
-    monkeypatch.setattr(host.CONSOLE, "ask", lambda prompt=None: "no")
-    assert host.permission_hook(trigger) == "Permission denied by user"
-    assert host.permission_hook(spoofed) == "Permission denied by user"
+    assert approval_hook(host.permission_hook, trigger, "deny") == "Permission denied by user"
+    assert approval_hook(host.permission_hook, spoofed, "deny") == "Permission denied by user"
 
 
 def test_normalized_mcp_tool_name_collisions_are_rejected(host_factory) -> None:
@@ -470,15 +469,11 @@ def test_worktree_removal_is_lead_only(host_factory) -> None:
         "once", host.core.client, host.core.MODEL, "", mode="once", task_tools=False).tools}
 
 
-def test_shell_permission_asks_for_every_command(host_factory, monkeypatch) -> None:
+def test_shell_permission_asks_for_every_command(host_factory, approval_hook) -> None:
     host = host_factory()
     block = SimpleNamespace(name="bash", input={"command": "echo hi"})
-    monkeypatch.setattr(host.CONSOLE, "ask", lambda prompt=None: "no")
-
-    assert host.permission_hook(block) == "Permission denied by user"
-
-    monkeypatch.setattr(host.CONSOLE, "ask", lambda prompt=None: "y")
-    assert host.permission_hook(block) is None
+    assert approval_hook(host.permission_hook, block, "deny") == "Permission denied by user"
+    assert approval_hook(host.permission_hook, block, "approve") is None
 
     denied = SimpleNamespace(name="bash", input={"command": "sudo rm -rf /"})
     assert "deny list" in host.permission_hook(denied)
