@@ -63,10 +63,8 @@ from .tools.file_tools import (  # noqa: F401
 )
 from .agents.subagent import (  # noqa: F401
     BUS, MessageBus, RESERVED_SUBAGENT_NAMES,
-    active_subagents, consume_lead_inbox, format_subagent_events, plan_gates,
-    plan_request_ids, pending_requests, ProtocolState, new_request_id,
-    match_response, is_valid_agent_name, SubagentRecord,
-    current_work_identity, apply_plan_response,
+    active_subagents, consume_lead_inbox, format_subagent_events,
+    is_valid_agent_name, SubagentRecord, apply_plan_response,
     apply_shutdown_request, send_message, submit_plan,
     run_request_plan, run_request_shutdown,
     run_review_plan, subagent_lock,

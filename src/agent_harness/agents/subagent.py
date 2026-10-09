@@ -7,7 +7,6 @@ Plan and shutdown protocols match request IDs to the current work.
 from __future__ import annotations
 
 import json
-import random
 import re
 import threading
 import time
@@ -20,6 +19,7 @@ from ..workspace import tasks
 from ..context import prompts
 from ..providers import message_content
 from .subagent_session import SubagentSession, selected_tool_names
+from .subagent_protocol import SubagentProtocol
 
 # -- 消息总线与团队协议 --
 
@@ -124,10 +124,8 @@ class SubagentRecord:
 
 
 active_subagents: dict[str, SubagentRecord] = {}
-plan_gates: dict[str, str] = {}
-plan_request_ids: dict[str, str] = {}
-plan_gate_versions: dict[str, int] = {}
 subagent_lock = threading.RLock()
+PROTOCOL = SubagentProtocol(subagent_lock)
 _persistent_threads: list[threading.Thread] = []
 
 
@@ -141,64 +139,6 @@ def wait_for_subagents():
 
 
 # -- 协议状态 --
-
-@dataclass
-class ProtocolState:
-    request_id: str
-    type: str
-    sender: str
-    target: str
-    status: str
-    payload: str
-    work_version: int | None = None
-    task_id: str | None = None
-    created_at: float = field(default_factory=time.time)
-
-
-pending_requests: dict[str, ProtocolState] = {}
-
-
-def new_request_id() -> str:
-    while True:
-        request_id = f"req_{random.randint(0, 999999):06d}"
-        if request_id not in pending_requests:
-            return request_id
-
-
-def match_response(response_type: str, request_id: str, approve: bool,
-                   from_agent: str, to_agent: str) -> bool:
-    """匹配待处理协议请求与回复，防止错误身份或重复回复改变状态。
-
-    输入：response_type 为回复类型；request_id 为请求 ID；approve 为是否批准；
-        from_agent/to_agent 为回复的发送者和收件人。
-    返回：类型、身份和 pending 状态均匹配时返回 True，并记录 approved 或 rejected。
-        不匹配时返回 False；计划对应的任务版本由计划处理函数进一步校验。
-    """
-    with subagent_lock:
-        state = pending_requests.get(request_id)
-        if not state:
-            core.terminal_print(f"  \033[31m[protocol] unknown request_id: {request_id}\033[0m")
-            return False
-        expected = {
-            "shutdown": "shutdown_response",
-            "plan_approval": "plan_approval_response",
-        }[state.type]
-        if response_type != expected:
-            core.terminal_print(f"  \033[31m[protocol] expected {expected}, "
-                  f"got {response_type}\033[0m")
-            return False
-        if from_agent != state.target or to_agent != state.sender:
-            core.terminal_print(f"  \033[31m[protocol] {request_id} responder mismatch\033[0m")
-            return False
-        if state.status != "pending":
-            return False
-        state.status = "approved" if approve else "rejected"
-    icon = "approved" if approve else "rejected"
-    color = "32" if approve else "31"
-    core.terminal_print(f"  \033[{color}m[protocol] {state.type} {icon} "
-          f"({request_id}: {state.status})\033[0m")
-    return True
-
 
 def consume_lead_inbox(route_protocol=True) -> list[dict]:
     """消费 Lead 信箱，并按需将协议回复交给请求匹配器。
@@ -214,9 +154,16 @@ def consume_lead_inbox(route_protocol=True) -> list[dict]:
             msg_type = msg.get("type", "")
             # Exited children have already cleared their protocol indices.
             # Their acknowledgement remains an event for Lead to consume.
-            if req_id in pending_requests and msg_type.endswith("_response"):
-                match_response(msg_type, req_id, meta.get("approve", False),
-                               msg.get("from", ""), msg.get("to", ""))
+            if msg_type.endswith("_response"):
+                matched = PROTOCOL.match_response(
+                    msg_type, req_id, meta.get("approve", False),
+                    msg.get("from", ""), msg.get("to", ""))
+                if matched:
+                    state = PROTOCOL.request(req_id)
+                    if state is not None:
+                        color = "32" if state.status == "approved" else "31"
+                        core.terminal_print(f"  \033[{color}m[protocol] {state.type} "
+                                            f"{state.status} ({req_id}: {state.status})\033[0m")
     return msgs
 
 
@@ -239,13 +186,6 @@ def format_subagent_events(msgs: list[dict]) -> str:
 
 # -- Current work and protocol authorization --
 
-def current_work_identity(owner: str) -> tuple[int, str | None]:
-    with tasks.task_lock:
-        assignment = tasks.assignments.get(owner)
-        task_id = str(assignment["task_id"]) if assignment else None
-        return tasks.assignment_versions.get(owner, 0), task_id
-
-
 def authorize_subagent_tool(name: str, block) -> str | None:
     """根据子 agent当前任务的计划审批状态决定是否允许工具执行。
 
@@ -255,18 +195,7 @@ def authorize_subagent_tool(name: str, block) -> str | None:
         bash、写入、编辑和完成任务需获批；此处放行后仍需经过通用权限 hooks。
     """
     with tasks.task_lock:
-        version = tasks.assignment_versions.get(name, 0)
-        with subagent_lock:
-            if plan_gate_versions.get(name, version) != version:
-                if plan_gates.get(name) != "not_required":
-                    plan_gates[name] = "required"
-                plan_request_ids.pop(name, None)
-            plan_gate_versions[name] = version
-    gate = plan_gates.get(name, "not_required")
-    if (block.name in {"bash", "write_file", "edit_file", "complete_task"}
-            and gate not in {"not_required", "approved"}):
-        return f"Blocked: plan status is {gate}."
-    return None
+        return PROTOCOL.authorize(name, block.name, tasks.assignment_identity(name))
 
 
 def create_subagent_session(name: str, system: str = "", *,
@@ -279,7 +208,7 @@ def create_subagent_session(name: str, system: str = "", *,
         lambda to, content: send_message(name, to, content),
         lambda plan: submit_plan(name, plan),
         mode=mode, task_tools=task_tools, tools=tools, max_tokens=max_tokens,
-        work_context=lambda: f"Plan status: {plan_gates.get(name, 'not_required')}",
+        work_context=lambda: f"Plan status: {PROTOCOL.gate(name)}",
     )
 
 
@@ -291,35 +220,15 @@ def apply_plan_response(name: str, msg: dict) -> tuple[bool, str]:
         更新计划门禁、将子 agent登记为 working，并移除当前计划请求索引。
         不匹配时返回忽略提示；批准和拒绝都会被接受，但拒绝不会开放工具权限。
     """
-    metadata = msg.get("metadata", {})
-    request_id = metadata.get("request_id", "")
     with tasks.task_lock:
-        work_version, task_id = current_work_identity(name)
+        identity = tasks.assignment_identity(name)
         with subagent_lock:
-            state = pending_requests.get(request_id)
-            expected_id = plan_request_ids.get(name)
-            valid = (
-                msg.get("from") == "lead"
-                and msg.get("to") == name
-                and request_id == expected_id
-                and state is not None
-                and state.type == "plan_approval"
-                and state.sender == name
-                and state.target == "lead"
-                and state.work_version == work_version
-                and state.task_id == task_id
-                and state.status in {"approved", "rejected"}
-                and metadata.get("approve", False)
-                == (state.status == "approved")
-            )
-            if not valid:
+            if name not in active_subagents:
                 return False, "[Ignored plan response: request mismatch]"
-            plan_gates[name] = state.status
-            plan_gate_versions[name] = work_version
-            active_subagents[name].status = "working"
-            plan_request_ids.pop(name, None)
-            outcome = state.status
-    return True, f"[Plan {outcome}] {msg['content']}"
+            accepted, notice = PROTOCOL.apply_plan(name, msg, identity)
+            if accepted:
+                active_subagents[name].status = "working"
+            return accepted, notice
 
 
 def apply_shutdown_request(name: str, msg: dict) -> tuple[bool, str]:
@@ -329,24 +238,14 @@ def apply_shutdown_request(name: str, msg: dict) -> tuple[bool, str]:
     返回：有效时为 (True, 请求 ID)，并将子 agent标记为 stopping。
         无效或重复请求返回 (False, 忽略提示)，不在这里发送确认或退出线程。
     """
-    request_id = msg.get("metadata", {}).get("request_id", "")
     with subagent_lock:
-        state = pending_requests.get(request_id)
-        valid = (
-            msg.get("from") == "lead"
-            and msg.get("to") == name
-            and state is not None
-            and state.type == "shutdown"
-            and state.sender == "lead"
-            and state.target == name
-            and state.status == "pending"
-            and name in active_subagents
-            and active_subagents[name].status != "stopping"
-        )
-        if not valid:
+        record = active_subagents.get(name)
+        if record is None or record.status == "stopping":
             return False, "[Ignored shutdown request: request mismatch]"
-        active_subagents[name].status = "stopping"
-    return True, request_id
+        accepted, notice = PROTOCOL.accept_shutdown(name, msg)
+        if accepted:
+            record.status = "stopping"
+        return accepted, notice
 
 
 def send_message(from_name: str, to: str, content: str) -> str:
@@ -421,7 +320,7 @@ def _execute_work(record, session):
         round_index += 1
         if record.mode == "persistent":
             _receive(record, session, BUS.read_inbox(record.name))
-            while plan_gates.get(record.name) == "pending":
+            while PROTOCOL.gate(record.name) == "pending":
                 record.status = "waiting_approval"
                 _wait_for_work(record, session)
         record.status = "working"
@@ -432,15 +331,6 @@ def _execute_work(record, session):
     raise RuntimeError("Subagent reached its round limit without completing")
 
 
-def _clear_protocol(name):
-    plan_gates.pop(name, None)
-    plan_gate_versions.pop(name, None)
-    plan_request_ids.pop(name, None)
-    for request_id, state in list(pending_requests.items()):
-        if name in {state.sender, state.target}:
-            pending_requests.pop(request_id, None)
-
-
 def _cleanup(record):
     """Release unfinished ownership and remove runtime/protocol registration."""
     try:
@@ -448,7 +338,7 @@ def _cleanup(record):
     finally:
         with subagent_lock:
             active_subagents.pop(record.name, None)
-            _clear_protocol(record.name)
+            PROTOCOL.clear(record.name)
         BUS.read_inbox(record.name)
 
 
@@ -468,10 +358,8 @@ def _persistent_loop(record, session):
             if released or not assignment:
                 if not assignment:
                     tasks.advance_assignment_version(record.name)
-                with subagent_lock:
-                    plan_gates[record.name] = "not_required"
-                    plan_request_ids.pop(record.name, None)
-                    plan_gate_versions[record.name] = tasks.assignment_versions.get(record.name, 0)
+                with tasks.task_lock:
+                    PROTOCOL.reset_work(record.name, tasks.assignment_identity(record.name)[0])
             record.status = "idle"
             interaction.publish("subagent_status", name=record.name, mode=record.mode, status=record.status)
             BUS.send(record.name, "lead",
@@ -540,8 +428,7 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
                 result["text"] = f"Subagent '{name}' already owns a Task"
                 return result
             active_subagents[name] = record
-            plan_gates[name] = "required" if require_plan else "not_required"
-            plan_gate_versions[name] = tasks.assignment_versions.get(name, 0)
+            PROTOCOL.register(name, require_plan, tasks.assignment_identity(name)[0])
     session = None
     try:
         if task_id is not None:
@@ -618,21 +505,16 @@ def submit_plan(from_name: str, plan: str) -> str:
         保存当前任务 ID 和分配版本，将计划设为 pending、子 agent设为 waiting_approval。
     """
     with tasks.task_lock:
-        assignment = tasks.assignments.get(from_name)
-        task_id = str(assignment["task_id"]) if assignment else None
-        work_version = tasks.assignment_versions.get(from_name, 0)
+        identity = tasks.assignment_identity(from_name)
         with subagent_lock:
-            if plan_gates.get(from_name) == "pending":
-                return "A plan is already waiting for review."
-            req_id = new_request_id()
-            pending_requests[req_id] = ProtocolState(
-                request_id=req_id, type="plan_approval",
-                sender=from_name, target="lead",
-                status="pending", payload=plan,
-                work_version=work_version, task_id=task_id)
-            plan_gates[from_name] = "pending"
-            plan_request_ids[from_name] = req_id
-            active_subagents[from_name].status = "waiting_approval"
+            record = active_subagents.get(from_name)
+            if record is None or record.status == "stopping":
+                return f"Subagent '{from_name}' is not active"
+            state, notice = PROTOCOL.submit_plan(from_name, plan, identity)
+            if state is None:
+                return notice
+            req_id = state.request_id
+            record.status = "waiting_approval"
     BUS.send(from_name, "lead", plan,
              "plan_approval_request",
              {"request_id": req_id})
@@ -649,16 +531,13 @@ def run_request_shutdown(name: str) -> str:
     返回：请求确认或子 agent不活跃的提示。登记 pending 请求并写入信箱，
         不直接终止线程，等待子 agent处理关闭请求并回复确认。
     """
-    if name not in active_subagents:
-        return f"Subagent '{name}' is not active"
-    if active_subagents[name].mode != "persistent":
-        return f"Subagent '{name}' requires persistent mode"
     with subagent_lock:
-        req_id = new_request_id()
-        pending_requests[req_id] = ProtocolState(
-            request_id=req_id, type="shutdown",
-            sender="lead", target=name,
-            status="pending", payload="")
+        record = active_subagents.get(name)
+        if record is None:
+            return f"Subagent '{name}' is not active"
+        if record.mode != "persistent":
+            return f"Subagent '{name}' requires persistent mode"
+        req_id = PROTOCOL.request_shutdown(name).request_id
     BUS.send("lead", name, "Finish the current step and shut down.",
              "shutdown_request",
              {"request_id": req_id})
@@ -674,13 +553,13 @@ def run_request_plan(name: str, task: str) -> str:
     返回：投递确认或子 agent不活跃的提示。将门禁设为 required 并发送 plan_request；
         审批请求 ID 会在子 agent真正提交计划时生成。
     """
-    if name not in active_subagents:
-        return f"Subagent '{name}' is not active"
-    if active_subagents[name].mode != "persistent":
-        return f"Subagent '{name}' requires persistent mode"
     with subagent_lock:
-        plan_gates[name] = "required"
-        plan_request_ids.pop(name, None)
+        record = active_subagents.get(name)
+        if record is None:
+            return f"Subagent '{name}' is not active"
+        if record.mode != "persistent":
+            return f"Subagent '{name}' requires persistent mode"
+        PROTOCOL.require_plan(name)
     BUS.send("lead", name, task, "plan_request")
     return f"Plan requested from {name}"
 
@@ -693,24 +572,13 @@ def run_review_plan(request_id: str, approve: bool,
     返回：审批结果或拒绝处理的原因。只更新当前任务、版本和计划索引匹配的请求；
         将协议状态设为 approved 或 rejected 后投递回复，子 agent收信时再更新工具门禁。
     """
-    state = pending_requests.get(request_id)
+    state = PROTOCOL.request(request_id)
     if not state:
         return f"Request {request_id} not found"
     with tasks.task_lock:
-        work_version, task_id = current_work_identity(state.sender)
-        with subagent_lock:
-            state = pending_requests.get(request_id)
-            if not state:
-                return f"Request {request_id} not found"
-            if state.type != "plan_approval":
-                return f"Request {request_id} is not a plan"
-            if state.status != "pending":
-                return f"Request {request_id} already {state.status}"
-            if state.work_version != work_version or state.task_id != task_id:
-                return f"Request {request_id} belongs to an earlier assignment"
-            if plan_request_ids.get(state.sender) != request_id:
-                return f"Request {request_id} is not the current plan"
-            state.status = "approved" if approve else "rejected"
+        state, notice = PROTOCOL.review_plan(request_id, approve, tasks.assignment_identity(state.sender))
+        if state is None:
+            return notice
     content = feedback or ("Plan approved." if approve
                            else "Revise the plan and submit it again.")
     BUS.send("lead", state.sender, content,

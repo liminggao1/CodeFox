@@ -47,10 +47,7 @@ def host_factory(tmp_path, monkeypatch):
         # 启动目录、子 agent、计划审批、任务分配或 MCP 客户端。
         host.core.WORKDIR = tmp_path
         host.subagent.active_subagents.clear()
-        host.subagent.plan_gates.clear()
-        host.subagent.plan_gate_versions.clear()
-        host.subagent.plan_request_ids.clear()
-        host.subagent.pending_requests.clear()
+        host.subagent.PROTOCOL.clear()
         host.tasks.assignments.clear()
         host.tasks.assignment_versions.clear()
         host.tasks.lead_session_id = None

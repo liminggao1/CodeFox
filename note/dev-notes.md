@@ -511,26 +511,26 @@ Lead 模型选择是否委派及 mode。once 同步交付最终结果；persiste
 
 | 顺序 | 函数                           | 调用身份                   | 调用 / 触发位置                                                                                                                          | 实现位置                                                                 | 作用                                             |
 | ---- | ------------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------ |
-| 1    | `run_spawn_subagent`           | 工具处理器：spawn_subagent | 登记 [registrations.py:304](../src/agent_harness/registrations.py#L304) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)   | [registrations.py:144](../src/agent_harness/registrations.py#L144)       | 把模型参数交给统一运行时，序列化结果             |
-| 2    | `spawn_subagent`               | 工具底层·跨文件            | [registrations.py:147](../src/agent_harness/registrations.py#L147)                                                                       | [subagent.py:479](../src/agent_harness/agents/subagent.py#L479)                 | 验证、登记、可选认领；按 mode 同步执行或启动线程 |
-| 2.1  | `claim_task`                   | 内部·跨文件                | [subagent.py:535](../src/agent_harness/agents/subagent.py#L535)                                                                                 | [tasks.py:358](../src/agent_harness/workspace/tasks.py#L358)                       | 只有显式指定初始 task_id 才认领                  |
-| 3    | `create_subagent_session`      | 内部·同文件                | [subagent.py:561](../src/agent_harness/agents/subagent.py#L561)                                                                                 | [subagent.py:261](../src/agent_harness/agents/subagent.py#L261)                 | 为两种模式构造相同的模型执行器                   |
-| 4    | `_execute_work`                | 内部·同文件                | [subagent.py:569](../src/agent_harness/agents/subagent.py#L569)（once）；[subagent.py:447](../src/agent_harness/agents/subagent.py#L447)（persistent） | [subagent.py:406](../src/agent_harness/agents/subagent.py#L406)                 | 循环执行模型回合，直到最终回答                   |
-| 5    | `SubagentSession.run`          | 内部·跨文件                | [subagent.py:417](../src/agent_harness/agents/subagent.py#L417)                                                                                 | [subagent_session.py:223](../src/agent_harness/agents/subagent_session.py#L223) | 按当前委派整理历史，请求模型并回填工具结果       |
-| 5.1  | `SubagentSession._request`     | 内部·同文件                | [subagent_session.py:246](../src/agent_harness/agents/subagent_session.py#L246)                                                                 | [subagent_session.py:267](../src/agent_harness/agents/subagent_session.py#L267) | 每次请求携带当前委派，旧委派只作为历史参考       |
-| 6    | `SubagentSession.execute_tool` | 内部·同文件                | [subagent_session.py:263](../src/agent_harness/agents/subagent_session.py#L263)                                                                 | [subagent_session.py:204](../src/agent_harness/agents/subagent_session.py#L204) | 检查计划门禁和 hooks，再执行工具                 |
+| 1    | `run_spawn_subagent`           | 工具处理器：spawn_subagent | [registrations.py:239](../src/agent_harness/registrations.py#L239) | [registrations.py:114](../src/agent_harness/registrations.py#L114) | 把模型参数交给统一运行时，序列化结果             |
+| 2    | `spawn_subagent`               | 工具底层·跨文件            | [registrations.py:117](../src/agent_harness/registrations.py#L117) | [subagent.py:380](../src/agent_harness/agents/subagent.py#L380) | 验证、登记、可选认领；按 mode 同步执行或启动线程 |
+| 2.1  | `claim_task`                   | 内部·跨文件                | [subagent.py:435](../src/agent_harness/agents/subagent.py#L435) | [tasks.py:421](../src/agent_harness/workspace/tasks.py#L421) | 只有显式指定初始 task_id 才认领                  |
+| 3    | `create_subagent_session`      | 内部·同文件                | [subagent.py:461](../src/agent_harness/agents/subagent.py#L461) | [subagent.py:201](../src/agent_harness/agents/subagent.py#L201) | 为两种模式构造相同的模型执行器                   |
+| 4    | `_execute_work`                | 内部·同文件                | [subagent.py:349](../src/agent_harness/agents/subagent.py#L349) | [subagent.py:316](../src/agent_harness/agents/subagent.py#L316) | 循环执行模型回合，直到最终回答                   |
+| 5    | `SubagentSession.run`          | 内部·跨文件                | [subagent.py:328](../src/agent_harness/agents/subagent.py#L328) | [subagent_session.py:130](../src/agent_harness/agents/subagent_session.py#L130) | 按当前委派整理历史，请求模型并回填工具结果       |
+| 5.1  | `SubagentSession._request`     | 内部·同文件                | [subagent_session.py:153](../src/agent_harness/agents/subagent_session.py#L153) | [subagent_session.py:174](../src/agent_harness/agents/subagent_session.py#L174) | 每次请求携带当前委派，旧委派只作为历史参考       |
+| 6    | `SubagentSession.execute_tool` | 内部·同文件                | [subagent_session.py:170](../src/agent_harness/agents/subagent_session.py#L170) | [subagent_session.py:115](../src/agent_harness/agents/subagent_session.py#L115) | 检查计划门禁和 hooks，再执行工具                 |
 
 **持久实例、通信与收尾：**
 
 | 顺序 | 函数                           | 调用身份                   | 调用 / 触发位置                                                                                                                                | 实现位置                                                 | 作用                                           |
 | ---- | ------------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------- |
-| 1    | `_persistent_loop`             | 线程入口·跨回合            | [subagent.py:566](../src/agent_harness/agents/subagent.py#L566)（target 回调）                                                                        | [subagent.py:443](../src/agent_harness/agents/subagent.py#L443) | 每次委派共用 _execute_work，最终结果经信箱交付 |
-| 2    | `send_message`                 | Lead 工具底层 / 子模型回调 | [registrations.py:158](../src/agent_harness/registrations.py#L158)（Lead）；[subagent.py:268](../src/agent_harness/agents/subagent.py#L268)（子模型） | [subagent.py:341](../src/agent_harness/agents/subagent.py#L341) | 是否发信及内容由发送方模型决定，程序投递       |
-| 3    | `_receive`                     | 内部·同文件                | [subagent.py:412](../src/agent_harness/agents/subagent.py#L412)                                                                                       | [subagent.py:365](../src/agent_harness/agents/subagent.py#L365) | 在模型回合之间消费消息与协议                   |
-| 4    | `release_completed_assignment` | 内部·跨文件                | [subagent.py:455](../src/agent_harness/agents/subagent.py#L455)                                                                                       | [tasks.py:485](../src/agent_harness/workspace/tasks.py#L485)       | 最终回答后释放已完成任务目录，保留实例和历史   |
-| 5    | `_wait_for_work`               | 内部·同文件                | [subagent.py:467](../src/agent_harness/agents/subagent.py#L467)                                                                                       | [subagent.py:398](../src/agent_harness/agents/subagent.py#L398) | IDLE 只等消息或关闭；不扫描任务板              |
-| 6    | `_cleanup`                     | 内部·同文件                | [subagent.py:474](../src/agent_harness/agents/subagent.py#L474)                                                                                       | [subagent.py:432](../src/agent_harness/agents/subagent.py#L432) | 实例退出时清理登记、协议和任务分配             |
-| 7    | `consume_lead_inbox`           | 内部·跨文件                | [host.py:518](../src/agent_harness/host.py#L518)                                                                                               | [subagent.py:192](../src/agent_harness/agents/subagent.py#L192) | 后台事件线程收取子 agent 结果并唤醒 Lead       |
+| 1    | `_persistent_loop`             | 线程入口·跨回合            | [subagent.py:345](../src/agent_harness/agents/subagent.py#L345) | [subagent.py:345](../src/agent_harness/agents/subagent.py#L345) | 每次委派共用 _execute_work，最终结果经信箱交付 |
+| 2    | `send_message`                 | Lead 工具底层 / 子模型回调 | [subagent.py:208](../src/agent_harness/agents/subagent.py#L208) | [subagent.py:251](../src/agent_harness/agents/subagent.py#L251) | 是否发信及内容由发送方模型决定，程序投递       |
+| 3    | `_receive`                     | 内部·同文件                | [subagent.py:322](../src/agent_harness/agents/subagent.py#L322) | [subagent.py:275](../src/agent_harness/agents/subagent.py#L275) | 在模型回合之间消费消息与协议                   |
+| 4    | `release_completed_assignment` | 内部·跨文件                | [subagent.py:357](../src/agent_harness/agents/subagent.py#L357) | [tasks.py:570](../src/agent_harness/workspace/tasks.py#L570) | 最终回答后释放已完成任务目录，保留实例和历史   |
+| 5    | `_wait_for_work`               | 内部·同文件                | [subagent.py:308](../src/agent_harness/agents/subagent.py#L308) | [subagent.py:308](../src/agent_harness/agents/subagent.py#L308) | IDLE 只等消息或关闭；不扫描任务板              |
+| 6    | `_cleanup`                     | 内部·同文件                | [subagent.py:334](../src/agent_harness/agents/subagent.py#L334) | [subagent.py:334](../src/agent_harness/agents/subagent.py#L334) | 实例退出时清理登记、协议和任务分配             |
+| 7    | `consume_lead_inbox`           | 内部·跨文件                | [interactive_runtime.py:243](../src/agent_harness/runtime/interactive_runtime.py#L243) | [subagent.py:143](../src/agent_harness/agents/subagent.py#L143) | 后台事件线程收取子 agent 结果并唤醒 Lead       |
 
 任务 A 完成后先汇报并释放分配，persistent 实例继续等待。Lead 发来 B 的 ID 和说明后，子模型显式 claim_task 才切换目录。任务未完成的最终文本只表示等待指导，仍占用原任务，不能认领 B。无 Task 的调查直接使用启动目录。
 
@@ -538,13 +538,15 @@ Lead 模型选择是否委派及 mode。once 同步交付最终结果；persiste
 
 | 顺序 | 函数                     | 调用身份                          | 调用 / 触发位置                                                                                                                        | 实现位置                                                 | 作用                                     |
 | ---- | ------------------------ | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------- |
-| 1    | `submit_plan`            | 子模型工具回调                    | [subagent.py:269](../src/agent_harness/agents/subagent.py#L269)                                                                               | [subagent.py:585](../src/agent_harness/agents/subagent.py#L585) | 创建当前任务与版本对应的审批请求         |
-| 2    | `run_review_plan`        | Lead 工具处理器：review_plan      | 登记 [registrations.py:334](../src/agent_harness/registrations.py#L334) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295) | [subagent.py:660](../src/agent_harness/agents/subagent.py#L660) | 按 request_id 审核，参数没有 name        |
-| 3    | `apply_plan_response`    | 内部·同文件                       | [subagent.py:380](../src/agent_harness/agents/subagent.py#L380)                                                                               | [subagent.py:275](../src/agent_harness/agents/subagent.py#L275) | 收信后校验身份、请求、任务版本并更新门禁 |
-| 4    | `run_request_shutdown`   | Lead 工具处理器：request_shutdown | 登记 [registrations.py:319](../src/agent_harness/registrations.py#L319) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295) | [subagent.py:617](../src/agent_harness/agents/subagent.py#L617) | 向持久实例发出关闭请求；目标参数为 name  |
-| 5    | `apply_shutdown_request` | 内部·同文件                       | [subagent.py:372](../src/agent_harness/agents/subagent.py#L372)                                                                               | [subagent.py:314](../src/agent_harness/agents/subagent.py#L314) | 只接受有效关闭请求，确认后退出并清理     |
+| 1    | `submit_plan`            | 子模型工具回调                    | [subagent.py:209](../src/agent_harness/agents/subagent.py#L209) | [subagent.py:500](../src/agent_harness/agents/subagent.py#L500) | 创建当前任务与版本对应的审批请求         |
+| 2    | `run_review_plan`        | Lead 工具处理器：review_plan      | [registrations.py:269](../src/agent_harness/registrations.py#L269) | [subagent.py:567](../src/agent_harness/agents/subagent.py#L567) | 按 request_id 审核，参数没有 name        |
+| 3    | `apply_plan_response`    | 内部·同文件                       | [subagent.py:290](../src/agent_harness/agents/subagent.py#L290) | [subagent.py:215](../src/agent_harness/agents/subagent.py#L215) | 收信后校验身份、请求、任务版本并更新门禁 |
+| 4    | `run_request_shutdown`   | Lead 工具处理器：request_shutdown | [registrations.py:254](../src/agent_harness/registrations.py#L254) | [subagent.py:527](../src/agent_harness/agents/subagent.py#L527) | 向持久实例发出关闭请求；目标参数为 name  |
+| 5    | `apply_shutdown_request` | 内部·同文件                       | [subagent.py:282](../src/agent_harness/agents/subagent.py#L282) | [subagent.py:234](../src/agent_harness/agents/subagent.py#L234) | 只接受有效关闭请求，确认后退出并清理     |
 
 计划被拒绝必须重新提交，旧审批不能解锁新任务。once 不提供消息或计划工具，且拒绝 require_plan=True。
+
+协议状态与转换由 [subagent_protocol.py](../src/agent_harness/agents/subagent_protocol.py) 唯一维护。subagent 仍负责线程与投递，任务身份通过 [tasks.py:58](../src/agent_harness/workspace/tasks.py#L58) 一致读取。审批决定与收到回复后的门禁分别维护。
 
 
 #### 10. 权限与 hooks
@@ -553,20 +555,18 @@ Lead 模型选择是否委派及 mode。once 同步交付最终结果；persiste
 `"tests/test_permissions.py::test_file_paths_must_stay_inside_the_workspace"` 和
 `"tests/test_permissions.py::test_hooks_return_the_first_non_none_result"`。
 
-| 顺序 | 函数                                | 调用身份    | 调用 / 触发位置                                                                                                        | 实现位置                                                     | 作用                           |
-| ---- | ----------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------ |
-| 1    | `trigger_hooks（UserPromptSubmit）` | 内部·跨文件 | [cli.py:91](../src/agent_harness/frontends/cli.py#L91)                                                                           | [hooks.py:30](../src/agent_harness/runtime/hooks.py#L30)             | 用户提交问题时触发             |
-| 2    | `trigger_hooks（PreToolUse）`       | 内部·跨文件 | [host.py:432](../src/agent_harness/host.py#L432)                                                                       | [hooks.py:30](../src/agent_harness/runtime/hooks.py#L30)             | 执行工具前按登记顺序检查       |
-| 3    | `permission_hook`                   | hook 回调   | 登记 [hooks.py:118](../src/agent_harness/runtime/hooks.py#L118) → [hooks.py:38](../src/agent_harness/runtime/hooks.py#L38)（callback） | [hooks.py:45](../src/agent_harness/runtime/hooks.py#L45)             | 检查命令、文件路径和 MCP 权限  |
-| 4    | `call_tool_handler`                 | 内部·跨文件 | [host.py:466](../src/agent_harness/host.py#L466)                                                                       | [file_tools.py:285](../src/agent_harness/tools/file_tools.py#L285) | 权限通过后执行工具             |
-| 5    | `trigger_hooks（PostToolUse）`      | 内部·跨文件 | [host.py:468](../src/agent_harness/host.py#L468)                                                                       | [hooks.py:30](../src/agent_harness/runtime/hooks.py#L30)             | 工具执行后触发                 |
-| 6    | `trigger_hooks（Stop）`             | 内部·跨文件 | [host.py:380](../src/agent_harness/host.py#L380)                                                                       | [hooks.py:30](../src/agent_harness/runtime/hooks.py#L30)             | 后续模型回复不再请求工具时触发 |
+| 顺序 | 函数 | 调用身份 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `check_tool_use` | 内部·跨文件 | [host.py:502](../src/agent_harness/host.py#L502)；[subagent_session.py:124](../src/agent_harness/agents/subagent_session.py#L124) | [hooks.py:51](../src/agent_harness/runtime/hooks.py#L51) | 授权、前置 hook 和停止判断 |
+| 2 | `trigger_hooks（PreToolUse）` | 内部·同文件 | [hooks.py:57](../src/agent_harness/runtime/hooks.py#L57) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31) | 执行登记回调，取首个非 None 结果 |
+| 3 | `permission_hook` | hook 回调 | [hooks.py:145](../src/agent_harness/runtime/hooks.py#L145) | [hooks.py:85](../src/agent_harness/runtime/hooks.py#L85) | 检查命令、文件路径和 MCP 权限 |
+| 4 | `execute_tool` | 内部·跨文件 | [host.py:543](../src/agent_harness/host.py#L543)；[subagent_session.py:127](../src/agent_harness/agents/subagent_session.py#L127) | [hooks.py:65](../src/agent_harness/runtime/hooks.py#L65) | 执行 handler，保留状态回调 |
+| 5 | `trigger_hooks（PostToolUse）` | 内部·同文件 | [hooks.py:69](../src/agent_harness/runtime/hooks.py#L69) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31) | 同步执行后触发一次 |
+| 6 | `trigger_hooks（Stop）` | 内部·跨文件 | [host.py:435](../src/agent_harness/host.py#L435) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31) | 最终回答边界触发 |
 
-上表按事件发生位置汇总不同分支的 hooks，不表示每轮都会按 1 到 6 依次执行；`UserPromptSubmit`、
-工具执行前后和 `Stop` 分别对应不同的主循环边界。
-
-hooks 是运行时回调，不是模型工具。钩子拒绝时停止后续检查，也不执行工具。
-子 agent 执行器采用相同的工具 hooks。
+UserPromptSubmit 在用户输入边界触发。上表按边界汇总分支，不表示每轮都会依次执行全部事件。
+hooks 是运行时回调，不是模型工具。Lead 和 child 共用检查与同步执行；child 先检查工具资格与计划授权。授权和 hook 只有 None 表示放行，空字符串、False、0 都拒绝。
+Lead 停止优先于前置拒绝；拒绝或停止不执行 handler/PostToolUse。compact 保留特殊路径，后台的 PostToolUse 由 scheduler 在实际完成后触发。
 
 #### 11. 后台任务 / cron
 
@@ -624,25 +624,25 @@ cron 的创建、查询、取消属于模型工具；到期检查由调度线程
 
 | 顺序 | 函数 | 调用身份 | 调用 / 触发位置 | 实现位置 | 作用 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `ExecutionState.agent` | 工作流 API（协程） | [workflow_demo.py:111](../src/agent_harness/workflows/workflow_demo.py#L111) | [workflow_runtime.py:534](../src/agent_harness/workflows/workflow_runtime.py#L534) | 接收步骤指令和工具配置 |
-| 2 | `WorkflowJournal.key` | 内部·同文件 | [workflow_runtime.py:547](../src/agent_harness/workflows/workflow_runtime.py#L547) | [workflow_runtime.py:395](../src/agent_harness/workflows/workflow_runtime.py#L395) | 用指令、标签、schema、工具配置生成缓存键 |
-| 3 | `_run_agent` | 内部·同文件 | [workflow_runtime.py:549](../src/agent_harness/workflows/workflow_runtime.py#L549) | [workflow_runtime.py:551](../src/agent_harness/workflows/workflow_runtime.py#L551) | 管理缓存、执行、格式校验和记账 |
-| 4 | `WorkflowJournal.cached` | 内部·同文件 | [workflow_runtime.py:558](../src/agent_harness/workflows/workflow_runtime.py#L558) | [workflow_runtime.py:406](../src/agent_harness/workflows/workflow_runtime.py#L406) | 命中时直接重放，不创建子 agent |
-| 5 | `Budget.remaining` | 内部·同文件 | [workflow_runtime.py:570](../src/agent_harness/workflows/workflow_runtime.py#L570) | [workflow_runtime.py:460](../src/agent_harness/workflows/workflow_runtime.py#L460) | 检查剩余预算 |
-| 6 | `SubagentRunner.run` | 线程任务·跨文件 | [workflow_runtime.py:578](../src/agent_harness/workflows/workflow_runtime.py#L578)（to_thread 目标） | [workflow_runtime.py:292](../src/agent_harness/workflows/workflow_runtime.py#L292) | 将步骤接入统一 once 创建入口 |
-| 7 | `spawn_subagent` | 内部·跨文件 | [workflow_runtime.py:304](../src/agent_harness/workflows/workflow_runtime.py#L304) | [subagent.py:479](../src/agent_harness/agents/subagent.py#L479) | 登记步骤实例，按工具名单执行并清理 |
-| 8 | `_execute_work` | 内部·同文件 | [subagent.py:569](../src/agent_harness/agents/subagent.py#L569) | [subagent.py:406](../src/agent_harness/agents/subagent.py#L406) | 多回合执行到最终回答 |
-| 9 | `SubagentSession.run` | 内部·跨文件 | [subagent.py:417](../src/agent_harness/agents/subagent.py#L417) | [subagent_session.py:223](../src/agent_harness/agents/subagent_session.py#L223) | 压缩历史，请求模型，回填工具结果 |
-| 10 | `SubagentSession.execute_tool` | 内部·同文件 | [subagent_session.py:263](../src/agent_harness/agents/subagent_session.py#L263) | [subagent_session.py:204](../src/agent_harness/agents/subagent_session.py#L204) | 校验可用工具、计划门禁和权限 hooks |
-| 11 | `_parse_runner_json` | 内部·同文件 | [workflow_runtime.py:315](../src/agent_harness/workflows/workflow_runtime.py#L315) | [workflow_runtime.py:254](../src/agent_harness/workflows/workflow_runtime.py#L254) | 步骤返回后解析结构化文本 |
-| 12 | `SimpleJsonSchema.validate` | 内部·同文件 | [workflow_runtime.py:582](../src/agent_harness/workflows/workflow_runtime.py#L582) | [workflow_runtime.py:198](../src/agent_harness/workflows/workflow_runtime.py#L198) | 校验结果；不合格时最多一次无工具格式修正 |
+| 1 | `ExecutionState.agent` | 工作流 API（协程） | [workflow_demo.py:111](../src/agent_harness/workflows/workflow_demo.py#L111) | [workflow_runtime.py:613](../src/agent_harness/workflows/workflow_runtime.py#L613) | 接收步骤指令和工具配置 |
+| 2 | `WorkflowJournal.key` | 内部·同文件 | [workflow_runtime.py:627](../src/agent_harness/workflows/workflow_runtime.py#L627) | [workflow_runtime.py:400](../src/agent_harness/workflows/workflow_runtime.py#L400) | 用指令、标签、schema、工具配置生成缓存键 |
+| 3 | `_run_agent` | 内部·同文件 | [workflow_runtime.py:629](../src/agent_harness/workflows/workflow_runtime.py#L629) | [workflow_runtime.py:631](../src/agent_harness/workflows/workflow_runtime.py#L631) | 管理缓存、执行、格式校验和记账 |
+| 4 | `WorkflowJournal.cached` | 内部·同文件 | [workflow_runtime.py:638](../src/agent_harness/workflows/workflow_runtime.py#L638) | [workflow_runtime.py:411](../src/agent_harness/workflows/workflow_runtime.py#L411) | 命中时直接重放，不创建子 agent |
+| 5 | `Budget.remaining` | 内部·同文件 | [workflow_runtime.py:687](../src/agent_harness/workflows/workflow_runtime.py#L687) | [workflow_runtime.py:468](../src/agent_harness/workflows/workflow_runtime.py#L468) | 检查剩余预算 |
+| 6 | `SubagentRunner.run` | 线程任务·跨文件 | [workflow_runtime.py:693](../src/agent_harness/workflows/workflow_runtime.py#L693) | [workflow_runtime.py:294](../src/agent_harness/workflows/workflow_runtime.py#L294) | 将步骤接入统一 once 创建入口 |
+| 7 | `spawn_subagent` | 内部·跨文件 | [workflow_runtime.py:309](../src/agent_harness/workflows/workflow_runtime.py#L309) | [subagent.py:380](../src/agent_harness/agents/subagent.py#L380) | 登记步骤实例，按工具名单执行并清理 |
+| 8 | `_execute_work` | 内部·同文件 | [subagent.py:349](../src/agent_harness/agents/subagent.py#L349) | [subagent.py:316](../src/agent_harness/agents/subagent.py#L316) | 多回合执行到最终回答 |
+| 9 | `SubagentSession.run` | 内部·跨文件 | [subagent.py:328](../src/agent_harness/agents/subagent.py#L328) | [subagent_session.py:130](../src/agent_harness/agents/subagent_session.py#L130) | 压缩历史，请求模型，回填工具结果 |
+| 10 | `SubagentSession.execute_tool` | 内部·同文件 | [subagent_session.py:170](../src/agent_harness/agents/subagent_session.py#L170) | [subagent_session.py:115](../src/agent_harness/agents/subagent_session.py#L115) | 校验可用工具、计划门禁和权限 hooks |
+| 11 | `_parse_runner_json` | 内部·同文件 | [workflow_runtime.py:320](../src/agent_harness/workflows/workflow_runtime.py#L320) | [workflow_runtime.py:256](../src/agent_harness/workflows/workflow_runtime.py#L256) | 步骤返回后解析结构化文本 |
+| 12 | `SimpleJsonSchema.validate` | 内部·同文件 | [workflow_runtime.py:659](../src/agent_harness/workflows/workflow_runtime.py#L659) | [workflow_runtime.py:200](../src/agent_harness/workflows/workflow_runtime.py#L200) | 校验结果；不合格时最多一次无工具格式修正 |
 | 13 | `_call_runner` | 内部·同文件 | [workflow_runtime.py:655](../src/agent_harness/workflows/workflow_runtime.py#L655) | [workflow_runtime.py:690](../src/agent_harness/workflows/workflow_runtime.py#L690) | 每次请求立即结算；取消也等待已启动调用 |
-| 14 | `Budget.add` | 内部·同文件 | [workflow_runtime.py:613](../src/agent_harness/workflows/workflow_runtime.py#L613) | [workflow_runtime.py:444](../src/agent_harness/workflows/workflow_runtime.py#L444) | 累计预算并检查超额 |
-| 15 | `WorkflowJournal.record` | 内部·同文件 | [workflow_runtime.py:602](../src/agent_harness/workflows/workflow_runtime.py#L602) | [workflow_runtime.py:414](../src/agent_harness/workflows/workflow_runtime.py#L414) | 只缓存成功且格式合格的步骤 |
+| 14 | `Budget.add` | 内部·同文件 | [workflow_runtime.py:704](../src/agent_harness/workflows/workflow_runtime.py#L704) | [workflow_runtime.py:449](../src/agent_harness/workflows/workflow_runtime.py#L449) | 累计预算并检查超额 |
+| 15 | `WorkflowJournal.record` | 内部·同文件 | [workflow_runtime.py:679](../src/agent_harness/workflows/workflow_runtime.py#L679) | [workflow_runtime.py:419](../src/agent_harness/workflows/workflow_runtime.py#L419) | 只缓存成功且格式合格的步骤 |
 
 格式修正只处理上次最终结果，关闭工具，文件操作不会因格式错误再执行一次。失败消费也保存在任务快照，恢复时继续计入预算。
 普通失败、取消和预算超额的收尾规则见 [README](../README.md#行为要点)。
-整个流程的输出在 [workflow_runtime.py:740](../src/agent_harness/workflows/workflow_runtime.py#L740) 保存，任务快照在 [workflow_runtime.py:741](../src/agent_harness/workflows/workflow_runtime.py#L741) 保存。
+整个流程的输出在 [workflow_runtime.py:901](../src/agent_harness/workflows/workflow_runtime.py#L901) 保存，任务快照在 [workflow_runtime.py:902](../src/agent_harness/workflows/workflow_runtime.py#L902) 保存。
 真实客户端在 [host.py:108](../src/agent_harness/host.py#L108) 注入；离线客户端在 [cli.py:114](../src/agent_harness/frontends/cli.py#L114) 注入。
 
 #### 13. journal 读写与 resume
@@ -657,20 +657,20 @@ journal 的方法都是工作流内部调用。恢复通过 CLI 的 `workflow re
 
 | 顺序 | 函数                       | 调用身份    | 调用 / 触发位置                                                                  | 实现位置                                                                 | 作用                       |
 | ---- | -------------------------- | ----------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------- |
-| 1    | `WorkflowJournal.__init__` | 内部·同文件 | [workflow_runtime.py:702](../src/agent_harness/workflows/workflow_runtime.py#L702)（构造） | [workflow_runtime.py:330](../src/agent_harness/workflows/workflow_runtime.py#L330) | 创建新的 journal 文件      |
-| 2    | `WorkflowJournal.cached`   | 内部·同文件 | [workflow_runtime.py:558](../src/agent_harness/workflows/workflow_runtime.py#L558)         | [workflow_runtime.py:406](../src/agent_harness/workflows/workflow_runtime.py#L406) | 检查本步骤是否已有记录     |
-| 3    | `WorkflowJournal.record`   | 内部·同文件 | [workflow_runtime.py:602](../src/agent_harness/workflows/workflow_runtime.py#L602)         | [workflow_runtime.py:414](../src/agent_harness/workflows/workflow_runtime.py#L414) | 步骤成功后追加记录并 flush |
+| 1    | `WorkflowJournal.__init__` | 内部·同文件 | [workflow_runtime.py:843](../src/agent_harness/workflows/workflow_runtime.py#L843) | [workflow_runtime.py:335](../src/agent_harness/workflows/workflow_runtime.py#L335) | 创建新的 journal 文件      |
+| 2    | `WorkflowJournal.cached`   | 内部·同文件 | [workflow_runtime.py:638](../src/agent_harness/workflows/workflow_runtime.py#L638) | [workflow_runtime.py:411](../src/agent_harness/workflows/workflow_runtime.py#L411) | 检查本步骤是否已有记录     |
+| 3    | `WorkflowJournal.record`   | 内部·同文件 | [workflow_runtime.py:679](../src/agent_harness/workflows/workflow_runtime.py#L679) | [workflow_runtime.py:419](../src/agent_harness/workflows/workflow_runtime.py#L419) | 步骤成功后追加记录并 flush |
 
 **恢复运行：**
 
 | 顺序 | 函数                       | 调用身份    | 调用 / 触发位置                                                                  | 实现位置                                                                 | 作用                             |
 | ---- | -------------------------- | ----------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------- |
-| 1    | `_read_snapshot`           | 内部·同文件 | [workflow_runtime.py:691](../src/agent_harness/workflows/workflow_runtime.py#L691)         | [workflow_runtime.py:761](../src/agent_harness/workflows/workflow_runtime.py#L761) | 读取原运行的任务和参数           |
-| 2    | `WorkflowJournal.__init__` | 内部·同文件 | [workflow_runtime.py:699](../src/agent_harness/workflows/workflow_runtime.py#L699)（构造） | [workflow_runtime.py:330](../src/agent_harness/workflows/workflow_runtime.py#L330) | 读取 journal，恢复缓存和历史消费 |
-| 3    | `WorkflowJournal.key`      | 内部·同文件 | [workflow_runtime.py:547](../src/agent_harness/workflows/workflow_runtime.py#L547)         | [workflow_runtime.py:395](../src/agent_harness/workflows/workflow_runtime.py#L395) | 生成与原步骤对应的缓存键         |
-| 4    | `WorkflowJournal.cached`   | 内部·同文件 | [workflow_runtime.py:558](../src/agent_harness/workflows/workflow_runtime.py#L558)         | [workflow_runtime.py:406](../src/agent_harness/workflows/workflow_runtime.py#L406) | 命中后复用结果，不再执行 runner  |
+| 1    | `_read_snapshot`           | 内部·同文件 | [workflow_runtime.py:832](../src/agent_harness/workflows/workflow_runtime.py#L832) | [workflow_runtime.py:924](../src/agent_harness/workflows/workflow_runtime.py#L924) | 读取原运行的任务和参数           |
+| 2    | `WorkflowJournal.__init__` | 内部·同文件 | [workflow_runtime.py:840](../src/agent_harness/workflows/workflow_runtime.py#L840) | [workflow_runtime.py:335](../src/agent_harness/workflows/workflow_runtime.py#L335) | 读取 journal，恢复缓存和历史消费 |
+| 3    | `WorkflowJournal.key`      | 内部·同文件 | [workflow_runtime.py:627](../src/agent_harness/workflows/workflow_runtime.py#L627) | [workflow_runtime.py:400](../src/agent_harness/workflows/workflow_runtime.py#L400) | 生成与原步骤对应的缓存键         |
+| 4    | `WorkflowJournal.cached`   | 内部·同文件 | [workflow_runtime.py:638](../src/agent_harness/workflows/workflow_runtime.py#L638) | [workflow_runtime.py:411](../src/agent_harness/workflows/workflow_runtime.py#L411) | 命中后复用结果，不再执行 runner  |
 
-缓存未命中时，在 [workflow_runtime.py:570](../src/agent_harness/workflows/workflow_runtime.py#L570) 检查包含历史消费的剩余预算。
+缓存未命中时，在 [workflow_runtime.py:687](../src/agent_harness/workflows/workflow_runtime.py#L687) 检查包含历史消费的剩余预算。
 
 缓存键包含工具名单。默认配置与显式列出全部基础工具等价，关闭或限制工具会使用不同的键。恢复重放结果和历史消费，不重新执行工具，也不重建已删除的文件。
 

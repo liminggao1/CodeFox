@@ -1,7 +1,7 @@
 """持久化任务板：记录归属和依赖关系的文件存储。
 
 任务是启动目录 .tasks/ 下的小型 JSON 记录。worktree 和子 agent复用该存储；
-审批状态由 subagent.py 管理。
+Approval state belongs to agents/subagent_protocol.py.
 """
 
 from __future__ import annotations
@@ -53,6 +53,14 @@ assignment_versions: dict[str, int] = {}
 lead_session_id: str | None = None
 lead_worktree: str | None = None
 save_lead_context = None
+
+
+def assignment_identity(owner: str) -> tuple[int, str | None]:
+    """Read the current assignment version and task ID together under its lock."""
+    with task_lock:
+        assignment = assignments.get(owner)
+        task_id = str(assignment["task_id"]) if assignment else None
+        return assignment_versions.get(owner, 0), task_id
 
 
 def lead_context() -> dict:

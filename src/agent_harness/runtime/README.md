@@ -10,7 +10,7 @@
 | [local_commands.py](local_commands.py) | `LocalCommand`、命令元数据和查找；供运行时路由与前端补全共用 |
 | [session_store.py](session_store.py) | `SessionStore` 和 `InteractiveSession`：会话格式校验、原子保存、读取/列出/删除及上下文保存与恢复准备 |
 | [scheduler.py](scheduler.py) | 后台任务结果、cron 校验/持久化/调度、待消费队列和服务启动/停止 |
-| [hooks.py](hooks.py) | 用户输入、工具执行和停止边界的 hooks；权限检查、审批请求、日志及大结果处理 |
+| [hooks.py](hooks.py) | 用户输入、工具执行和停止边界的 hooks；权限检查、审批请求、日志及大结果处理；Lead/child 共用前置检查与同步执行 |
 
 前端调用 `InteractiveRuntime`，后者调用根目录 [host.agent_loop](../host.py)。
 `start()` 在线程启动前调用 `host.initialize_runtime()`。配置失败可重试，不启动执行线程；重复配置保留已有 goal、runner 与注册器配置。导入模块和构造驱动不执行应用装配。

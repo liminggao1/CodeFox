@@ -22,10 +22,15 @@ def response(*blocks):
 
 
 @pytest.fixture
-def runtime(host_factory, monkeypatch):
+def runtime_threads():
+    return []
+
+
+@pytest.fixture
+def runtime(host_factory, monkeypatch, runtime_threads):
     host = host_factory()
     original_thread = threading.Thread
-    threads = []
+    threads = runtime_threads
     def thread_factory(**kwargs):
         thread = original_thread(**kwargs)
         threads.append(thread)
@@ -76,7 +81,7 @@ def test_invalid_creation_has_no_side_effects(runtime, arguments):
     assert calls == []
     assert host.active_subagents == {}
     assert host.assignments == {}
-    assert host.plan_gates == {}
+    assert host.subagent.PROTOCOL.empty()
 
 
 def test_single_creation_tool_and_missing_mode(runtime):
@@ -121,7 +126,7 @@ def test_claim_and_thread_start_failures_roll_back(runtime, monkeypatch):
     result = spawn(host, mode="persistent", task_id=second.id)
     assert result["status"] == "failed" and "start failed" in result["text"]
     assert host.load_task(second.id).status == "pending"
-    assert host.active_subagents == {} and host.plan_gates == {}
+    assert host.active_subagents == {} and host.subagent.PROTOCOL.empty()
     assert set(host.assignments) == {"agent"}
 
 
@@ -295,3 +300,69 @@ def test_messages_during_work_and_between_children_are_model_selected(runtime):
     assert "Additional evidence" in str(next(history for name, history in reversed(calls) if name == "sender"))
     assert host.active_subagents["sender"].active_request == "Investigate"
     assert "Peer investigation" in str(next(history for name, history in reversed(calls) if name == "receiver"))
+
+
+def test_pending_plan_can_shutdown_without_another_model_call(runtime, runtime_threads):
+    host = runtime
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return response(tool("submit_plan", plan="Read then change"))
+
+    client(host, create)
+    spawn(host, mode="persistent", require_plan=True)
+    plan = wait_event(host, "plan_approval_request")
+    assert "Shutdown requested" in host.run_request_shutdown("worker")
+    acknowledgement = wait_event(host, "shutdown_response")
+    for thread in runtime_threads:
+        thread.join(3)
+        assert not thread.is_alive()
+    assert "worker" not in host.active_subagents
+    assert host.subagent.PROTOCOL.empty()
+    assert len(calls) == 1
+    assert acknowledgement["metadata"]["approve"] is True
+    assert host.subagent.PROTOCOL.request(plan["metadata"]["request_id"]) is None
+
+
+@pytest.mark.parametrize("replay_approval", [False, True])
+@pytest.mark.parametrize("message_type", ["plan_approval_response", "shutdown_request"])
+def test_stale_protocol_does_not_wake_idle_model(runtime, monkeypatch, replay_approval, message_type):
+    host = runtime
+    histories = []
+    delivered = threading.Event()
+    waiting_again = threading.Event()
+    wait = host.BUS.wait_for_messages
+
+    def observe_wait(name, timeout=None):
+        if name == "worker" and delivered.is_set():
+            waiting_again.set()
+        messages = wait(name, timeout)
+        if name == "worker" and any(msg["content"] == "stale" for msg in messages):
+            delivered.set()
+        return messages
+
+    monkeypatch.setattr(host.BUS, "wait_for_messages", observe_wait)
+
+    def create(**kwargs):
+        histories.append(list(kwargs["messages"]))
+        if replay_approval and len(histories) == 1:
+            return response(tool("submit_plan", plan="Read first"))
+        return response(text("Done"))
+
+    client(host, create)
+    spawn(host, mode="persistent", require_plan=replay_approval)
+    request_id = "req_old"
+    if replay_approval:
+        request_id = wait_event(host, "plan_approval_request")["metadata"]["request_id"]
+        assert "approved" in host.run_review_plan(request_id, True)
+    wait_event(host, "idle_notification")
+    host.BUS.send("lead", "worker", "stale", message_type,
+                  {"request_id": request_id, "approve": True})
+    assert waiting_again.wait(3)
+    assert len(histories) == (2 if replay_approval else 1)
+    host.run_send_message("worker", "next work")
+    wait_event(host, "idle_notification")
+    assert len(histories) == (3 if replay_approval else 2)
+    assert "next work" in str(histories[-1])
+    assert "stale" not in str(histories[-1])
