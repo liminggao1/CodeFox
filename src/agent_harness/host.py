@@ -188,7 +188,7 @@ def build_user_content(results: list[dict]) -> list[dict]:
     return content
 
 
-def inject_background_notifications(messages: list):
+def inject_background_notifications(messages: list, save_context=None):
     """把已完成的后台任务通知追加到对话历史。
 
     Args:
@@ -205,6 +205,8 @@ def inject_background_notifications(messages: list):
     if notes:
         messages.append({"role": "user", "content": [
             {"type": "text", "text": note} for note in notes]})
+        if save_context:
+            save_context()
 
 
 def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: list,
@@ -257,7 +259,7 @@ def evaluate_goal(messages: list):
 
 
 # Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
-def agent_loop(messages: list, active_request: str):
+def agent_loop(messages: list, active_request: str, save_context=None):
     """执行 Agent 主循环，直到模型完成回答或本轮无法继续。
     Args:
         messages: 当前对话历史，会被原地追加助手响应和工具结果。
@@ -266,6 +268,15 @@ def agent_loop(messages: list, active_request: str):
         ``None``。执行结果通过更新 ``messages`` 和相关运行时状态交付。
     """
     global rounds_since_todo
+
+    def checkpoint():
+        if save_context:
+            save_context()
+
+    def append(message):
+        messages.append(message)
+        checkpoint()
+
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
     # 管理本轮手动压缩的工具响应和执行时机。
@@ -286,7 +297,7 @@ def agent_loop(messages: list, active_request: str):
             # 将每个定时任务作为一条用户消息送入对话历史。
             for job in fired:
                 # 模型通过用户消息读取定时任务内容。
-                messages.append({"role": "user",
+                append({"role": "user",
                                  "content": f"[Scheduled] {job.prompt}"})
                 # 在终端显示截短的注入提示。
                 print(f"  \033[35m[cron inject] {job.prompt[:60]}\033[0m")
@@ -298,12 +309,12 @@ def agent_loop(messages: list, active_request: str):
                 # 保留原请求，并追加定时任务内容。
                 active_request = f"{active_request}\n{scheduled_requests}".strip()
             # 将已完成的后台任务通知加入对话历史。
-            inject_background_notifications(messages)
+            inject_background_notifications(messages, save_context)
 
             # 达到未更新 TODO 的工具轮数阈值时，提醒模型更新。
             if rounds_since_todo >= core.TODO_REMINDER_ROUNDS:
                 # 把提醒作为用户消息加入历史。
-                messages.append({"role": "user",
+                append({"role": "user",
                                  "content": "<reminder>Update your todos.</reminder>"})
                 # 本次提醒后重新累计调用次数。
                 rounds_since_todo = 0
@@ -311,6 +322,8 @@ def agent_loop(messages: list, active_request: str):
             # 按上下文预算裁剪或压缩历史消息。
             compacted = compaction.prepare_history(
                 messages, active_request, enabled=automatic_compaction_enabled)
+            if compacted.applied:
+                checkpoint()
             if compacted.reason:
                 automatic_compaction_enabled = False
                 core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
@@ -331,13 +344,15 @@ def agent_loop(messages: list, active_request: str):
                     and state.claim_reactive_compaction()):
                 # 原地替换历史，保留调用方持有的列表引用。
                 compacted = compaction.reactive_compact(messages, active_request)
+                if compacted.applied:
+                    checkpoint()
                 if compacted.reason is None:
                     continue
                 e = RuntimeError(f"Reactive compaction failed: {compacted.reason}")
             # 调用最终失败时，将未确认的定时任务重新放回队列。
             scheduler.restore_cron_jobs(unacknowledged_cron_jobs)
             # 将错误写入历史，供外层向用户展示。
-            messages.append({"role": "assistant", "content": [
+            append({"role": "assistant", "content": [
                 {"type": "text", "text": f"[Error] {type(e).__name__}: {e}"}]})
             # 释放已完成任务的 agent 分配记录。
             tasks.release_completed_assignment("agent")
@@ -361,10 +376,10 @@ def agent_loop(messages: list, active_request: str):
             continue
         if action in {"continue", "stop"}:
             # Preserve partial text only after the upgraded call has returned.
-            messages.append({"role": "assistant", "content": response.content})
+            append({"role": "assistant", "content": response.content})
             if action == "continue":
                 # 添加续写提示，作为下一次模型调用的用户消息。
-                messages.append({"role": "user", "content": core.CONTINUATION_PROMPT})
+                append({"role": "user", "content": core.CONTINUATION_PROMPT})
                 # 返回循环顶部继续调用模型。
                 continue
             # 续写机会耗尽时释放已完成的分配记录。
@@ -373,13 +388,15 @@ def agent_loop(messages: list, active_request: str):
             return
 
         # 保存模型响应，供工具结果和后续调用引用。
-        messages.append({"role": "assistant", "content": response.content})
+        append({"role": "assistant", "content": response.content})
         # 没有工具请求时，模型已完成当前一轮回答。
         if not message_content.has_tool_use(response.content):
             # 通知 Stop 钩子本轮模型输出已完成。
             hooks.trigger_hooks("Stop", messages)
             # 检查当前目标是否允许结束。
             decision = evaluate_goal(messages)
+            if decision is not None:
+                checkpoint()
             # 目标未达成时，反馈缺失条件并继续调用模型。
             if decision is not None and decision.action == "block":
                 # 读取仍在生效的目标条件。
@@ -388,7 +405,7 @@ def agent_loop(messages: list, active_request: str):
                 print(f"  \033[35m[goal] continue: "
                       f"{decision.reason[:80]}\033[0m")
                 # 将目标条件和评估结果写回历史。
-                messages.append({"role": "user", "content": (
+                append({"role": "user", "content": (
                     "[Goal still active]\n"
                     f"Condition: {condition}\n"
                     f"Evaluator: {decision.reason}\n"
@@ -483,9 +500,10 @@ def agent_loop(messages: list, active_request: str):
                             "tool_use_id": block.id, "content": output})
 
         # 把所有工具结果及已完成的后台通知写入历史。
-        messages.append({"role": "user", "content": build_user_content(results)})
+        append({"role": "user", "content": build_user_content(results)})
         # 如本轮请求了手动压缩，在工具结果回填后生成摘要。
-        manual_compaction.apply_after_results(messages, active_request)
+        if manual_compaction.apply_after_results(messages, active_request) is not None:
+            checkpoint()
 
 
 def print_turn_assistants(messages: list, turn_start: int):
@@ -510,9 +528,14 @@ def async_event_loop(history: list, session_state: dict):
         有事件时在 agent_lock 内追加团队消息、执行 agent_loop 并打印新增回复。
         这是普通同步函数，函数名中的 async 不表示 asyncio 协程。
     """
-    while True:
-        time.sleep(core.ASYNC_EVENT_POLL_SECONDS)
+    stop_event = session_state.get("stop_event", threading.Event())
+    session = session_state.get("session")
+    while not stop_event.wait(core.ASYNC_EVENT_POLL_SECONDS):
         with agent_lock:
+            if stop_event.is_set():
+                return
+            if session is not None and session.session_id is None:
+                continue
             with scheduler.cron_lock:
                 fired = list(scheduler.cron_queue)
             inbox = subagent.consume_lead_inbox(route_protocol=True)
@@ -527,6 +550,8 @@ def async_event_loop(history: list, session_state: dict):
             if inbox:
                 history.append({"role": "user",
                                 "content": subagent.format_subagent_events(inbox)})
+                if session:
+                    session.save()
                 core.terminal_print(
                     f"  \033[33m[subagent auto] {len(inbox)} events\033[0m")
             active_request = (
@@ -534,5 +559,9 @@ def async_event_loop(history: list, session_state: dict):
                 if scheduled_requests
                 else session_state["active_user_request"]
             )
-            agent_loop(history, active_request)
+            if session:
+                session.record("background_notification", active_request)
+            agent_loop(history, active_request, session.save if session else None)
+            if session:
+                session.record("turn_complete", active_request)
             print_turn_assistants(history, turn_start)

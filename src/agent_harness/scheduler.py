@@ -160,6 +160,12 @@ def has_pending_background() -> bool:
                    for task in background_tasks.values())
 
 
+def has_background_tasks() -> bool:
+    """Include running commands and undelivered results at session boundaries."""
+    with background_lock:
+        return bool(background_tasks)
+
+
 
 # -- Cron 调度器 --
 

@@ -17,9 +17,10 @@ import threading
 
 from . import goal as goal_module
 from . import core, host, workflow_runtime, workflow_demo
+from .session_store import InteractiveSession, SessionError, SessionStore
 
 
-def handle_goal_command(query: str) -> tuple[bool, str]:
+def handle_goal_command(query: str, session: InteractiveSession | None = None) -> tuple[bool, str]:
     """在本地拦截目标状态查询、清除和设置命令。
 
     输入：query 为用户输入。
@@ -34,16 +35,78 @@ def handle_goal_command(query: str) -> tuple[bool, str]:
     argument = stripped[6:].strip()
     # 无参数（"/goal" 或 "/goal  "）→ 查看当前目标状态
     if not argument:
-        print(host.GOAL.status(0))
+        result = host.GOAL.status(0)
+        print(result)
+        if session:
+            session.record("goal_query", stripped, result)
         return True, ""
     # 参数是清除别名（clear/reset/off 等）→ 清除目标
     if argument.lower() in goal_module.CLEAR_ALIASES:
-        print(host.GOAL.clear())
+        result = host.GOAL.clear()
+        print(result)
+        if session:
+            session.record("goal_clear", stripped, result)
         return True, ""
     # 其他参数 → 设置为新目标，并让参数继续作为用户输入走 agent 问答
     host.GOAL.set_goal(argument)
+    if session:
+        session.record("goal_set", argument)
     print(f"  \033[35m[goal] set: {argument}\033[0m")
     return False, argument
+
+
+def handle_session_command(query: str, session: InteractiveSession,
+                           session_state: dict) -> bool:
+    """Handle storage commands under agent_lock, leaving invalid restores untouched."""
+    parts = query.split()
+    if not parts or parts[0] not in {"/resume", "/delete"}:
+        return False
+    command = parts[0]
+    try:
+        if command == "/resume" and len(parts) == 1:
+            entries, errors = session.store.list_sessions()
+            if not entries:
+                print("No saved sessions")
+            for entry in entries:
+                current = " *" if entry["id"] == session.session_id else ""
+                print(f"{entry['id']}{current}  {entry['updated_at']}  "
+                      f"{entry['message_count']} messages  {entry['summary']}")
+            for error in errors:
+                print(f"[session error] Skipped {error}")
+            return True
+        if len(parts) != 2:
+            raise SessionError(f"Usage: {command} <session_id>")
+        session_id = parts[1]
+        session.store.path(session_id)
+        if command == "/delete":
+            if session_id == session.session_id:
+                raise SessionError("Cannot delete the active session")
+            session.store.delete(session_id)
+            print(f"[session] Deleted {session_id}")
+            return True
+        if session_id == session.session_id:
+            print(f"[session] Already using {session_id}")
+            return True
+        snapshot = session.store.load(session_id)
+        restored_goal = goal_module.GoalController.from_snapshot(
+            host.GOAL.evaluator, snapshot["goal"], host.GOAL.block_cap)
+        with host.subagent.subagent_lock:
+            children_active = bool(host.subagent.active_subagents)
+        if (host.scheduler.has_background_tasks() or children_active
+                or host.subagent.BUS.peek("lead")):
+            raise SessionError("Background work or results remain; finish them and retry /resume")
+        if not session.save():
+            raise SessionError("Current session could not be saved; context was not switched")
+        # Retire instance-local services. Durable task/worktree records stay in place.
+        host.mcp_clients.clear()
+        host.rounds_since_todo = 0
+        host.GOAL = restored_goal
+        session_state["active_user_request"] = snapshot["active_user_request"]
+        session.activate(snapshot)
+        print(f"[session] Resumed {session_id} ({len(session.history)} messages)")
+    except (SessionError, goal_module.GoalError, OSError) as exc:
+        print(f"[session error] {exc}")
+    return True
 
 
 
@@ -60,41 +123,77 @@ def run_cli() -> None:
     # 打印欢迎/使用说明
     print("agent-harness: agent loop + tools + workflow + goal")
     print("Enter a question, press Enter to send. Type q to quit.")
-    print("Set a completion condition with /goal <condition>.\n")
+    print("/goal <condition> sets a goal. /resume lists sessions; /resume <id> restores one.")
+    print("/delete <id> deletes an inactive session.\n")
 
     history: list = []                  # 对话历史（所有 user/assistant 消息）
-    session_state = {"active_user_request": "(no active user request)"}  # 会话状态
+    session = InteractiveSession(SessionStore(core.WORKDIR), history,
+                                 lambda: host.GOAL, core.terminal_print)
+    stop_event = threading.Event()
+    session_state = {"active_user_request": "(no active user request)",
+                     "session": session, "stop_event": stop_event}
+    # Old child threads do not survive process restart; their mailbox is not a new turn.
+    host.subagent.consume_lead_inbox(route_protocol=False)
 
     # 后台守护线程：跑异步事件循环（处理定时任务/异步回调）
-    threading.Thread(
+    event_thread = threading.Thread(
         target=host.async_event_loop,   # 在后台线程里执行这个函数
         args=(history, session_state),  # Pass history and the current request.
         daemon=True,                    # 守护线程：主程序退出它也自动结束
-    ).start()
+    )
+    event_thread.start()
 
     # 主循环：一直读到用户退出
-    while True:
-        try:
+    try:
+        while True:
             query = host.CONSOLE.ask()          # 阻塞等待用户输入一行
-        except (EOFError, KeyboardInterrupt):   # Ctrl+D / Ctrl+C → 退出
-            break
-        stripped = query.strip()                # 去掉首尾空格
-        if stripped.lower() in ("q", "exit", ""):  # q / exit / 空输入 → 退出
-            break
-        # 处理 /goal 这类斜杠命令；如果已被处理就跳过本轮问答
-        handled, query = handle_goal_command(stripped)
-        if handled:
+            stripped = query.strip()
+            if stripped.lower() in ("q", "exit", ""):
+                break
+            if stripped.split()[0] in {"/resume", "/delete"}:
+                if not host.agent_lock.acquire(blocking=False):
+                    print("[session] A model turn is running; retry after it finishes")
+                    continue
+                try:
+                    handle_session_command(stripped, session, session_state)
+                finally:
+                    host.agent_lock.release()
+                print()
+                continue
+            with host.agent_lock:
+                try:
+                    handled, query = handle_goal_command(stripped, session)
+                except goal_module.GoalError as exc:
+                    session.record("goal_set", stripped, str(exc))
+                    print(f"[goal error] {exc}")
+                    continue
+                if handled:
+                    print()
+                    continue
+                host.trigger_hooks("UserPromptSubmit", query)
+                session.finish_pending_tools()
+                turn_start = len(history)
+                session_state["active_user_request"] = query
+                history.append({"role": "user", "content": query})
+                session.record("user_input", query)
+                try:
+                    host.agent_loop(history, query, session.save)
+                finally:
+                    session.save()
+                session.record("turn_complete", query)
+                host.print_turn_assistants(history, turn_start)
             print()
-            continue
-        # 加锁：保证同一时刻只有本线程在操作 agent（避免与后台线程竞争）
+    except (EOFError, KeyboardInterrupt):
+        pass
+    finally:
+        stop_event.set()
+        host.file_tools._stop_all_shell_processes()
         with host.agent_lock:
-            host.trigger_hooks("UserPromptSubmit", query)   # 通知钩子：用户提交了问题
-            turn_start = len(history)                       # 记住本轮开始前的历史长度
-            session_state["active_user_request"] = query    # 更新当前活跃请求
-            history.append({"role": "user", "content": query})  # 用户消息存入历史
-            host.agent_loop(history, query)  # Append responses and tool results.
-            host.print_turn_assistants(history, turn_start) # 只打印本轮新增的助手回复
-        print()                                             # 空行分隔，方便阅读
+            session.save()
+            for child in host.subagent.list_subagents():
+                host.subagent.run_request_shutdown(child["name"])
+        event_thread.join(timeout=1)
+        core.CLI_ACTIVE = False
 
 
 

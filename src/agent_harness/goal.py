@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -480,6 +482,54 @@ class GoalController:
         }
         self.events.append(event)
         self.last_status = event
+
+    def snapshot(self) -> dict[str, Any]:
+        """Export session state without token counters or evaluator configuration."""
+        active = None
+        if self.active is not None:
+            active = {key: getattr(self.active, key) for key in
+                      ("condition", "set_at", "iterations", "last_reason")}
+        return copy.deepcopy({"active": active,
+                              "consecutive_blocks": self.consecutive_blocks,
+                              "last_status": self.last_status,
+                              "events": self.events})
+
+    @classmethod
+    def from_snapshot(cls, evaluator: Any, snapshot: dict,
+                      block_cap: int = DEFAULT_STOP_HOOK_BLOCK_CAP) -> GoalController:
+        """Validate and restore a full session snapshot using current configuration."""
+        try:
+            if not isinstance(snapshot, dict):
+                raise ValueError("goal snapshot must be an object")
+            blocks = snapshot["consecutive_blocks"]
+            events, status = snapshot["events"], snapshot["last_status"]
+            if (type(blocks) is not int or blocks < 0
+                    or not isinstance(events, list)
+                    or not all(isinstance(event, dict) for event in events)
+                    or (status is not None and not isinstance(status, dict))):
+                raise ValueError("invalid goal counters or events")
+            if status is not None and (
+                    not isinstance(status.get("condition"), str)
+                    or type(status.get("met")) is not bool
+                    or type(status.get("failed")) is not bool):
+                raise ValueError("invalid last goal status")
+            controller = cls(evaluator, block_cap, copy.deepcopy(events))
+            controller.consecutive_blocks = blocks
+            controller.last_status = copy.deepcopy(status)
+            active = snapshot["active"]
+            if active is not None:
+                condition, iterations = active["condition"], active["iterations"]
+                set_at, reason = active["set_at"], active["last_reason"]
+                if (not isinstance(condition, str) or not condition.strip()
+                        or len(condition) > MAX_GOAL_LENGTH
+                        or type(iterations) is not int or iterations < 0
+                        or type(set_at) not in (int, float) or not math.isfinite(set_at)
+                        or (reason is not None and not isinstance(reason, str))):
+                    raise ValueError("invalid active goal")
+                controller.active = GoalState(condition, iterations, set_at, 0, reason)
+            return controller
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GoalError(f"Invalid goal snapshot: {exc}") from exc
 
     @classmethod
     def restore(

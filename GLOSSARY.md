@@ -9,6 +9,7 @@
 - **assignment**：tasks 管理的执行者与任务目录分配；认领时建立，最终回答后释放已完成任务，失败/关闭时释放未完成归属。
 - **workflow runtime**：`workflow_runtime.py`，可 resume 的多 agent 工作流；每次 `agent()` 调用进 journal。
 - **goal**：`goal.py`，接在 agent 循环的 Stop 边界；模型不再请求工具时决定放行还是继续。
+- **交互会话**：从第一次有效用户交互创建的持久化 Lead 对话上下文，保存于启动目录 `.transcripts/sessions/<id>.json`；可用 `/resume <id>` 恢复。
 - **runner**：`SubagentRunner`，将工作流步骤接入统一子 agent 的 adapter；真实客户端与离线 DemoModelClient 都经过同一 once 执行路径。
 - **journal**：workflow 按调用键记录结果与 token 用量；resume 命中缓存时不重复计费。
 - **WORKDIR**：运行时状态目录的基准，取启动时的 `Path.cwd()`；与随包的 `skills/` 相对。

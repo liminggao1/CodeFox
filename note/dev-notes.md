@@ -44,7 +44,9 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 PYTHONPATH=src /home/gaogao/miniconda3/envs/learncc/bin/python -m agent_harness
 ```
 
-提示符 `agent-harness >>` 下输入一句话回车发送；`/goal` 看目标状态；`q` 退出。**每轮都消耗额度。**
+提示符 `agent-harness >>` 下输入一句话回车发送；`/goal` 看目标状态；`/resume` 列出会话，`/resume <id>` 恢复会话，`/delete <id>` 删除非活动会话；`q` 退出。**每轮都消耗额度。**
+
+首次有效交互会在启动目录 `.transcripts/sessions/` 创建一个 JSON 快照。历史追加、工具结果、压缩替换和 goal 状态都会更新同一文件；退出或 Ctrl+C 不删除它。恢复前需要当前模型回合、后台任务、子 agent 和 Lead 信箱都已结束。恢复只加载历史和 goal，任务板与仍有效的 worktree 继续使用，旧线程和 MCP 连接不会恢复。
 
 装过包（`pip install -e .`）时可省掉 `PYTHONPATH`，并用命令 `agent-harness` 代替 `python -m agent_harness`。
 本机**未安装**，走的是上面这条。

@@ -35,7 +35,7 @@ python -m agent_harness workflow resume
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/agent_harness/cli.py` | 入口：交互循环 + `/goal` 本地处理 + workflow demo |
+| `src/agent_harness/cli.py` | 入口：交互循环 + `/goal`、`/resume`、`/delete` 本地处理 + workflow demo |
 | `src/agent_harness/__main__.py` | `python -m agent_harness` 入口 |
 | `src/agent_harness/llm_client.py` | 客户端 shim：Anthropic Messages 或 OpenAI Responses 双协议 |
 | `src/agent_harness/host.py` | 集成宿主：agent 主循环 + 上下文刷新 + 把各模块接线起来；状态路径由各模块按 `core.WORKDIR` 实时解析，换 cwd 无需重新绑定 |
@@ -61,6 +61,7 @@ python -m agent_harness workflow resume
 | `src/agent_harness/workflow_runtime.py` | 工作流运行时：journal、预算、resume、并行 agent |
 | `src/agent_harness/workflow_demo.py` | 保存的示例工作流、schema 与离线 DemoModelClient；由 host/CLI 显式接线 |
 | `src/agent_harness/goal.py` | 目标层：GoalController / PromptGoalEvaluator |
+| `src/agent_harness/session_store.py` | 本地交互会话的一文件快照、原子保存、读取、列出和删除 |
 | `src/agent_harness/skills/` | 技能资产（随包分发） |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
 | `tests/` | 离线测试，按模块拆分（协议、任务、压缩、调度、权限、编码、技能等） |
@@ -82,7 +83,8 @@ python -m agent_harness workflow resume
   `tools=[]` 只处理文本，名单可限制工具。预算、格式重试与缓存恢复仍由工作流管理，见 [调试笔记第 12 节](note/dev-notes.md#12-工作流单次-agent-调用)。
 - **goal 接在 Stop 边界**：模型不再请求工具时先问目标控制器，返回 `block` 就补一条
   `[Goal still active]` 消息，继续同一条循环。
-- **goal 状态只在内存**：重启后需要重新 `/goal`。
+- **交互会话**：第一次有效用户交互创建 `.transcripts/sessions/<id>.json`，每次历史变化都保存；`/resume` 列出会话，`/resume <id>` 恢复历史和 goal，`/delete <id>` 删除非活动会话。
+- **会话切换**：恢复前必须没有正在运行或待交付的后台任务、子 agent 或 Lead 信箱事件；当前会话先保存，失败则不切换。旧线程和连接不恢复，任务板和有效 worktree 记录继续保留。
 - **响应有效性**：Responses 失败状态和非法、截断的工具调用会交付明确错误；不执行部分工具。
 - **历史压缩**：失败保留原历史，自动或手动失败后继续主请求；真正超限时只尝试一次被动恢复。
 - **后台结果**：超过 200 字符的通知保留全文路径，全文随启动目录保存；绑定 worktree 的任务仍可通过 `read_file` 读取运行时归档，保存失败后整批等待重试。
