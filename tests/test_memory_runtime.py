@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 from types import SimpleNamespace
 
-from agent_harness import memory_runtime
+from agent_harness.context import memory_runtime
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +40,7 @@ def test_memory_runtime_exposes_memory_operations_only() -> None:
 
 def test_memory_source_has_no_legacy_agent_runtime() -> None:
     """Memory storage does not embed file tools or a Lead loop."""
-    source = (PROJECT_ROOT / "src/agent_harness/memory_runtime.py").read_text(
+    source = (PROJECT_ROOT / "src/agent_harness/context/memory_runtime.py").read_text(
         encoding="utf-8"
     )
 

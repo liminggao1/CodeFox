@@ -28,10 +28,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import core
-from . import subagent
-from . import interaction
-from .subagent_session import selected_tool_names
+from .. import core
+from ..agents import subagent
+from ..runtime import interaction
+from ..agents.subagent_session import selected_tool_names
 
 try:
     import fcntl

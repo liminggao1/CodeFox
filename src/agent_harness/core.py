@@ -9,7 +9,7 @@ from __future__ import annotations   # 让类型注解按"字符串"延迟解析
 import os                            # 环境变量、路径操作
 import threading                     # 控制台锁、线程判断
 from pathlib import Path             # 面向对象的路径操作
-from .llm_client import Anthropic    # 从同包 llm_client 导入 Anthropic 客户端类
+from .providers.llm_client import Anthropic    # 从同包 llm_client 导入 Anthropic 客户端类
 from dotenv import load_dotenv       # 读取 .env 文件的库
 
 # ---------- 平台差异适配 ----------
@@ -133,7 +133,7 @@ CONSOLE = ConsoleBroker()           # 全局唯一的控制台入口
 
 def terminal_print(text: str):
     """向终端打印文本；若在工作线程且 CLI 活跃，先清行再打印，避免把用户正在输入的内容冲掉。"""
-    from . import interaction
+    from .runtime import interaction
     if interaction.current_context() is not None:
         interaction.publish("log", text=str(text))
         return

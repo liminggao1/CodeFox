@@ -1,12 +1,12 @@
 """Execute one subagent model round without owning its mailbox or lifecycle."""
 
-from . import core
-from . import file_tools
-from . import hooks
-from . import tasks
-from . import compaction
+from .. import core
+from ..tools import file_tools
+from ..runtime import hooks
+from ..workspace import tasks
+from ..context import compaction
 from . import recovery
-from . import message_content
+from ..providers import message_content
 from pathlib import Path
 
 

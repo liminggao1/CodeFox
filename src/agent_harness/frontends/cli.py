@@ -7,8 +7,9 @@ import json
 import sys
 import threading
 
-from . import core, workflow_runtime, workflow_demo
-from .interactive_runtime import InteractiveRuntime
+from .. import core
+from ..workflows import workflow_runtime, workflow_demo
+from ..runtime.interactive_runtime import InteractiveRuntime
 
 
 class CLIAdapter:

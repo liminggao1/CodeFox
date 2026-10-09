@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_harness import tool_registry
+from agent_harness.tools import tool_registry
 
 
 def test_mcp_snapshot_binds_each_handler_and_policy(host_factory):

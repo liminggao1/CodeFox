@@ -39,38 +39,19 @@ Textual 的本机安装、启动、快捷键、审批和会话操作见
 
 ## 目录
 
+源码的文件分工、调用关系和职责边界见 [源码结构说明](src/agent_harness/README.md)。
+
 | 路径 | 内容 |
 | --- | --- |
-| `src/agent_harness/cli.py` | 入口路由与 CLI adapter；唯一标准输入读取者，呈现事件和审批 |
-| `src/agent_harness/interactive_runtime.py` | CLI/TUI 共用的输入、命令、串行 Lead 回合、会话切换、停止与关闭 |
-| `src/agent_harness/interaction.py` | 前端无关的事件通道、审批关联、执行上下文与回合结果 |
-| `src/agent_harness/tui/` | Textual 界面、多行输入、审批与会话弹窗；只维护显示状态 |
-| `src/agent_harness/__main__.py` | `python -m agent_harness` 入口 |
-| `src/agent_harness/llm_client.py` | 客户端 shim：Anthropic Messages 或 OpenAI Responses 双协议 |
-| `src/agent_harness/host.py` | 集成宿主：agent 主循环 + 上下文刷新 + 把各模块接线起来；状态路径由各模块按 `core.WORKDIR` 实时解析，换 cwd 无需重新绑定 |
-| `src/agent_harness/core.py` | 共享配置：启动目录、API client、模型 id、常量、ConsoleBroker |
-| `src/agent_harness/tasks.py` | 任务板：文件持久化的任务、依赖、认领/完成、assignment 注册表 |
-| `src/agent_harness/worktrees.py` | Git worktree 的路径、注册表校验和 Git 调用 |
-| `src/agent_harness/task_worktrees.py` | 任务与 worktree 绑定、移除的跨模块操作；移除时保留分支 |
-| `src/agent_harness/skills.py` | 技能加载：扫描包内 `SKILL.md`，按名取用 |
-| `src/agent_harness/prompts.py` | 系统提示词拼装：身份、工具目录、工作目录、技能、memory、MCP |
-| `src/agent_harness/file_tools.py` | 基础工具：bash / 读写改文件 / glob / todo，含路径逃逸防护 |
-| `src/agent_harness/hooks.py` | Hooks 与权限检查：UserPromptSubmit / PreToolUse / PostToolUse / Stop |
-| `src/agent_harness/subagent.py` | 子 agent：统一创建、once/persistent 生命周期、信箱与计划/关闭协议 |
-| `src/agent_harness/compaction.py` | 分层上下文压缩：工具结果瘦身、消息裁剪、摘要 |
-| `src/agent_harness/recovery.py` | 重试与错误恢复：模型回退、重试预算 |
-| `src/agent_harness/scheduler.py` | 后台任务与 cron 调度：`.scheduled_tasks.json` 持久化 |
-| `src/agent_harness/mcp_tools.py` | MCP：连接后把 server 工具并入工具池 |
-| `src/agent_harness/registrations.py` | 工具 schema 与 handler 表：工具名到实现的唯一映射 |
-| `src/agent_harness/memory_runtime.py` | memory 运行时：相关记忆选取与抽取 |
-| `src/agent_harness/runtime_context.py` | 每次模型调用前构造只读上下文快照 |
-| `src/agent_harness/tool_registry.py` | 统一装配工具 schema、handler 和权限快照 |
-| `src/agent_harness/message_content.py` | 共享文本提取和工具请求判断；不依赖生命周期 |
-| `src/agent_harness/subagent_session.py` | 两种模式共用模型回合、工具执行、目录绑定和历史压缩 |
-| `src/agent_harness/workflow_runtime.py` | 工作流运行时：journal、预算、resume、并行 agent |
-| `src/agent_harness/workflow_demo.py` | 保存的示例工作流、schema 与离线 DemoModelClient；由 host/CLI 显式接线 |
-| `src/agent_harness/goal.py` | 目标层：GoalController / PromptGoalEvaluator |
-| `src/agent_harness/session_store.py` | 本地会话上下文的原子保存、读取、列出和删除，每个会话一个文件 |
+| [src/agent_harness/](src/agent_harness/README.md) | 包入口、共享配置、Lead 主循环和装配代码 |
+| [frontends/](src/agent_harness/frontends/README.md) | CLI / Textual 输入与显示 |
+| [runtime/](src/agent_harness/runtime/README.md) | 共享交互驱动、命令、事件/审批、会话存储与调度 |
+| [agents/](src/agent_harness/agents/README.md) | 子 agent 执行、goal 与恢复控制 |
+| [context/](src/agent_harness/context/README.md) | 提示词、历史压缩、memory 与技能加载 |
+| [providers/](src/agent_harness/providers/README.md) | 模型协议适配和消息内容读取 |
+| [tools/](src/agent_harness/tools/README.md) | 基础工具、MCP 与工具注册机制 |
+| [workspace/](src/agent_harness/workspace/README.md) | 任务板、分配与 Git 工作树 |
+| [workflows/](src/agent_harness/workflows/README.md) | 程序化工作流、预算与 journal 恢复 |
 | `src/agent_harness/skills/` | 技能资产（随包分发） |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
 | `tests/` | 离线测试，按模块拆分（协议、任务、压缩、调度、权限、编码、技能等） |
@@ -81,6 +62,9 @@ Textual 的本机安装、启动、快捷键、审批和会话操作见
 | `AGENTS.md` | 本仓库的 agent 约定：环境、命令、编码、不变量 |
 | `GLOSSARY.md` | 项目术语表：会话、上下文、任务、工作目录等概念的统一名称 |
 | `pyproject.toml` | 元数据、依赖、console 入口、pytest 配置 |
+
+直接导入实现时使用新子包路径，例如
+`from agent_harness.runtime.interactive_runtime import InteractiveRuntime`。
 
 ## 行为要点
 

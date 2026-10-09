@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_harness import goal as goal_module
+from agent_harness.agents import goal as goal_module
 
 
 # -- 测试夹具 --

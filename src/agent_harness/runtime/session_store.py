@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .goal import GoalController, GoalError
+from ..agents.goal import GoalController, GoalError
 from . import interaction
 
 
@@ -97,7 +97,7 @@ class SessionStore:
                 raise SessionError("Invalid active user request")
             if not isinstance(snapshot["workdir"], str) or not Path(snapshot["workdir"]).is_absolute():
                 raise SessionError("Invalid startup directory")
-            from . import tasks, worktrees
+            from ..workspace import tasks, worktrees
             if snapshot["task_id"] is not None and (
                     not isinstance(snapshot["task_id"], str)
                     or not tasks.TASK_ID_PATTERN.fullmatch(snapshot["task_id"])):

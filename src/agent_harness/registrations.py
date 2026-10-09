@@ -9,14 +9,14 @@ from . import core
 
 import json
 
-from . import tasks
-from . import task_worktrees
-from . import skills
-from . import subagent
-from . import file_tools
-from . import scheduler
-from . import mcp_tools
-from .tool_registry import ToolDefinition
+from .workspace import tasks
+from .workspace import task_worktrees
+from .context import skills
+from .agents import subagent
+from .tools import file_tools
+from .runtime import scheduler
+from .tools import mcp_tools
+from .tools.tool_registry import ToolDefinition
 
 # -- Lead 的 worktree 工具 --
 

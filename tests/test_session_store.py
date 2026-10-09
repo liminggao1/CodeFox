@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_harness.goal import GoalController
-from agent_harness.session_store import (InteractiveSession, SessionError,
+from agent_harness.agents.goal import GoalController
+from agent_harness.runtime.session_store import (InteractiveSession, SessionError,
                                           SessionStore)
 
 

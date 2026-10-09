@@ -45,7 +45,7 @@ def test_file_tools_round_trip_utf8_text(host_factory) -> None:
 def test_repository_text_files_are_utf8_with_lf() -> None:
     targets = [
         REPO_ROOT / "src" / "agent_harness" / name
-        for name in ("host.py", "core.py", "tasks.py", "scheduler.py")
+        for name in ("host.py", "core.py", "workspace/tasks.py", "runtime/scheduler.py")
     ]
     targets.append(REPO_ROOT / "README.md")
 
@@ -59,5 +59,5 @@ def test_repository_text_files_are_utf8_with_lf() -> None:
 def test_agent_harness_sources_decode_as_utf8() -> None:
     package = REPO_ROOT / "src" / "agent_harness"
 
-    for path in sorted(package.glob("*.py")):
+    for path in sorted(package.rglob("*.py")):
         path.read_text(encoding="utf-8")

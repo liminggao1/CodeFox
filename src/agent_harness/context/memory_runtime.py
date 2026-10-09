@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from . import core
+from .. import core
 
 MEMORY_INDEX_NAME = "MEMORY.md"
 
@@ -447,7 +447,7 @@ def extract_memories(messages: list) -> int:
     返回：本次保存数量，无对话、无合格候选或处理异常时返回 0。
         校验后仅写入非临时且不重复的持久化记录，并更新索引；异常打印跳过原因。
     """
-    from . import interaction
+    from ..runtime import interaction
     if interaction.stopped():
         return 0
     dialogue = dialogue_text(messages)
@@ -522,7 +522,7 @@ def consolidate_memories() -> int:
         校验完整输出后替换原记录并重建索引，写入失败时尝试按快照恢复原文件。
         输入目录过大时跳过本轮，避免把未发送的记忆覆盖丢失。
     """
-    from . import interaction
+    from ..runtime import interaction
     if interaction.stopped():
         return 0
     records = list_memory_files()

@@ -11,9 +11,9 @@ pytest.importorskip("textual")
 from textual.widgets import Markdown, Static, TextArea
 from textual.widgets.text_area import Selection
 from textual.containers import VerticalScroll
-from agent_harness.tui.app import HarnessApp
-from agent_harness.tui.widgets import ApprovalScreen, CommandCandidates, SessionScreen
-from agent_harness.interaction import ExecutionContext
+from agent_harness.frontends.tui.app import HarnessApp
+from agent_harness.frontends.tui.widgets import ApprovalScreen, CommandCandidates, SessionScreen
+from agent_harness.runtime.interaction import ExecutionContext
 from test_interactive_runtime import response, tool, runtime_factory
 
 
@@ -190,7 +190,7 @@ async def command_draft(app, pilot, text):
 
 
 def test_tui_approval_after_large_batch_ignores_later_logs(runtime_factory, monkeypatch):
-    from agent_harness.interaction import current_context
+    from agent_harness.runtime.interaction import current_context
     calls = []
     def create(**kwargs):
         if not calls:

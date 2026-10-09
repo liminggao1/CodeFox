@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from . import core
+from .. import core
 from . import worktrees
 
 fcntl = core.fcntl

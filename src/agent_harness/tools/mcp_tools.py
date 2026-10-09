@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import re
 
-from . import core
+from .. import core
 from .tool_registry import ToolDefinition
-from .task_worktrees import create_worktree
+from ..workspace.task_worktrees import create_worktree
 
 # -- MCP 系统 --
 

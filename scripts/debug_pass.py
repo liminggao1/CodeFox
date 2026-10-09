@@ -119,7 +119,7 @@ def main() -> int:
     os.chdir(workdir)
 
     import agent_harness.host as host
-    from agent_harness import goal as goal_module
+    from agent_harness.agents import goal as goal_module
 
     host.remember_after_turn = lambda messages: None  # 保持记忆功能离线
 

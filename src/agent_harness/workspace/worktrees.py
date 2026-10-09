@@ -6,7 +6,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import core
+from .. import core
 
 
 def _worktrees_dir(workdir: Path | None = None) -> Path:

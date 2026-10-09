@@ -8,8 +8,8 @@ from __future__ import annotations
 import random
 import time
 
-from . import core
-from .llm_client import ProtocolResponseError
+from .. import core
+from ..providers.llm_client import ProtocolResponseError
 
 # -- 错误恢复 --
 

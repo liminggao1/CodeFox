@@ -20,8 +20,8 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-from agent_harness import workflow_runtime as workflow  # noqa: E402
-from agent_harness import workflow_demo
+from agent_harness.workflows import workflow_runtime as workflow  # noqa: E402
+from agent_harness.workflows import workflow_demo
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +51,7 @@ def run_cli(*args: str, cwd: Path) -> str:
 
 
 def acquire_lock_in_child(run_id: str, store: str, results) -> None:
-    from agent_harness import workflow_runtime as child_workflow
+    from agent_harness.workflows import workflow_runtime as child_workflow
 
     child_workflow.store_dir = lambda: Path(store)
     try:
@@ -74,8 +74,8 @@ def test_workflow_runtime_resumes_from_journal(tmp_path: Path) -> None:
 def test_core_runtime_runs_without_importing_demo(tmp_path):
     env = dict(os.environ, PYTHONPATH=str(PROJECT_ROOT / "src"))
     code = (
-        "import asyncio, sys; from agent_harness import workflow_runtime as w; "
-        "assert 'agent_harness.workflow_demo' not in sys.modules; "
+        "import asyncio, sys; from agent_harness.workflows import workflow_runtime as w; "
+        "assert 'agent_harness.workflows.workflow_demo' not in sys.modules; "
         "assert not w.WORKFLOWS; "
         "w.RUNNER_FACTORY=lambda: None; "
         "exec('async def sample(ctx, args):\\n    return {\"answer\": 42}'); "

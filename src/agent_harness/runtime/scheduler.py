@@ -17,11 +17,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import core
-from . import file_tools
+from .. import core
+from ..tools import file_tools
 from . import hooks
-from . import tasks
-from . import compaction
+from ..workspace import tasks
+from ..context import compaction
 from . import interaction
 
 # -- 后台任务 --

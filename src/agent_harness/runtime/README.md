@@ -1,0 +1,23 @@
+# runtime：交互会话运行时
+
+集中管理 CLI/TUI 共用的交互规则，以及支撑执行的事件、审批、调度和 hooks。
+这里的交互运行时与 [workflows/](../workflows/README.md) 的工作流运行时不同。
+
+| 文件 | 职责 |
+| --- | --- |
+| [interactive_runtime.py](interactive_runtime.py) | `InteractiveRuntime`：接收输入、执行本地命令、串行驱动 Lead 回合、消费后台输入、切换会话、停止和关闭 |
+| [interaction.py](interaction.py) | 执行上下文、事件通道、输入/回合结果、审批请求及展示确认，关联会话代次和停止状态 |
+| [local_commands.py](local_commands.py) | `LocalCommand`、命令元数据和查找；供运行时路由与前端补全共用 |
+| [session_store.py](session_store.py) | `SessionStore` 和 `InteractiveSession`：会话格式校验、原子保存、读取/列出/删除及上下文保存与恢复准备 |
+| [scheduler.py](scheduler.py) | 后台任务结果、cron 校验/持久化/调度、待消费队列和服务启动/停止 |
+| [hooks.py](hooks.py) | 用户输入、工具执行和停止边界的 hooks；权限检查、审批请求、日志及大结果处理 |
+
+前端调用 `InteractiveRuntime`，后者调用根目录 [host.agent_loop](../host.py)。
+执行代码通过 `interaction` 发布事件和请求审批，前端通过同一通道消费和确认。
+调度器提供待交付工作，共享驱动决定何时把它交给 Lead。
+
+运行时拥有交互会话的执行与切换规则，不拥有 UI 控件。
+`session_store.py` 负责会话存储与恢复准备，目标是否能激活由共享驱动协调。
+任务和工作树绑定的校验由 [workspace/](../workspace/README.md) 提供，子 agent 生命周期由 [agents/](../agents/README.md) 提供。
+
+包级入口与职责分组见 [上级 README](../README.md)。

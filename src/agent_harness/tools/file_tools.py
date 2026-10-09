@@ -17,8 +17,8 @@ import threading
 import time
 from pathlib import Path
 
-from . import core
-from . import tasks
+from .. import core
+from ..workspace import tasks
 
 # -- 基础工具 --
 

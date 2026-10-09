@@ -6,8 +6,8 @@ Hooks 位于工具处理器之外，因此权限、日志和 Stop 行为可独�
 
 from __future__ import annotations
 
-from . import core
-from . import tool_registry
+from .. import core
+from ..tools import tool_registry
 from . import interaction
 
 # -- Hooks 与权限检查 --

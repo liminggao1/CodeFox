@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from agent_harness.interaction import (
+from agent_harness.runtime.interaction import (
     ExecutionContext, InteractionChannel, current_context, execution_context,
 )
 

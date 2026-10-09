@@ -16,52 +16,52 @@ import time
 from pathlib import Path
 
 from . import core
-from . import tasks
-from . import worktrees
-from . import task_worktrees
-from . import skills
-from . import prompts
-from . import file_tools
-from . import hooks
-from . import subagent
-from . import message_content
-from . import compaction
-from . import recovery
-from . import scheduler
-from . import mcp_tools
+from .workspace import tasks
+from .workspace import worktrees
+from .workspace import task_worktrees
+from .context import skills
+from .context import prompts
+from .tools import file_tools
+from .runtime import hooks
+from .agents import subagent
+from .providers import message_content
+from .context import compaction
+from .agents import recovery
+from .runtime import scheduler
+from .tools import mcp_tools
 from . import registrations
-from . import tool_registry
-from . import memory_runtime
+from .tools import tool_registry
+from .context import memory_runtime
 from . import runtime_context
-from . import goal as goal_module
-from . import workflow_runtime
-from . import workflow_demo
-from . import interaction
-from .session_store import json_value
+from .agents import goal as goal_module
+from .workflows import workflow_runtime
+from .workflows import workflow_demo
+from .runtime import interaction
+from .runtime.session_store import json_value
 
 # Re-export names used by the CLI and source-level callers.
 from .core import (  # noqa: F401
     CONSOLE, PROMPT, READLINE_PROMPT,
     terminal_print,
 )
-from .tasks import (  # noqa: F401
+from .workspace.tasks import (  # noqa: F401
     CURRENT_TODOS, Task, assignment_cwd, assignment_versions, claim_task,
     complete_task, create_task, get_task_json, list_tasks, load_task,
     release_completed_assignment, release_assignment, save_task,
     task_lock, task_worktree_cwd, assignments, update_task,
 )
-from .worktrees import (  # noqa: F401
+from .workspace.worktrees import (  # noqa: F401
     run_git, _registered_worktrees, _registered_worktree,
 )
-from .task_worktrees import create_worktree, remove_worktree  # noqa: F401
-from .skills import list_skills, load_skill, SKILL_REGISTRY  # noqa: F401
-from .prompts import PROMPT_SECTIONS, ENVIRONMENT_PROMPT  # noqa: F401
-from .file_tools import (  # noqa: F401
+from .workspace.task_worktrees import create_worktree, remove_worktree  # noqa: F401
+from .context.skills import list_skills, load_skill, SKILL_REGISTRY  # noqa: F401
+from .context.prompts import PROMPT_SECTIONS, ENVIRONMENT_PROMPT  # noqa: F401
+from .tools.file_tools import (  # noqa: F401
     call_tool_handler, run_agent_bash, run_agent_edit, run_agent_glob,
     run_agent_read, run_agent_write, run_bash, run_edit, run_glob, run_read,
     run_todo_write, run_write, safe_path,
 )
-from .subagent import (  # noqa: F401
+from .agents.subagent import (  # noqa: F401
     BUS, MessageBus, RESERVED_SUBAGENT_NAMES,
     active_subagents, consume_lead_inbox, format_subagent_events, plan_gates,
     plan_request_ids, pending_requests, ProtocolState, new_request_id,
@@ -71,22 +71,22 @@ from .subagent import (  # noqa: F401
     run_request_plan, run_request_shutdown,
     run_review_plan, subagent_lock,
 )
-from .hooks import (  # noqa: F401
+from .runtime.hooks import (  # noqa: F401
     register_hook, trigger_hooks, permission_hook, log_hook, large_output_hook,
     user_prompt_hook, stop_hook, HOOKS, DENY_LIST,
 )
-from .subagent import spawn_subagent  # noqa: F401
-from .compaction import (  # noqa: F401
+from .agents.subagent import spawn_subagent  # noqa: F401
+from .context.compaction import (  # noqa: F401
     block_type, compact_history, estimate_size, micro_compact, snip_compact,
     tool_result_budget, fit_tool_results, reactive_compact,
 )
-from .scheduler import (  # noqa: F401
+from .runtime.scheduler import (  # noqa: F401
     collect_background_results, has_pending_background, start_runtime_services,
     should_run_background, start_background_task, consume_cron_queue,
     acknowledge_cron_jobs, restore_cron_jobs, cron_lock, cron_queue, CronJob,
     schedule_job, cancel_job, run_schedule_cron, run_list_crons, run_cancel_cron,
 )
-from .mcp_tools import (  # noqa: F401
+from .tools.mcp_tools import (  # noqa: F401
     connect_mcp, mcp_clients, MCPClient, MOCK_SERVERS,
     normalize_mcp_name, MCP_HOST_POLICY,
 )
@@ -96,7 +96,7 @@ from .registrations import (  # noqa: F401
     run_spawn_subagent, run_list_subagents, run_send_message,
     run_connect_mcp, run_create_worktree, run_remove_worktree,
 )
-from .recovery import RecoveryState  # noqa: F401
+from .agents.recovery import RecoveryState  # noqa: F401
 
 workflow_demo.register_workflows()
 workflow_runtime.RUNNER_FACTORY = (

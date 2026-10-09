@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_harness import recovery
+from agent_harness.agents import recovery
 
 
 def test_429_breaks_consecutive_529_sequence(monkeypatch):

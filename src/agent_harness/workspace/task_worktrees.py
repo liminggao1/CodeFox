@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import core
-from . import scheduler
+from .. import core
+from ..runtime import scheduler
 from . import tasks
 from . import worktrees
 

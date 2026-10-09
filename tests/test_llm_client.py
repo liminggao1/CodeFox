@@ -5,7 +5,8 @@ import asyncio
 
 import pytest
 
-from agent_harness import llm_client, recovery
+from agent_harness.providers import llm_client
+from agent_harness.agents import recovery
 
 
 def tool(arguments="{}", name="read_file", call_id="call-1"):

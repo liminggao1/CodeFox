@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from . import core
+from .. import core
 
 # -- Skill 加载 --
 

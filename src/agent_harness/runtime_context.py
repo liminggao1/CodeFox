@@ -2,9 +2,9 @@
 
 from dataclasses import dataclass
 
-from . import memory_runtime
-from . import mcp_tools
-from . import subagent
+from .context import memory_runtime
+from .tools import mcp_tools
+from .agents import subagent
 
 
 @dataclass(frozen=True)

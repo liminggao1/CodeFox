@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_harness.subagent_session import SubagentSession
+from agent_harness.agents.subagent_session import SubagentSession
 
 
 def response(*blocks, stop_reason="end_turn"):

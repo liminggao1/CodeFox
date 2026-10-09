@@ -8,7 +8,10 @@ import threading
 import uuid
 from pathlib import Path
 
-from . import core, goal, host, interaction
+from .. import core
+from ..agents import goal
+from .. import host
+from . import interaction
 from .local_commands import find_command
 from .session_store import InteractiveSession, SessionError, SessionStore, json_value
 

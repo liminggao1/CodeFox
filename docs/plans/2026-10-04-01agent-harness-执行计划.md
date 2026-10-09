@@ -38,7 +38,7 @@ agent-harness/
 
 ### 1. memory 改为正常导入
 
-s15 原先按路径 `importlib` 加载 `s09_memory/code.py`。现在整份拷为 [src/agent_harness/memory_runtime.py](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/memory_runtime.py)，host 直接导入并共享 client / model / workspace：
+s15 原先按路径 `importlib` 加载 `s09_memory/code.py`。现在整份拷为 [src/agent_harness/context/memory_runtime.py](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/context/memory_runtime.py)，host 直接导入并共享 client / model / workspace：
 
 - [host.py:88](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/host.py:88) `from . import memory_runtime as MEMORY_RUNTIME`
 - 随后设 `WORKDIR` / `MEMORY_DIR` / `MEMORY_INDEX` / `client` / `MODEL`，等价于原先 [:92-110](/D:/01dpan/01project/life/learncc/learn-claude-code/s15_integrated_harness/code.py:92) 的行为。
@@ -69,7 +69,7 @@ s15 原先按路径 `importlib` 加载 `s09_memory/code.py`。现在整份拷为
 
 ### 5. CLI
 
-- `/goal` 在写入 history 前本地拦截（[src/agent_harness/cli.py](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/cli.py)），支持 `/goal`、`/goal <条件>`、`/goal clear|stop|off|reset|none|cancel`
+- `/goal` 在写入 history 前本地拦截（[src/agent_harness/frontends/cli.py](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/frontends/cli.py)），支持 `/goal`、`/goal <条件>`、`/goal clear|stop|off|reset|none|cancel`
 - 提示符改为 `agent-harness >> `
 - `agent-harness workflow demo|resume` 走 s16 原 `run_demo`
 
@@ -109,7 +109,7 @@ python -m pytest -q
 
 1. **拼接顺序**改为 `memory → goal → workflow → host`（原写「内存/常量 → memory → host → workflow → goal」）。
    原因：host 在模块级就配置 `RUNNER_FACTORY` 和 `GOAL`，必须最后执行，否则被覆盖。
-2. **demo 用 mock runner**：`cli.py` 显式设 `workflow.RUNNER_FACTORY = MockAgentRunner`（[cli.py:90](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/cli.py:90)）。
+2. **demo 用 mock runner**：`cli.py` 显式设 `workflow.RUNNER_FACTORY = MockAgentRunner`（[cli.py:90](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/frontends/cli.py:90)）。
    原因：`import agent_harness.host` 会把 runner 永久改成真实 API 版本，导致 demo 与测试走网络；实测发现后修正。
 
 ## 七、未验证项
@@ -158,11 +158,11 @@ python -m pytest -q
 - `skills/` 从项目根移入包内并声明为包数据；`SKILLS_DIR` 改为
   `Path(__file__).resolve().parent / "skills"`，editable 与 wheel 安装都能解析。
 - 新增 `src/agent_harness/__main__.py`；`pyproject.toml` 增加
-  `[project.scripts] agent-harness = "agent_harness.cli:main"` 和
+  `[project.scripts] agent-harness = "agent_harness.frontends.cli:main"` 和
   `[tool.setuptools.packages.find] where = ["src"]`；`main(argv=None)` 兼容无参调用。
 - 入口改为 `agent-harness` 或 `python -m agent_harness`；`python cli.py` 不再可用。
 - 单文件版自举路径改指 `<repo>/src`，其 `llm_client` 导入改为
-  `from agent_harness.llm_client import Anthropic`。
+  `from agent_harness.providers.llm_client import Anthropic`。
 - 验证：`PYTHONPATH=src python -m agent_harness workflow demo|resume` 通过；
   `scan_skills()` 从包内解析出 4 个技能；56 个离线测试全绿。
 

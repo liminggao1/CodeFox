@@ -50,7 +50,7 @@ def displayed_approval(runtime, timeout=3):
 
 @pytest.fixture
 def runtime_factory(host_factory, monkeypatch):
-    from agent_harness import interactive_runtime
+    from agent_harness.runtime import interactive_runtime
     host = host_factory(enable_memory=True)
     remember = host.remember_after_turn
     monkeypatch.setattr(interactive_runtime, "host", host)
@@ -210,7 +210,7 @@ def test_goal_command_correlates_followup_turn(runtime_factory, monkeypatch):
 
 
 def test_cli_owns_all_reads_and_waits_for_goal_followup(runtime_factory, monkeypatch):
-    from agent_harness.cli import CLIAdapter
+    from agent_harness.frontends.cli import CLIAdapter
     runtime, host = runtime_factory([response(tools=[tool("bash", command="printf hello")], stop="tool_use"), response("After")])
     monkeypatch.setattr(host, "evaluate_goal", lambda messages: None)
     answers = iter(["/goal do it", "yes", "q"])
@@ -377,7 +377,7 @@ def test_background_delivery_runs_with_noninteractive_permissions(runtime_factor
 
 
 def test_frontend_once_inherits_approval_and_workflow_does_not(runtime_factory):
-    from agent_harness import workflow_runtime
+    from agent_harness.workflows import workflow_runtime
     child_call = tool("spawn_subagent", name="helper", prompt="execute", mode="once")
     runtime, host = runtime_factory([response(tools=[child_call], stop="tool_use"),
                                      response(tools=[tool("bash", command="printf child")], stop="tool_use"),
@@ -389,7 +389,7 @@ def test_frontend_once_inherits_approval_and_workflow_does_not(runtime_factory):
     finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
     assert finished.payload["outcome"]["status"] == "completed"
 
-    from agent_harness.interaction import ExecutionContext, execution_context
+    from agent_harness.runtime.interaction import ExecutionContext, execution_context
     values = iter([response(tools=[tool("bash", command="touch unwanted")], stop="tool_use"), response("workflow done")])
     client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kwargs: next(values)))
     context = ExecutionContext(runtime.channel, runtime.session.session_id, 1, "frontend", origin="frontend")
@@ -564,7 +564,7 @@ def test_target_worktree_validation_uses_target_root_without_switching(session_w
 
 
 def test_cli_display_failure_closes_pending_approval(runtime_factory):
-    from agent_harness.cli import CLIAdapter
+    from agent_harness.frontends.cli import CLIAdapter
     runtime, host = runtime_factory([response("Before", tools=[tool("bash", command="touch unwanted")], stop="tool_use")])
     reads = []
     def reader(prompt=None):
@@ -634,7 +634,7 @@ def test_restart_restores_task_and_retained_directory(session_worktree, monkeypa
     until(runtime, "runtime_closed")
     runtime._thread.join(timeout=5)
     monkeypatch.setattr(runtime.session.store, "save", original_save)
-    from agent_harness.interactive_runtime import InteractiveRuntime
+    from agent_harness.runtime.interactive_runtime import InteractiveRuntime
     fresh = InteractiveRuntime()
     try:
         fresh.start()
@@ -741,7 +741,7 @@ def test_restart_from_other_directory_finds_and_restores_session(session_worktre
     other_root.mkdir()
     monkeypatch.chdir(other_root)
     host.core.WORKDIR = other_root
-    from agent_harness.interactive_runtime import InteractiveRuntime
+    from agent_harness.runtime.interactive_runtime import InteractiveRuntime
     fresh = InteractiveRuntime()
     try:
         fresh.start()
@@ -824,7 +824,7 @@ def test_cross_directory_failure_preserves_current_context(runtime_factory, monk
     if failure == "save":
         monkeypatch.setattr(runtime.session.store, "save", fail)
     elif failure == "chdir":
-        monkeypatch.setattr("agent_harness.interactive_runtime.os.chdir", fail)
+        monkeypatch.setattr("agent_harness.runtime.interactive_runtime.os.chdir", fail)
     before_history = list(runtime.session.history)
     result, _ = resume_command(runtime, target["id"])
     assert result.payload["status"] == "failed", result.payload

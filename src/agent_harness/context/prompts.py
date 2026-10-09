@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from . import core
+from .. import core
 from . import skills
 
 # -- 提示词组装 --

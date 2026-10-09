@@ -140,7 +140,7 @@ def test_task_store_rejects_a_symlink_outside_the_workspace(
     (tmp_path / ".tasks").symlink_to(outside, target_is_directory=True)
 
     # 符号链接 .tasks 指向工作区外，路径检查应拒绝写入，避免越过启动目录。
-    from agent_harness import tasks
+    from agent_harness.workspace import tasks
 
     with pytest.raises(ValueError, match="Invalid task ID"):
         tasks.create_task("unsafe")

@@ -11,8 +11,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Markdown, RichLog, Static, TextArea
 
-from ..interactive_runtime import InteractiveRuntime
-from ..local_commands import LOCAL_COMMANDS, find_command
+from ...runtime.interactive_runtime import InteractiveRuntime
+from ...runtime.local_commands import LOCAL_COMMANDS, find_command
 from .widgets import ApprovalScreen, CommandCandidates, SessionScreen
 
 

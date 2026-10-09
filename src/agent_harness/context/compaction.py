@@ -13,8 +13,8 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 
-from . import core
-from . import message_content
+from .. import core
+from ..providers import message_content
 
 # -- 上下文压缩 --
 

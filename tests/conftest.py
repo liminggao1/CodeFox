@@ -27,7 +27,7 @@ def _reload_host() -> None:
 
 @pytest.fixture(autouse=True)
 def isolated_session_directory(tmp_path, monkeypatch):
-    from agent_harness import session_store
+    from agent_harness.runtime import session_store
 
     directory = tmp_path / "session-store"
     monkeypatch.setattr(session_store, "sessions_dir", lambda: directory)
@@ -72,14 +72,14 @@ def host_factory(tmp_path, monkeypatch):
 
 @pytest.fixture
 def workflow_module():
-    from agent_harness import workflow_runtime as workflow
+    from agent_harness.workflows import workflow_runtime as workflow
 
     return workflow
 
 
 @pytest.fixture
 def approval_hook():
-    from agent_harness.interaction import ExecutionContext, InteractionChannel, execution_context
+    from agent_harness.runtime.interaction import ExecutionContext, InteractionChannel, execution_context
 
     def check(hook, block, decision):
         channel = InteractionChannel()

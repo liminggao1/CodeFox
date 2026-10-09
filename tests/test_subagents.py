@@ -102,7 +102,7 @@ def test_cross_process_claim_waits_for_worktree_binding(
     ], cwd=tmp_path, check=True)
     task = host.create_task("Concurrent binding")
     child_code = (
-        "from agent_harness import tasks; "
+        "from agent_harness.workspace import tasks; "
         "print('ready', flush=True); "
         f"print(tasks.claim_task({task.id!r}, owner='alice'), flush=True)"
     )

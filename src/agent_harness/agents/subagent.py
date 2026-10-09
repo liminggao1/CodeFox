@@ -14,11 +14,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import core
-from . import interaction
-from . import tasks
-from . import prompts
-from . import message_content
+from .. import core
+from ..runtime import interaction
+from ..workspace import tasks
+from ..context import prompts
+from ..providers import message_content
 from .subagent_session import SubagentSession, selected_tool_names
 
 # -- 消息总线与团队协议 --
