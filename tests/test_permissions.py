@@ -146,3 +146,133 @@ def test_subagent_uses_restricted_tools_and_permission_hook(
     assert "outside the workspace" in calls[1]["messages"][-1]["content"][0][
         "content"]
     assert not (tmp_path.parent / "escape.md").exists()
+
+
+@pytest.mark.parametrize("owner", ["lead", "child"])
+@pytest.mark.parametrize("decision", [None, "", False, 0, "denied"])
+def test_tool_gate_uses_non_none_contract_for_lead_and_child(host_factory, monkeypatch, tmp_path, owner, decision):
+    host = host_factory()
+    posted = []
+    monkeypatch.setitem(host.hooks.HOOKS, "PreToolUse", [lambda call: decision])
+    monkeypatch.setitem(host.hooks.HOOKS, "PostToolUse", [lambda call, output: posted.append(call.name)])
+    tool_call = SimpleNamespace(type="tool_use", id="write", name="write_file",
+                                input={"path": "gate.txt", "content": "effect"})
+    responses = iter([
+        SimpleNamespace(stop_reason="tool_use", content=[tool_call]),
+        SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="Done")])])
+    histories = []
+
+    def create(**kwargs):
+        histories.append(list(kwargs["messages"]))
+        return next(responses)
+
+    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    if owner == "lead":
+        messages = [{"role": "user", "content": "write"}]
+        host.agent_loop(messages, "write")
+    else:
+        host.spawn_subagent("gate-child", "write", "once")
+    assert (tmp_path / "gate.txt").exists() is (decision is None)
+    assert posted == (["write_file"] if decision is None else [])
+    output = histories[1][-1]["content"][0]["content"]
+    assert output == ("Wrote 6 bytes to gate.txt" if decision is None else str(decision))
+
+
+@pytest.mark.parametrize("decision", ["", False, 0, "denied"])
+@pytest.mark.parametrize("background", [False, True])
+def test_stop_after_pre_hook_takes_priority_over_denial(host_factory, monkeypatch, tmp_path, decision, background):
+    host = host_factory()
+    from agent_harness.runtime.interaction import ExecutionContext, InteractionChannel, execution_context
+    stop = threading.Event()
+    channel = InteractionChannel()
+    context = ExecutionContext(channel, "test", 1, "turn", stop_event=stop)
+    posted = []
+
+    def pre(call):
+        stop.set()
+        return decision
+
+    monkeypatch.setitem(host.hooks.HOOKS, "PreToolUse", [pre])
+    monkeypatch.setitem(host.hooks.HOOKS, "PostToolUse", [lambda *args: posted.append(True)])
+    call = SimpleNamespace(type="tool_use", id="call", name="bash" if background else "write_file",
+                           input={"command": "touch must-not-exist", "background": True} if background
+                           else {"path": "must-not-exist", "content": "effect"})
+    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kwargs: SimpleNamespace(stop_reason="tool_use", content=[call]))))
+    messages = [{"role": "user", "content": "work"}]
+    with execution_context(context):
+        outcome = host.agent_loop(messages, "work")
+    events = []
+    while (event := channel.next_event()) is not None:
+        events.append(event)
+    results = [event for event in events if event.type == "tool_result"]
+    assert len(results) == 1
+    assert results[0].payload["status"] == "stopped"
+    assert results[0].payload["content"] == "Interrupted before execution"
+    assert results[0].payload["is_error"] is True
+    assert outcome.status == "stopped"
+    assert posted == [] and not host.scheduler.background_tasks
+    assert not (tmp_path / "must-not-exist").exists()
+
+
+@pytest.mark.parametrize("owner", ["lead", "child"])
+@pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse"])
+def test_tool_hook_exceptions_keep_existing_propagation(host_factory, monkeypatch, tmp_path, owner, event):
+    host = host_factory()
+
+    def fail(*args):
+        raise RuntimeError("hook failed")
+
+    monkeypatch.setitem(host.hooks.HOOKS, "PreToolUse", [])
+    monkeypatch.setitem(host.hooks.HOOKS, "PostToolUse", [])
+    monkeypatch.setitem(host.hooks.HOOKS, event, [fail])
+    call = SimpleNamespace(type="tool_use", id="write", name="write_file",
+                           input={"path": "effect.txt", "content": "effect"})
+    if owner == "lead":
+        monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(
+            create=lambda **kwargs: SimpleNamespace(stop_reason="tool_use", content=[call]))))
+        with pytest.raises(RuntimeError, match="hook failed"):
+            host.agent_loop([{"role": "user", "content": "write"}], "write")
+    else:
+        from agent_harness.agents.subagent_session import SubagentSession
+        session = SubagentSession("child", None, "test", "test", mode="once", task_tools=False)
+        with pytest.raises(RuntimeError, match="hook failed"):
+            session.execute_tool(call)
+    assert (tmp_path / "effect.txt").exists() is (event == "PostToolUse")
+
+
+def test_background_call_checks_once_and_posts_once_on_completion(host_factory, monkeypatch, tmp_path):
+    host = host_factory()
+    from test_interactive_runtime import response, tool
+    seen = []
+    monkeypatch.setitem(host.hooks.HOOKS, "PreToolUse", [lambda call: seen.append("pre")])
+    monkeypatch.setitem(host.hooks.HOOKS, "PostToolUse", [lambda call, output: seen.append("post")])
+    # Run the real worker synchronously so delivery needs no polling.
+    monkeypatch.setattr(host.scheduler.threading, "Thread", lambda target, **kwargs: SimpleNamespace(start=target))
+    responses = iter([response(tools=[tool("bash", command="printf done", background=True)], stop="tool_use"),
+                      response()])
+    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: next(responses))))
+    host.agent_loop([{"role": "user", "content": "run"}], "run")
+    assert seen == ["pre", "post"]
+
+
+def test_background_dispatch_rechecks_stop_after_selection(host_factory, monkeypatch, tmp_path):
+    host = host_factory()
+    from test_interactive_runtime import response, tool
+    from agent_harness.runtime.interaction import ExecutionContext, InteractionChannel, execution_context
+    stop = threading.Event()
+    context = ExecutionContext(InteractionChannel(), "session", 1, "turn", stop_event=stop)
+    monkeypatch.setitem(host.hooks.HOOKS, "PreToolUse", [])
+
+    def select(*args):
+        stop.set()
+        return True
+
+    monkeypatch.setattr(host.scheduler, "should_run_background", select)
+    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kw: response(tools=[tool("bash", command="touch not-started", background=True)], stop="tool_use"))))
+    messages = [{"role": "user", "content": "run"}]
+    with execution_context(context):
+        outcome = host.agent_loop(messages, "run")
+    assert outcome.status == "stopped"
+    assert not host.scheduler.background_tasks and not (tmp_path / "not-started").exists()

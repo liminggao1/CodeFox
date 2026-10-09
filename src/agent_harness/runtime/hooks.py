@@ -6,8 +6,10 @@ Hooks 位于工具处理器之外，因此权限、日志和 Stop 行为可独�
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .. import core
-from ..tools import tool_registry
+from ..tools import file_tools, tool_registry
 from . import interaction
 
 # -- Hooks 与权限检查 --
@@ -38,6 +40,34 @@ def trigger_hooks(event: str, *args):
         if result is not None:
             return result
     return None
+
+
+@dataclass(frozen=True)
+class ToolCheck:
+    status: str
+    text: str = ""
+
+
+def check_tool_use(block, *, authorize=None, stopped=None):
+    """Return allowed/denied/stopped after authorization and the pre-use hooks."""
+    if authorize is not None:
+        denied = authorize(block)
+        if denied is not None:
+            return ToolCheck("denied", str(denied))
+    denied = trigger_hooks("PreToolUse", block)
+    if stopped is not None and stopped():
+        return ToolCheck("stopped", "Interrupted before execution")
+    if denied is not None:
+        return ToolCheck("denied", str(denied))
+    return ToolCheck("allowed")
+
+
+def execute_tool(block, handler, *, on_status=None):
+    """Execute an approved synchronous call, then run its post-use hooks once."""
+    output = file_tools.call_tool_handler(
+        handler, block.input, block.name, on_status=on_status)
+    trigger_hooks("PostToolUse", block, output)
+    return output
 
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]

@@ -501,25 +501,23 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
                 # 其他工具继续按原有路径执行。
                 continue
 
-            # 执行工具前通知钩子，允许它阻止本次调用。
-            blocked = hooks.trigger_hooks("PreToolUse", block)
-            if interaction.stopped():
-                result_states[block.id] = "stopped"
-                results.append({"type": "tool_result", "tool_use_id": block.id,
-                                "content": "Interrupted before execution", "is_error": True})
-                continue
-            # 钩子拒绝调用时，将原因作为工具结果返回。
-            if blocked:
-                result_states[block.id] = "denied"
-                # 使用原工具调用 ID 与结果配对。
-                results.append({"type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": str(blocked)})
-                # 不再执行被阻止的工具。
+            check = hooks.check_tool_use(block, stopped=interaction.stopped)
+            if check.status != "allowed":
+                result_states[block.id] = check.status
+                rejected = {"type": "tool_result", "tool_use_id": block.id,
+                            "content": check.text}
+                if check.status == "stopped":
+                    rejected["is_error"] = True
+                results.append(rejected)
                 continue
 
             # 可后台执行的工具不阻塞当前模型轮次。
             if scheduler.should_run_background(block.name, block.input):
+                if interaction.stopped():
+                    result_states[block.id] = "stopped"
+                    results.append({"type": "tool_result", "tool_use_id": block.id,
+                                    "content": "Interrupted before execution", "is_error": True})
+                    continue
                 # 启动后台任务；失败时也要返回工具结果。
                 try:
                     # 将工具调用交给后台任务调度器。
@@ -544,11 +542,9 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             # 根据工具名查找同步处理函数。
             handler = handlers.get(block.name)
             # 执行工具，并把未知工具或执行异常转成结果文本。
-            output = file_tools.call_tool_handler(
-                handler, block.input, block.name,
+            output = hooks.execute_tool(
+                block, handler,
                 on_status=lambda status: result_states.update({block.id: status}))
-            # 执行完成后通知 PostToolUse 钩子。
-            hooks.trigger_hooks("PostToolUse", block, output)
             # 在终端显示截短的执行结果。
             if interaction.current_context() is None:
                 print(str(output)[:300])

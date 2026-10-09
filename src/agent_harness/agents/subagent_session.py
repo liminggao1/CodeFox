@@ -1,7 +1,6 @@
 """Execute one subagent model round without owning its mailbox or lifecycle."""
 
 from .. import core
-from ..tools import file_tools
 from ..tools import shared_tools
 from ..runtime import hooks
 from ..workspace import tasks
@@ -122,14 +121,10 @@ class SubagentSession:
         """
         if block.name not in self.handlers:
             return f"Error: Tool '{block.name}' is unavailable for this child"
-        blocked = self.authorize_tool(block)
-        if blocked is not None:
-            return str(blocked)
-        blocked = hooks.trigger_hooks("PreToolUse", block)
-        if blocked is not None:
-            return str(blocked)
-        output = file_tools.call_tool_handler(self.handlers.get(block.name), block.input, block.name)
-        hooks.trigger_hooks("PostToolUse", block, output)
+        check = hooks.check_tool_use(block, authorize=self.authorize_tool)
+        if check.status != "allowed":
+            return check.text
+        output = hooks.execute_tool(block, self.handlers.get(block.name))
         return str(output)
 
     def run(self, messages: list):

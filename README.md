@@ -68,6 +68,9 @@ Textual 的本机安装、启动、快捷键、审批和会话操作见
 
 ## 行为要点
 
+- **共同工具执行**：Lead 和子 agent 共用前置检查与同步执行；授权或 hook 只有返回 None 才放行。
+  Lead 停止优先于前置拒绝；compact 保留特殊路径，后台的后置 hook 在实际完成后执行。
+
 - **资源归属**：运行时状态（`.tasks` / `.memory` / `.runtime` / `.mailboxes` / `.worktrees` /
   `.scheduled_tasks.json` / `.transcripts` / `.task_outputs`）跟随**当前会话的启动目录**；会话上下文统一存放在用户目录 `~/.agent-harness/sessions/`；`skills/` 随包分发。
 - **子 agent**：统一用 `spawn_subagent(name, prompt, mode)` 创建；模式、通信和后续任务由模型决定。
