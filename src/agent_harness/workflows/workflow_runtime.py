@@ -25,6 +25,7 @@ import secrets
 import threading
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -449,14 +450,17 @@ class Budget:
         """在步骤返回后将其 token 消费计入预算。
 
         输入：n 为新增消费量。
-        返回：None。超出上限时抛出 WorkflowInputError，并保持原计数。
+        Return: None; actual spend is retained even when the limit is exceeded.
             校验发生在模型请求完成后，不撤销已经发生的真实 API 消费。
         """
-        if self.total is not None and self._spent + n > self.total:
-            raise WorkflowInputError(
-                f"token budget exceeded ({self._spent + n} > {self.total})"
-            )
         self._spent += n
+        if self.exceeded():
+            raise WorkflowInputError(
+                f"token budget exceeded ({self._spent} > {self.total})"
+            )
+
+    def exceeded(self):
+        return self.total is not None and self._spent > self.total
 
     def spent(self):
         return self._spent
@@ -503,6 +507,68 @@ class ExecutionLimits:
     def __init__(self):
         self.agents = 0
         self.semaphore = asyncio.Semaphore(CONCURRENCY)
+        self.operations = {}
+        self.group = ContextVar("workflow_group", default=None)
+        self.idle = asyncio.Event()
+        self.idle.set()
+        self.closing = False
+        self.cancelled = False
+        self.cancellation = None
+        self.drain_error = None
+
+    @contextmanager
+    def register(self, *, group=False):
+        """Track a complete operation, allowing continuations of accepted groups."""
+        if self.cancelled:
+            raise asyncio.CancelledError()
+        if self.closing and self.group.get() not in self.operations:
+            raise WorkflowInputError("workflow is closing")
+        token = object()
+        owner = asyncio.current_task()
+        if owner not in self.operations.values():
+            owner.add_done_callback(
+                lambda done: None if done.cancelled() else done.exception())
+        self.operations[token] = owner
+        self.idle.clear()
+        context_token = self.group.set(token) if group else None
+        try:
+            yield
+        except Exception as exc:
+            if self.closing and self.drain_error is None:
+                self.drain_error = exc
+            raise
+        finally:
+            if context_token is not None:
+                self.group.reset(context_token)
+            self.operations.pop(token)
+            if not self.operations:
+                self.idle.set()
+
+    def cancel(self, exc=None):
+        """Stop admission and interrupt waiters; running threads still settle."""
+        if self.cancellation is None and exc is not None:
+            self.cancellation = exc
+        if self.cancelled:
+            return
+        self.cancelled = True
+        current = asyncio.current_task()
+        for owner in set(self.operations.values()):
+            if owner is not current:
+                owner.cancel()
+
+    async def settle(self, future):
+        """Protect settlement from repeated cancellation without swallowing its fact."""
+        while True:
+            try:
+                return await asyncio.shield(future)
+            except asyncio.CancelledError as exc:
+                self.cancel(exc)
+                if future.done():
+                    return future.result()
+
+    async def finish(self):
+        self.closing = True
+        await self.settle(asyncio.create_task(self.idle.wait()))
 
     def claim_agent(self):
         self.agents += 1
@@ -523,6 +589,7 @@ class ExecutionState:
         self._phase = None
         self._phases_seen = set()
         self._limits = limits or ExecutionLimits()
+        self._starting_tokens = budget.spent() - task.usage["tokens"]
 
     def phase(self, title):
         """设置后续步骤默认所属阶段。
@@ -555,10 +622,11 @@ class ExecutionState:
         except ValueError as exc:
             raise WorkflowInputError(str(exc)) from exc
         label = label or (prompt[:24] + "...")
-        self._limits.claim_agent()
-        key = self.journal.key("agent", label, prompt, schema, tools)
-        async with self.journal.key_locks.setdefault(key, asyncio.Lock()):
-            return await self._run_agent(prompt, schema, label, phase, key, tools)
+        with self._limits.register():
+            self._limits.claim_agent()
+            key = self.journal.key("agent", label, prompt, schema, tools)
+            async with self.journal.key_locks.setdefault(key, asyncio.Lock()):
+                return await self._run_agent(prompt, schema, label, phase, key, tools)
 
     async def _run_agent(self, prompt, schema, label, phase, key, tools):
         """在语义键锁内检查缓存、执行步骤并提交结果和消费量。
@@ -579,50 +647,72 @@ class ExecutionState:
                                      phase=phase or self._phase, status="cached")
             return cached
 
-        if self.budget.remaining() <= 0:
-            raise WorkflowInputError("token budget exceeded")
-
         tokens = 0
         async with self._limits.semaphore:
-            if self.budget.remaining() <= 0:
-                raise WorkflowInputError("token budget exceeded")
-            try:
-                run = await asyncio.to_thread(self.runner.run, prompt, schema, label, tools=tools)
-                result = run.value
-                tokens += run.tokens
-                if schema is not None:
+            self._check_execution()
+            self.task.usage["agents"] += 1
+            self.task.cumulative_usage["agents"] += 1
+            run = await self._call_runner(prompt, schema, label, tools)
+            result = run.value
+            tokens += run.tokens
+            if schema is not None:
+                ok, err = SimpleJsonSchema(schema).validate(result)
+                if not ok:
+                    if self.budget.exceeded():
+                        raise WorkflowInputError(f"agent({{schema}}) invalid output: {err}")
+                    self._check_execution()
+                    repair = ("The step has already executed. Correct only its final output format.\n"
+                              f"Validation error: {err}\nPrevious output:\n"
+                              f"{json.dumps(result, ensure_ascii=False)}")
+                    retry = await self._call_runner(repair, schema, label, [])
+                    result = retry.value
+                    tokens += retry.tokens
                     ok, err = SimpleJsonSchema(schema).validate(result)
                     if not ok:
-                        if self.budget.remaining() <= tokens:
-                            raise WorkflowInputError("token budget exceeded before format retry")
-                        repair = ("The step has already executed. Correct only its final output format.\n"
-                                  f"Validation error: {err}\nPrevious output:\n"
-                                  f"{json.dumps(result, ensure_ascii=False)}")
-                        retry = await asyncio.to_thread(
-                            self.runner.run, repair, schema, label, tools=[])
-                        result = retry.value
-                        tokens += retry.tokens
-                        ok, err = SimpleJsonSchema(schema).validate(result)
-                        if not ok:
-                            raise WorkflowInputError(f"agent({{schema}}) invalid output: {err}")
-            except WorkflowStepError as exc:
-                tokens += exc.tokens
-                raise
-            finally:
-                self._record_usage(tokens)
+                        raise WorkflowInputError(f"agent({{schema}}) invalid output: {err}")
+
+        if self._limits.cancelled:
+            raise self._limits.cancellation or asyncio.CancelledError()
+        if self.budget.exceeded():
+            raise WorkflowInputError("token budget exceeded")
 
         self.journal.record(key, result, tokens, self.task.cumulative_usage)
         self.task.progress_event("workflow_agent", label=label,
                                  phase=phase or self._phase, status="done")
         return result
 
-    def _record_usage(self, tokens):
-        """Bill completed and failed executions before enforcing the budget."""
-        self.task.usage["agents"] += 1
-        self.task.usage["tokens"] += tokens
-        self.task.cumulative_usage["agents"] += 1
-        self.task.cumulative_usage["tokens"] += tokens
-        self.budget.add(tokens)
+    def _check_execution(self):
+        if self._limits.cancelled:
+            raise self._limits.cancellation or asyncio.CancelledError()
+        if self.budget.remaining() <= 0:
+            raise WorkflowInputError("token budget exceeded")
+
+    async def _call_runner(self, prompt, schema, label, tools):
+        """Settle one actual request and preserve its error over accounting errors."""
+        future = asyncio.create_task(asyncio.to_thread(
+            self.runner.run, prompt, schema, label, tools=tools))
+        error = None
+        tokens = 0
+        try:
+            run = await self._limits.settle(future)
+            tokens = run.tokens
+        except Exception as exc:
+            error = exc
+            if isinstance(exc, WorkflowStepError):
+                tokens = exc.tokens
+        try:
+            self.budget.add(tokens)
+        except WorkflowInputError:
+            # Keep the overrun fact; validate output before choosing its error.
+            pass
+        finally:
+            self.task.cumulative_usage["tokens"] = self.budget.spent()
+            self.task.usage["tokens"] = self.budget.spent() - self._starting_tokens
+        if self._limits.cancelled:
+            raise self._limits.cancellation or asyncio.CancelledError()
+        if error is not None:
+            raise error
+        return run
 
     async def parallel(self, thunks):
         """并发启动一组异步任务，并等待全部结果。
@@ -631,7 +721,43 @@ class ExecutionState:
         返回：按输入顺序排列的结果列表；任一异常会传播给工作流。
             使用 asyncio.gather，不在这里主动取消其他已启动任务。
         """
-        return await asyncio.gather(*[thunk() for thunk in thunks])
+        with self._limits.register(group=True):
+            return await self._wait_group(thunks)
+
+    async def _wait_group(self, thunks):
+        """Settle accepted members before propagating the first observed failure."""
+        first_error = None
+
+        async def observe(awaitable):
+            nonlocal first_error
+            try:
+                with self._limits.register(group=True):
+                    return await awaitable
+            except asyncio.CancelledError as exc:
+                self._limits.cancel(exc)
+                raise
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                return None
+            finally:
+                if asyncio.iscoroutine(awaitable):
+                    awaitable.close()
+
+        members = []
+        for thunk in thunks:
+            try:
+                members.append(asyncio.create_task(observe(thunk())))
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                break
+        results = await self._limits.settle(asyncio.gather(*members, return_exceptions=True))
+        if self._limits.cancelled:
+            raise self._limits.cancellation or asyncio.CancelledError()
+        if first_error is not None:
+            raise first_error
+        return results
 
     async def pipeline(self, items, *stages):
         """让各输入项并发进入流水线，每项内部依次执行各阶段。
@@ -645,7 +771,9 @@ class ExecutionState:
             for stage in stages:
                 value = await stage(value, item, idx)
             return value
-        return await asyncio.gather(*[run_item(it, i) for i, it in enumerate(items)])
+        with self._limits.register(group=True):
+            return await self._wait_group([
+                lambda it=it, i=i: run_item(it, i) for i, it in enumerate(items)])
 
     async def workflow(self, name, args=None):
         """以内联方式执行注册的子工作流。
@@ -662,7 +790,8 @@ class ExecutionState:
         child = ExecutionState(self.task, self.journal, self.runner, self.budget,
                                args or {}, depth=self._depth + 1,
                                limits=self._limits)
-        return await fn(child, args or {})
+        with self._limits.register(group=True):
+            return await fn(child, args or {})
 
 
 # -- Workflow 工具 --
@@ -736,18 +865,38 @@ class WorkflowTool:
             "task": serialize_task(task),
         })
 
+        ctx = None
+        cancellation = None
+        error = None
         try:
             ctx = ExecutionState(
                 task, journal, RUNNER_FACTORY(),
                 Budget(args.get("budget"), task.cumulative_usage["tokens"]), args
             )
             result = await script_fn(ctx, args)
-            task.status = "completed"
-        except Exception as e:                          # 失败或停止也要结束循环
-            task.status = "failed"
-            result = {"error": str(e)}
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            if ctx is not None:
+                ctx._limits.cancel(exc)
+        except Exception as exc:
+            error = exc
         finally:
+            if ctx is not None:
+                await ctx._limits.finish()
             journal.close()
+
+        if ctx is not None:
+            if ctx._limits.cancelled:
+                cancellation = cancellation or ctx._limits.cancellation or asyncio.CancelledError()
+            if error is None:
+                error = ctx._limits.drain_error
+            if error is None and ctx.budget.exceeded():
+                error = WorkflowInputError("token budget exceeded")
+        task.status = "failed" if cancellation is not None or error is not None else "completed"
+        if cancellation is not None:
+            result = {"error": "Workflow cancelled"}
+        elif error is not None:
+            result = {"error": str(error)}
 
         _write_json(store_dir() / f"{run_id}.output.json", result)
         _write_json(store_dir() / f"{run_id}.json", {
@@ -760,6 +909,8 @@ class WorkflowTool:
         task.event("task_notification", status=task.status,
                    agents=task.usage["agents"], tokens=task.usage["tokens"],
                    outputFile=f".runtime/{run_id}.output.json")
+        if cancellation is not None:
+            raise cancellation
         return {"launched": launched, "result": result, "task": task}
 
 

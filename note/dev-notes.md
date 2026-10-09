@@ -636,11 +636,12 @@ cron 的创建、查询、取消属于模型工具；到期检查由调度线程
 | 10 | `SubagentSession.execute_tool` | 内部·同文件 | [subagent_session.py:263](../src/agent_harness/agents/subagent_session.py#L263) | [subagent_session.py:204](../src/agent_harness/agents/subagent_session.py#L204) | 校验可用工具、计划门禁和权限 hooks |
 | 11 | `_parse_runner_json` | 内部·同文件 | [workflow_runtime.py:315](../src/agent_harness/workflows/workflow_runtime.py#L315) | [workflow_runtime.py:254](../src/agent_harness/workflows/workflow_runtime.py#L254) | 步骤返回后解析结构化文本 |
 | 12 | `SimpleJsonSchema.validate` | 内部·同文件 | [workflow_runtime.py:582](../src/agent_harness/workflows/workflow_runtime.py#L582) | [workflow_runtime.py:198](../src/agent_harness/workflows/workflow_runtime.py#L198) | 校验结果；不合格时最多一次无工具格式修正 |
-| 13 | `_record_usage` | 内部·同文件 | [workflow_runtime.py:600](../src/agent_harness/workflows/workflow_runtime.py#L600) | [workflow_runtime.py:607](../src/agent_harness/workflows/workflow_runtime.py#L607) | 成功和失败均累计实际消费 |
+| 13 | `_call_runner` | 内部·同文件 | [workflow_runtime.py:655](../src/agent_harness/workflows/workflow_runtime.py#L655) | [workflow_runtime.py:690](../src/agent_harness/workflows/workflow_runtime.py#L690) | 每次请求立即结算；取消也等待已启动调用 |
 | 14 | `Budget.add` | 内部·同文件 | [workflow_runtime.py:613](../src/agent_harness/workflows/workflow_runtime.py#L613) | [workflow_runtime.py:444](../src/agent_harness/workflows/workflow_runtime.py#L444) | 累计预算并检查超额 |
 | 15 | `WorkflowJournal.record` | 内部·同文件 | [workflow_runtime.py:602](../src/agent_harness/workflows/workflow_runtime.py#L602) | [workflow_runtime.py:414](../src/agent_harness/workflows/workflow_runtime.py#L414) | 只缓存成功且格式合格的步骤 |
 
 格式修正只处理上次最终结果，关闭工具，文件操作不会因格式错误再执行一次。失败消费也保存在任务快照，恢复时继续计入预算。
+普通失败、取消和预算超额的收尾规则见 [README](../README.md#行为要点)。
 整个流程的输出在 [workflow_runtime.py:740](../src/agent_harness/workflows/workflow_runtime.py#L740) 保存，任务快照在 [workflow_runtime.py:741](../src/agent_harness/workflows/workflow_runtime.py#L741) 保存。
 真实客户端在 [host.py:108](../src/agent_harness/host.py#L108) 注入；离线客户端在 [cli.py:114](../src/agent_harness/frontends/cli.py#L114) 注入。
 

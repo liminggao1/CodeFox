@@ -191,7 +191,8 @@ def test_overspend_or_exhaustion_blocks_format_retry_and_records_consumption(hos
     first = asyncio.run(wf.WorkflowTool().call(meta, step, {"budget": budget}))
     assert first["task"].status == "failed"
     assert first["task"].usage == {"agents": 1, "tokens": 5}
-    assert "token budget exceeded" in first["result"]["error"]
+    expected = "invalid output" if budget == 1 else "token budget exceeded"
+    assert expected in first["result"]["error"]
     resumed = asyncio.run(wf.WorkflowTool().call(meta, step, resume_from_run_id=first["task"].run_id))
     assert resumed["task"].usage == {"agents": 0, "tokens": 0}
     assert len(calls) == 1 and not host.active_subagents

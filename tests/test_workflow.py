@@ -192,7 +192,7 @@ def test_workflow_runtime_enforces_budget_and_shared_agent_cap(
     budget = workflow.Budget(total=1)
     with pytest.raises(workflow.WorkflowInputError):
         budget.add(2)
-    assert budget.spent() == 0
+    assert budget.spent() == 2
 
     journal = workflow.WorkflowJournal(
         "wf_limit-test_0001", resume=False, store=tmp_path
@@ -518,6 +518,451 @@ def test_parallel_identical_agent_calls_share_one_result(tmp_path: Path) -> None
     assert result == ["shared", "shared"]
     assert calls == ["same"]
     assert task.usage == {"agents": 1, "tokens": 2}
+
+
+def test_failed_parallel_waits_for_running_sibling_and_replays_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    failed = threading.Event()
+    calls = []
+
+    class Runner:
+        def run(self, prompt, schema=None, label=None, *, tools=None):
+            calls.append(prompt)
+            if prompt == "late":
+                started.set()
+                assert release.wait(5)
+                return workflow.RunnerOutput("saved", 5)
+            assert started.wait(5)
+            failed.set()
+            raise workflow.WorkflowStepError("first failure", tokens=3)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", Runner)
+    meta = {"name": "settlement", "description": "test"}
+
+    async def script(ctx, _args):
+        return await ctx.parallel([
+            lambda: ctx.agent("fail"), lambda: ctx.agent("late")])
+
+    async def exercise():
+        pending = asyncio.create_task(workflow.WorkflowTool().call(meta, script))
+        try:
+            assert await asyncio.to_thread(failed.wait, 5)
+            # A loop barrier lets the failed branch reach the workflow boundary.
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert not pending.done()
+        finally:
+            release.set()
+        result = await pending
+
+        async def replay(ctx, _args):
+            return await ctx.agent("late")
+
+        resumed = await workflow.WorkflowTool().call(
+            meta, replay, resume_from_run_id=result["task"].run_id)
+        assert resumed["result"] == "saved"
+        assert resumed["task"].usage == {"agents": 0, "tokens": 0}
+        return result
+
+    result = asyncio.run(exercise())
+    assert result["result"] == {"error": "first failure"}
+    assert result["task"].usage == {"agents": 2, "tokens": 8}
+    assert calls == ["fail", "late"]
+
+
+@pytest.mark.parametrize("business_error", [False, True])
+def test_caught_budget_overrun_stays_failed_and_blocks_new_calls(tmp_path, monkeypatch, business_error):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+    calls = []
+
+    class Runner:
+        def run(self, prompt, schema=None, label=None, *, tools=None):
+            calls.append(prompt)
+            if business_error:
+                raise workflow.WorkflowStepError("runner failed", tokens=5)
+            return workflow.RunnerOutput("done", 5)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", Runner)
+
+    async def script(ctx, _args):
+        with pytest.raises(Exception, match="runner failed" if business_error else "budget exceeded"):
+            await ctx.agent("first")
+        with pytest.raises(workflow.WorkflowInputError, match="budget exceeded"):
+            await ctx.agent("second")
+        return "caught"
+
+    result = asyncio.run(workflow.WorkflowTool().call(
+        {"name": "overrun", "description": "test"}, script, {"budget": 1}))
+    assert calls == ["first"]
+    assert result["task"].status == "failed"
+    assert result["task"].usage == {"agents": 1, "tokens": 5}
+    assert result["task"].cumulative_usage == {"agents": 1, "tokens": 5}
+    assert "budget exceeded" in result["result"]["error"]
+
+
+@pytest.mark.parametrize("early_failure", [False, True])
+def test_script_exit_settles_registered_pipeline_including_later_stages(tmp_path, monkeypatch, early_failure):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+    background = []
+
+    class Runner:
+        def run(self, prompt, schema=None, label=None, *, tools=None):
+            calls.append(prompt)
+            if prompt == "first":
+                started.set()
+                assert release.wait(5)
+            return workflow.RunnerOutput(prompt, 2)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", Runner)
+
+    async def script(ctx, _args):
+        async def first(value, item, index):
+            return await ctx.agent("first")
+
+        async def second(value, item, index):
+            return await ctx.agent("second")
+
+        background.append(asyncio.create_task(ctx.pipeline([1], first, second)))
+        assert await asyncio.to_thread(started.wait, 5)
+        if early_failure:
+            raise RuntimeError("script failed")
+        return "script returned"
+
+    async def exercise():
+        pending = asyncio.create_task(workflow.WorkflowTool().call(
+            {"name": "early-exit", "description": "test"}, script))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert not pending.done()
+        finally:
+            release.set()
+        result = await pending
+        assert await background[0] == ["second"]
+        return result
+
+    result = asyncio.run(exercise())
+    assert calls == ["first", "second"]
+    assert result["task"].usage == {"agents": 2, "tokens": 4}
+    assert result["task"].status == ("failed" if early_failure else "completed")
+
+
+def test_cancel_settles_running_call_saves_failure_and_rethrows(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    run_id = "wf_cancel_0000000000000001"
+    monkeypatch.setattr(workflow, "create_run_id", lambda meta: run_id)
+    calls = []
+
+    class Runner:
+        def run(self, prompt, schema=None, label=None, *, tools=None):
+            calls.append(prompt)
+            started.set()
+            assert release.wait(5)
+            return workflow.RunnerOutput("done", 7)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", Runner)
+    meta = {"name": "cancel", "description": "test"}
+
+    async def script(ctx, _args):
+        return await ctx.agent("running")
+
+    async def exercise():
+        pending = asyncio.create_task(workflow.WorkflowTool().call(meta, script))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            pending.cancel("user stopped workflow")
+            for _ in range(10):
+                await asyncio.sleep(0)
+            pending.cancel()
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert not pending.done()
+            with pytest.raises(workflow.WorkflowInputError, match="already active"):
+                await workflow.WorkflowTool().call(meta, script, resume_from_run_id=run_id)
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError, match="user stopped workflow"):
+            await pending
+        with workflow.workflow_run_lock(run_id):
+            pass
+
+    asyncio.run(exercise())
+    snapshot = json.loads((tmp_path / f"{run_id}.json").read_text())
+    assert snapshot["task"]["status"] == "failed"
+    assert snapshot["task"]["usage"] == {"agents": 1, "tokens": 7}
+    assert json.loads((tmp_path / f"{run_id}.output.json").read_text()) == {"error": "Workflow cancelled"}
+    assert (tmp_path / f"{run_id}.journal.jsonl").read_text() == ""
+    assert calls == ["running"]
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("same_key", [False, True])
+def test_exit_tracks_steps_waiting_for_slot_or_key(tmp_path, monkeypatch, cancel, same_key):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+    monkeypatch.setattr(workflow, "CONCURRENCY", 1)
+    started = threading.Event()
+    release = threading.Event()
+    waiting = asyncio.Event()
+    children = []
+    calls = []
+
+    class Runner:
+        def run(self, prompt, schema=None, label=None, *, tools=None):
+            calls.append(prompt)
+            if prompt == "first":
+                started.set()
+                assert release.wait(5)
+            return workflow.RunnerOutput(prompt, 3)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", Runner)
+
+    async def script(ctx, _args):
+        children.append(asyncio.create_task(ctx.agent("first")))
+        assert await asyncio.to_thread(started.wait, 5)
+
+        async def queued():
+            waiting.set()
+            return await ctx.agent("first" if same_key else "second")
+
+        children.append(asyncio.create_task(queued()))
+        await waiting.wait()
+        return "returned"
+
+    async def exercise():
+        pending = asyncio.create_task(workflow.WorkflowTool().call(
+            {"name": "waiters", "description": "test"}, script))
+        try:
+            await asyncio.wait_for(waiting.wait(), 5)
+            for _ in range(10):
+                await asyncio.sleep(0)
+            if cancel:
+                pending.cancel()
+                for _ in range(10):
+                    await asyncio.sleep(0)
+            assert not pending.done()
+        finally:
+            release.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            await asyncio.gather(*children, return_exceptions=True)
+            assert calls == ["first"]
+        else:
+            result = await pending
+            await asyncio.gather(*children)
+            assert calls == (["first"] if same_key else ["first", "second"])
+            assert result["task"].usage == {
+                "agents": 1 if same_key else 2, "tokens": 3 if same_key else 6}
+
+    asyncio.run(exercise())
+
+
+def test_factory_failure_settles_preceding_members_without_starting_later_ones(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+    calls = []
+
+    class Runner:
+        def run(self, prompt, schema=None, label=None, *, tools=None):
+            calls.append(prompt)
+            return workflow.RunnerOutput(prompt, 2)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", Runner)
+
+    async def script(ctx, args):
+        def fail_factory():
+            raise RuntimeError("factory failed")
+
+        return await ctx.parallel([
+            lambda: ctx.agent("accepted"), fail_factory,
+            lambda: ctx.agent("not accepted")])
+
+    result = asyncio.run(workflow.WorkflowTool().call(
+        {"name": "factory", "description": "test"}, script))
+    assert result["result"] == {"error": "factory failed"}
+    assert calls == ["accepted"]
+    assert result["task"].usage == {"agents": 1, "tokens": 2}
+
+
+def test_nested_group_finishes_during_close_and_independent_new_work_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+    contexts = []
+    children = []
+
+    class Runner:
+        def run(self, prompt, schema=None, label=None, *, tools=None):
+            calls.append(prompt)
+            if prompt == "first":
+                started.set()
+                assert release.wait(5)
+            return workflow.RunnerOutput(prompt, 1)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", Runner)
+
+    async def nested(ctx, args):
+        await ctx.agent("first")
+        return await ctx.agent("second")
+
+    monkeypatch.setitem(workflow.WORKFLOWS, "nested", (
+        {"name": "nested", "description": "test"}, nested))
+
+    async def script(ctx, args):
+        contexts.append(ctx)
+        children.append(asyncio.create_task(ctx.workflow("nested")))
+        assert await asyncio.to_thread(started.wait, 5)
+        return "returned"
+
+    async def exercise():
+        pending = asyncio.create_task(workflow.WorkflowTool().call(
+            {"name": "parent", "description": "test"}, script))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            for _ in range(10):
+                await asyncio.sleep(0)
+            ctx = contexts[0]
+            for operation in [ctx.agent("new"), ctx.parallel([]), ctx.pipeline([])]:
+                with pytest.raises(workflow.WorkflowInputError, match="closing"):
+                    await operation
+        finally:
+            release.set()
+        result = await pending
+        assert await children[0] == "second"
+        return result
+
+    result = asyncio.run(exercise())
+    assert result["task"].usage == {"agents": 2, "tokens": 2}
+    assert calls == ["first", "second"]
+
+
+def test_handled_business_error_does_not_replace_later_script_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+
+    class Runner:
+        def run(self, prompt, schema=None, label=None, *, tools=None):
+            raise workflow.WorkflowStepError("handled", tokens=3)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", Runner)
+
+    async def script(ctx, args):
+        try:
+            await ctx.agent("one")
+        except workflow.WorkflowStepError:
+            pass
+        raise RuntimeError("unhandled")
+
+    result = asyncio.run(workflow.WorkflowTool().call(
+        {"name": "errors", "description": "test"}, script))
+    assert result["result"] == {"error": "unhandled"}
+    assert result["task"].usage == {"agents": 1, "tokens": 3}
+
+
+@pytest.mark.parametrize("primitive", ["parallel", "pipeline"])
+def test_cancel_interrupts_group_members_waiting_before_agent(tmp_path, monkeypatch, primitive):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+    entered = asyncio.Event()
+    interrupted = asyncio.Event()
+    release = asyncio.Event()
+
+    async def wait_without_runner(*args):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            interrupted.set()
+            raise
+
+    async def script(ctx, args):
+        if primitive == "parallel":
+            return await ctx.parallel([wait_without_runner])
+        return await ctx.pipeline([1], wait_without_runner)
+
+    async def exercise():
+        pending = asyncio.create_task(workflow.WorkflowTool().call(
+            {"name": "async-wait", "description": "test"}, script))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            pending.cancel("cancel async stage")
+            await asyncio.wait_for(interrupted.wait(), 1)
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError, match="cancel async stage"):
+            await pending
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("budget", [None, 1])
+def test_pipeline_failure_keeps_other_item_running_and_preserves_first_error(tmp_path, monkeypatch, budget):
+    monkeypatch.setattr(workflow, "store_dir", lambda: tmp_path)
+    started = threading.Event()
+    failed = threading.Event()
+    release = threading.Event()
+    calls = []
+    meta = {"name": "pipeline-error", "description": "test"}
+
+    class Runner:
+        def run(self, prompt, schema=None, label=None, *, tools=None):
+            calls.append(prompt)
+            if prompt == "fail":
+                assert started.wait(5)
+                failed.set()
+                raise workflow.WorkflowStepError("first business error", tokens=3)
+            if prompt == "late":
+                started.set()
+                assert release.wait(5)
+            return workflow.RunnerOutput(prompt, 5)
+
+    monkeypatch.setattr(workflow, "RUNNER_FACTORY", Runner)
+
+    async def script(ctx, args):
+        async def first(value, item, index):
+            return await ctx.agent(item)
+
+        async def second(value, item, index):
+            return await ctx.agent(f"next {item}")
+
+        return await ctx.pipeline(["fail", "late"], first, second)
+
+    async def exercise():
+        pending = asyncio.create_task(workflow.WorkflowTool().call(meta, script, {"budget": budget}))
+        try:
+            assert await asyncio.to_thread(failed.wait, 5)
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert not pending.done()
+        finally:
+            release.set()
+        result = await pending
+        if budget is None:
+            async def replay(ctx, args):
+                return await ctx.agent("late")
+            resumed = await workflow.WorkflowTool().call(
+                meta, replay, resume_from_run_id=result["task"].run_id)
+            assert resumed["result"] == "late"
+            assert resumed["task"].usage == {"agents": 0, "tokens": 0}
+        else:
+            path = tmp_path / f"{result['task'].run_id}.journal.jsonl"
+            assert path.read_text() == ""
+            resumed = await workflow.WorkflowTool().call(
+                meta, script, resume_from_run_id=result["task"].run_id)
+            assert resumed["task"].status == "failed"
+            assert resumed["task"].usage == {"agents": 0, "tokens": 0}
+        return result
+
+    result = asyncio.run(exercise())
+    assert result["result"] == {"error": "first business error"}
+    assert result["task"].usage == {"agents": 2 if budget else 3, "tokens": 8 if budget else 13}
+    assert calls == (["fail", "late"] if budget else ["fail", "late", "next late"])
 
 
 def test_workflow_tool_adapter_rejects_model_supplied_code() -> None:
