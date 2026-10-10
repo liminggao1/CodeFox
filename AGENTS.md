@@ -42,16 +42,16 @@
 
 ## 文档位置
 
-- `docs/`：项目级记录，索引见 `docs/README.md`；合并执行计划在 `docs/plans/`，
-  其余 `adr/`、`research/`、`handoff/`、`guides/` 已建目录待填。
+- `docs/`：项目级记录，索引见 `docs/README.md`；当前架构与行为事实在 `docs/facts.md`，
+  未完成与未验证的计划在 `docs/plans/`，其余 `adr/`、`research/`、`handoff/`、`guides/` 已建目录待填。
 - `docs/agents/`：agent 协作约定，见下方 Agent skills。
 - `.scratch/`：本地 Markdown 议题与规格的存放目录。
 - `tmp/`：本地临时文件，不入库（需要时手动创建）。
 - `note/`：环境、操作等个人笔记。
-- `GLOSSARY.md`：项目术语表；运行和代码布局见 `README.md`，实施进度见 `docs/README.md`。
+- `GLOSSARY.md`：项目术语表；运行和代码布局见 `README.md`，当前事实见 `docs/facts.md`。
   
 ## 项目提示
-- 默认使用中文注释代码
+- 默认使用中文：代码注释，思考过程，大模型输出等
 
 ## Agent skills
 

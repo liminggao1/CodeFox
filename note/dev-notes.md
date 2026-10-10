@@ -19,7 +19,7 @@ cd $R
 $PY -m pytest -q                          # 完整离线测试
 PYTHONPATH=src $PY -m agent_harness workflow demo
 PYTHONPATH=src $PY -m agent_harness workflow resume
-$PY scripts/debug_pass.py                 # 端到端自检，9 项
+$PY scripts/debug_pass.py                 # 端到端自检，10 项
 $PY scripts/debug_chat.py                 # 模拟 API 交互：输入“你好”或“写文件”
 ```
 
@@ -30,8 +30,8 @@ $PY scripts/debug_chat.py                 # 模拟 API 交互：输入“你好�
 |      | `pytest`                                                      | `scripts/debug_pass.py`                                           |
 | ---- | ------------------------------------------------------------- | ----------------------------------------------------------------- |
 | 定位 | 单元与契约测试                                                | 子进程 / 真 Git / 线程集成自检                                    |
-| 粒度 | 按模块拆分的测试文件                                          | 一条命令 9 项                                                     |
-| 覆盖 | 任务、压缩、调度、权限、编码、技能、goal、workflow、subagents | 工具池、agent 回环、goal 边界、任务、workflow、worktree、子 agent |
+| 粒度 | 按模块拆分的测试文件                                          | 一条命令 10 项                                                    |
+| 覆盖 | 任务、压缩、调度、权限、编码、技能、goal、workflow、subagents | 工具池、agent 回环、goal 边界、任务、workflow、worktree、子 agent、架构图 |
 | 独有 | 边界条件与错误分支                                            | 真起子进程跑 CLI、真建 Git 仓库、跨模块串联检查                   |
 
 改完 `src/` 后两个都要跑：先 `pytest -q`，再 `debug_pass.py`。重叠的几项（工具池、agent
@@ -150,14 +150,13 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 /home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q tests/test_interaction.py tests/test_interactive_runtime.py tests/test_tui_integration.py tests/test_conversation.py
 ```
 
-实现与验收记录见 [Textual 实施计划](../docs/plans/2026-10-09-02Textual交互界面实施计划.md)。
-统一对话与历史展示见 [统一对话展示实施计划](../docs/plans/2026-10-09-05统一对话展示与事件恢复实施计划.md)。
+当前界面、展示与恢复事实见 [仓库事实](../docs/facts.md) 第 6 节。
 当前已完成离线集成验证及 Linux PTY 的中文多行粘贴、发送和退出验证；真实 API 的 TUI 交互尚未实测。
 
 ## 二、离线自检：改完先跑这个
 
-[scripts/debug_pass.py](../scripts/debug_pass.py) 一条命令覆盖主要机制，全离线、不写仓库
-（状态都建在临时目录）。**退出码 = 失败数**，0 表示全通过。
+[scripts/debug_pass.py](../scripts/debug_pass.py) 一条命令覆盖主要机制，全离线。检查状态建在
+临时目录，不碰仓库；架构图检查按设计重新生成 `docs/architecture/`。**退出码 = 失败数**，0 表示全通过。
 
 ```sh
 cd /mnt/d/01dpan/01project/life/learncc/agent-harness
@@ -179,6 +178,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 | 7   | workflow 离线          | `demo` 完成，`resume` 命中 journal（agents=0 tokens=0），`.runtime/` 落在启动目录   |
 | 8   | git worktree           | 真实临时仓库上 create → claim → 提交 → complete → remove                            |
 | 9   | 统一子 agent           | 实际创建工具覆盖 once 结果与 persistent 启动、文件、事件及关闭                      |
+| 10  | 架构依赖图             | 扫描 `src/` 得到节点与依赖，报告循环依赖，并刷新 `docs/architecture/`                |
 
 ### 实测输出
 
@@ -192,7 +192,8 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 [PASS] unified subagent lifetimes :: once result; persistent start/write/events/shutdown
 [PASS] workflow demo/resume offline :: demo/resume; unified child write and cache replay
 [PASS] worktree git ops :: create/claim/commit/complete/remove
-9/9 passed
+[PASS] architecture dependency graph :: 12 nodes, 48 edges, 1 cycles -> docs/architecture/
+10/10 passed
 ```
 
 ### 扩展方式
@@ -542,7 +543,7 @@ F10 单步，F11 进入函数，Shift+F11 返回，F5 继续。暂时不看的�
 ```
 
 在 [run_todo_write](../src/agent_harness/tools/file_tools.py#L295) 和 [工具结果回填](../src/agent_harness/host.py#L394) 下断点，观察模型提交的 `todos`、工具返回的清单统计及下一次请求的 `messages`。
-这个离线测试跨六个模型轮次执行普通工具，再由模拟模型明确更新和清空 Todo。完整职责及失败边界见 [Todo 实施计划](../docs/plans/2026-10-10-02工具调用协议与Todo职责边界实施计划.md)。
+这个离线测试跨六个模型轮次执行普通工具，再由模拟模型明确更新和清空 Todo。完整职责及失败边界见 [仓库事实](../docs/facts.md) 第 8 节。
 
 #### 6. 工具池装配
 

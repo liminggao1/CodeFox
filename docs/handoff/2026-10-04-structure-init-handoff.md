@@ -119,7 +119,7 @@ $PY scripts/debug_pass.py     # 9/9 passed
 
 ## 8. 相关文档
 
-- 计划与全部决策记录：`docs/plans/2026-10-04-01agent-harness-执行计划.md`（「十」到「十五」为本会话）
+- 当前架构与行为事实：`docs/facts.md`（结构初始化段的原始决策记录由 Git 历史保留）
 - 术语与项目范围：`GLOSSARY.md`
 - 项目结构与命令：`README.md`
 - 本机环境约定：`AGENTS.md`
