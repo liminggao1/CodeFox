@@ -20,6 +20,7 @@ $PY -m pytest -q                          # 完整离线测试
 PYTHONPATH=src $PY -m agent_harness workflow demo
 PYTHONPATH=src $PY -m agent_harness workflow resume
 $PY scripts/debug_pass.py                 # 端到端自检，9 项
+$PY scripts/debug_chat.py                 # 模拟 API 交互：输入“你好”或“写文件”
 ```
 
 `pytest` 和自检不需要 `PYTHONPATH`（前者由 `tests/conftest.py` 注入 `src`，后者自己插入）。
@@ -231,7 +232,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
    **要打开 `/mnt/d/...`，不要开 `D:\...`**；两种窗口外观很像，靠左下角区分。
 2. **确认左下角**显示 `WSL: Ubuntu-22.04`。
 3. **确认解释器**为 `/home/gaogao/miniconda3/envs/learncc/bin/python`
-   （`.vscode/settings.json` 设为默认，`.vscode/launch.json` 的五个调试配置也显式使用该解释器，不会用 base）。
+   （`.vscode/settings.json` 设为默认，`.vscode/launch.json` 的调试配置也显式使用该解释器，不会用 base）。
 4. **按 F5**，选「Agent 交互（真实 API）」。断点直接打在 `src/agent_harness/` 的代码行上。
 
 ### 已准备的调试配置
@@ -240,18 +241,32 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 | 配置名                           | 用途                                        |
 | -------------------------------- | ------------------------------------------- |
+| Agent 交互（模拟 API，离线）     | 手动加入下方配置后可用；输入“你好”看普通回答，输入“写文件”看工具回环 |
 | Agent 交互（真实 API）           | 主路径。集成终端可输入                      |
 | Agent 交互（外部终端，输入更稳） | 同上，改用外部终端；输入/方向键异常时用这个 |
 | Workflow demo（离线，不联网）    | 调试统一子 agent 工作流，fake client，不花额度 |
 | 端到端自检（离线）               | 调试 `scripts/debug_pass.py`                |
 | pytest（当前文件）               | 在当前打开的测试文件上起断点                |
 
-下面是当前 [`.vscode/launch.json`](../.vscode/launch.json) 的完整基础配置。后面的 15 个观察点都复用这些配置，只需按说明选择入口或替换测试路径。
+配置以 [`.vscode/launch.json`](../.vscode/launch.json) 为准。**本次只在笔记提供配置，不自动修改该文件。**
+下面给出包含模拟交互入口的配置示例；你可以手动替换整个文件，也可以只把第一个配置对象加入现有 `configurations` 数组，保留自己的其他配置。
+后面的 15 个观察点复用这些配置，只需按说明选择入口或替换测试路径。
 
 ```json
 {
   "version": "0.2.0",
   "configurations": [
+    {
+      "name": "Agent 交互（模拟 API，离线）",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "/home/gaogao/miniconda3/envs/learncc/bin/python",
+      "program": "${workspaceFolder}/scripts/debug_chat.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "pythonArgs": ["-Xfrozen_modules=off"]
+    },
     {
       "name": "Agent 交互（真实 API）",
       "type": "debugpy",
@@ -325,7 +340,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 先点击函数链接下断点，再选择上面的现成配置。源码链接采用相对路径和 `#L行号`，以当前函数与调用位置为准。凡是下面写了测试路径的，在
 [.vscode/launch.json](../.vscode/launch.json) 里找到「pytest（当前文件）」，仅把
-`"args": ["-q", "${file}"]` 中的 `"${file}"` 换成给出的路径；其他字段不用改。
+`args` 中的测试路径换成给出的路径；其他字段不用改。当前配置已指定 goal 测试，若要运行当前打开的测试文件，改回 `["-q", "${file}"]`。
 写了两个测试路径的，分别替换并运行一次。配置中的解释器已固定为 WSL 的 `learncc`。
 
 表中的“调用身份”区分函数在这条路径中的用途；“同文件 / 跨文件”指调用位置与实现位置，
@@ -341,54 +356,56 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 1. 一轮对话的完整流程
 
-入口是 `agent_loop`，实现位于 [host.py:314](../src/agent_harness/host.py#L314)。
-它由共享驱动执行用户回合或后台唤醒回合；本节表中的辅助函数由程序驱动，不是提供给 LLM 的工具入口。
-主循环只编排上下文、模型恢复、goal 和工具迭代。
-本轮消息记录、模型调用关联、单项结果与检查点见 [LeadTurn](../src/agent_harness/agents/lead_turn.py#L13)；
-工具批次见 [execute_tool_batch](../src/agent_harness/agents/lead_tools.py#L10)。
-完成、失败、停止与截断统一经过 [LeadTurn.finish](../src/agent_harness/agents/lead_turn.py#L117)，由它委托 scheduler 和 tasks 收尾。
-选择「端到端自检（离线）」，在 [host.py:355](../src/agent_harness/host.py#L355) 下断点，按下面的主要调用顺序单步查看。
+**launch 配置：** 将上方 JSON 中第一个对象（「Agent 交互（模拟 API，离线）」）手动加入
+[launch.json](../.vscode/launch.json) 的 `configurations` 数组。入口为 `scripts/debug_chat.py`，终端为 `integratedTerminal`。
 
-| 顺序 | 函数                 | 调用身份    | 调用 / 触发位置                                  | 实现位置                                                             | 作用                                                                               |
-| ---- | -------------------- | ----------- | ------------------------------------------------ | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| 1    | `prepare_history`    | 内部·跨文件 | [host.py:355](../src/agent_harness/host.py#L355) | [compaction.py:44](../src/agent_harness/context/compaction.py#L44)           | 按预算整理或压缩历史                                                               |
-| 2    | `build_context`      | 内部·跨文件 | [host.py:363](../src/agent_harness/host.py#L363) | [runtime_context.py:31](../src/agent_harness/runtime_context.py#L31) | 刷新记忆、MCP 和子 agent 信息，见第 2 节                                           |
-| 3    | `assemble_tool_pool` | 内部·同文件 | [host.py:365](../src/agent_harness/host.py#L365) | [host.py:102](../src/agent_harness/host.py#L102)                     | 装配本轮工具；内部调用注册器 [snapshot](../src/agent_harness/tools/tool_registry.py#L36) |
-| 4    | `call_llm`           | 内部·同文件 | [host.py:374](../src/agent_harness/host.py#L374) | [host.py:222](../src/agent_harness/host.py#L222)                     | 拼接系统提示词并请求模型                                                           |
-| 5    | `has_tool_use`       | 内部·跨文件 | [host.py:425](../src/agent_harness/host.py#L425) | [message_content.py:17](../src/agent_harness/providers/message_content.py#L17) | 判断模型是否请求工具，决定进入下面哪个分支                                         |
+**断点设置：** 点击源码行左侧下断点；先设置入口和模型调用两个断点即可。
 
-**有普通同步工具请求时：**
+| 位置 | 停在哪里 |
+| --- | --- |
+| [host.py:329](../src/agent_harness/host.py#L329) | 进入 `agent_loop` |
+| [host.py:355](../src/agent_harness/host.py#L355) | 准备历史 |
+| [host.py:363](../src/agent_harness/host.py#L363) | 构造上下文，详见第 2 节 |
+| [host.py:365](../src/agent_harness/host.py#L365) | 装配工具池 |
+| [host.py:374](../src/agent_harness/host.py#L374) | 调用模拟模型 |
+| [host.py:425](../src/agent_harness/host.py#L425) | 判断是否进入工具分支 |
 
-| 顺序 | 函数 | 调用身份 | 调用 / 触发位置 | 实现位置 | 作用 |
-| --- | --- | --- | --- | --- | --- |
-| 6 | `check_tool_use` | 内部·跨文件 | [lead_tools.py:58](../src/agent_harness/agents/lead_tools.py#L58) | [hooks.py:61](../src/agent_harness/runtime/hooks.py#L61) | 执行授权与 PreToolUse，并检查停止请求 |
-| 7 | `execute_tool` | 内部·跨文件 | [lead_tools.py:90](../src/agent_harness/agents/lead_tools.py#L90) | [hooks.py:76](../src/agent_harness/runtime/hooks.py#L76) | 调用 handler，再执行 PostToolUse |
-| 8 | `build_user_content` | 内部·同文件 | [host.py:471](../src/agent_harness/host.py#L471) | [host.py:180](../src/agent_harness/host.py#L180) | 把本批工具结果和后台通知写回模型历史 |
-| 9 | `apply_after_results` | 内部·跨文件 | [host.py:475](../src/agent_harness/host.py#L475) | [compaction.py:654](../src/agent_harness/context/compaction.py#L654) | 有手动压缩请求时执行压缩 |
+按 F5 选择模拟配置，在**集成终端**输入 `你好` 并回车，即命中入口断点。
+F10 单步，F11 进入函数，Shift+F11 返回，F5 继续；输入 `q` 退出。
 
-然后回到循环顶部，再次请求模型。自检会演示：`请求写文件 → 执行 write_file → 回填结果 → 模型回答`。
-
-**没有工具请求时：**
-
-| 顺序 | 函数                           | 调用身份    | 调用 / 触发位置                                  | 实现位置                                           | 作用                                   |
-| ---- | ------------------------------ | ----------- | ------------------------------------------------ | -------------------------------------------------- | -------------------------------------- |
-| 6    | `trigger_hooks`                | 内部·跨文件 | [host.py:429](../src/agent_harness/host.py#L429) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31)   | 触发 `Stop`                            |
-| 7    | `evaluate_goal`                | 内部·同文件 | [host.py:433](../src/agent_harness/host.py#L433) | [host.py:269](../src/agent_harness/host.py#L269)   | 检查目标；判定为 `block` 就继续循环    |
-| 8    | `remember_after_turn`          | 内部·同文件 | [host.py:460](../src/agent_harness/host.py#L460) | [host.py:156](../src/agent_harness/host.py#L156)   | 提取并整理记忆                         |
-| 9    | `release_completed_assignment` | 内部·跨文件 | [lead_turn.py:129](../src/agent_harness/agents/lead_turn.py#L129) | [tasks.py:570](../src/agent_harness/workspace/tasks.py#L570) | 释放已完成任务的分配记录，随后结束本轮 |
+要调试工具调用，输入 `写文件`，另在 [lead_tools.py:58](../src/agent_harness/agents/lead_tools.py#L58)（工具检查）
+和 [lead_tools.py:90](../src/agent_harness/agents/lead_tools.py#L90)（执行工具）下断点。
+`你好` 不会命中这两个工具断点。
 
 #### 2. 上下文如何刷新
 
+这里的“上下文”特指 **每次主模型请求前构造的 `RuntimeContext` 快照**，不是全部对话历史。
+`messages` 保存对话历史，`tools` 保存工具定义；`call_llm` 将它们和快照生成的 `system` 一起交给模型。
+
 主循环在 [host.py:363](../src/agent_harness/host.py#L363) 调用 `build_context`，
 实现位于 [runtime_context.py:31](../src/agent_harness/runtime_context.py#L31)。
-进入函数后，按下面的顺序查看：
+继续使用「Agent 交互（模拟 API，离线）」，输入 `你好`，在这一行断住。
+先用 F11 进入函数，按下面的顺序查看；返回主循环后查看 `context`：
 
 | 顺序 | 函数或数据                  | 调用身份    | 使用位置                                                             | 实现或定义位置                                                       | 作用                          |
 | ---- | --------------------------- | ----------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------- |
 | 1    | `subagent.active_subagents` | 共享数据    | [runtime_context.py:39](../src/agent_harness/runtime_context.py#L39) | [subagent.py:126](../src/agent_harness/agents/subagent.py#L126)             | 加锁读取活跃子 agent 名称     |
-| 2    | `read_memory_index`         | 内部·跨文件 | [runtime_context.py:41](../src/agent_harness/runtime_context.py#L41) | [memory_runtime.py:197](../src/agent_harness/context/memory_runtime.py#L197) | 读取记忆索引                  |
-| 3    | `load_memories`             | 内部·跨文件 | [runtime_context.py:42](../src/agent_harness/runtime_context.py#L42) | [memory_runtime.py:371](../src/agent_harness/context/memory_runtime.py#L371) | 加载相关记忆，具体选取流程见第 14 节 |
+| 2    | `read_memory_index`         | 内部·跨文件 | [runtime_context.py:41](../src/agent_harness/runtime_context.py#L41) | [memory_runtime.py:202](../src/agent_harness/context/memory_runtime.py#L202) | 读取记忆索引                  |
+| 3    | `load_memories`             | 内部·跨文件 | [runtime_context.py:42](../src/agent_harness/runtime_context.py#L42) | [memory_runtime.py:380](../src/agent_harness/context/memory_runtime.py#L380) | 加载相关记忆，具体选取流程见第 14 节 |
 | 4    | `mcp_tools.mcp_clients`     | 共享数据    | [runtime_context.py:43](../src/agent_harness/runtime_context.py#L43) | [mcp_tools.py:54](../src/agent_harness/tools/mcp_tools.py#L54)             | 读取已登记的 MCP 名称         |
+
+**首次输入“你好”时的预期值：**
+
+| 字段 | 含义 | 模拟调试初始值 |
+| --- | --- | --- |
+| `memory_catalog` | 长期记忆索引 | `""`，模拟脚本关闭长期记忆 |
+| `memories` | 当前请求召回的记忆正文 | `""` |
+| `connected_mcp` | 已连接的 MCP 服务名称 | `()`，尚未连接服务 |
+| `active_subagents` | 当前活跃的子 agent 名称 | `()`，尚未启动子 agent |
+
+这些空值正常：输入“你好”不会自动创建 MCP、记忆或子 agent。
+`RuntimeContext` 是冻结的数据类，名称复制为元组；后续登记表变化不会修改已经生成的快照。
+`build_context` 读取当前状态，连接 MCP 和启动子 agent 由对应工具负责。
 
 上下文构造完成后，主循环进入 `call_llm`，再按下面的顺序使用它：
 
@@ -397,8 +414,21 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 | 5    | `prompt_values`          | 内部·跨文件 | [host.py:235](../src/agent_harness/host.py#L235) | [runtime_context.py:17](../src/agent_harness/runtime_context.py#L17) | 将上下文字段交给提示词组装函数            |
 | 6    | `assemble_system_prompt` | 内部·跨文件 | [host.py:235](../src/agent_harness/host.py#L235) | [prompts.py:73](../src/agent_harness/context/prompts.py#L73)                 | 把记忆、MCP 和子 agent 信息拼进系统提示词 |
 
-每次循环都会重新构造上下文。上一轮新增的 MCP 或子 agent，会在下一次构造时读到。
-要观察刷新前后的区别，选择「pytest（当前文件）」，将 `"${file}"` 替换为 `"tests/test_runtime_context.py"`。
+在 `assemble_system_prompt` 返回后查看 `system`：空的四类动态段落不加入提示词，固定规则、启动目录、时间和 skill 目录仍在。
+
+每次循环都会重新构造上下文，包括同一个用户回合里的第二次模型调用。
+输入 `写文件` 会两次命中 `build_context`，第二次的 `messages` 包含工具请求和结果；四个快照字段可能仍为空，因为写文件没有改变对应状态。
+
+要观察字段实际变化，选择「pytest（当前文件）」，将 `args` 设置为：
+
+```json
+["-q", "tests/test_runtime_context.py::test_agent_refreshes_memory_mcp_and_subagents_after_tool_round"]
+```
+
+这个离线测试显式启用记忆，并模拟记忆召回、MCP 连接和子 agent 登记。
+在 [host.py:363](../src/agent_harness/host.py#L363) 和 [host.py:374](../src/agent_harness/host.py#L374) 下断点，比较两次 `context`、`tools` 和系统提示词。
+首次尚无 MCP / 子 agent，第二次出现 `docs` / `alice`，并包含新增记忆索引与召回正文。
+测试中的模型用 `messages.create` 返回固定结果，不走模拟交互脚本的流式入口。
 
 #### 3. goal 的 Stop 判定
 

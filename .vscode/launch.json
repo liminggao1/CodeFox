@@ -2,6 +2,19 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Agent 交互（模拟 API，离线）",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "/home/gaogao/miniconda3/envs/learncc/bin/python",
+      "program": "${workspaceFolder}/scripts/debug_chat.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "pythonArgs": [
+        "-Xfrozen_modules=off"
+      ]
+    },
+    {
       "name": "Agent 交互（真实 API）",
       "type": "debugpy",
       "request": "launch",
@@ -74,7 +87,7 @@
       "module": "pytest",
       "args": [
         "-q",
-        "tests/test_goal.py::test_unmet_goal_continues_automatically_until_achieved"
+        "${file}"
       ],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
