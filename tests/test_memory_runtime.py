@@ -57,6 +57,7 @@ def test_memory_source_has_no_legacy_agent_runtime() -> None:
 def test_memory_recall_survives_model_failure(tmp_path, monkeypatch) -> None:
     """Recall preserves paths, source metadata and keyword fallback offline."""
     monkeypatch.setattr(memory_runtime.core, "WORKDIR", tmp_path)
+    monkeypatch.setattr(memory_runtime.core, "MEMORY_ENABLED", True)
     path = memory_runtime.write_memory_file(
         "Project layout", "project", "Source layout", "Use the src directory."
     )
@@ -79,3 +80,33 @@ def test_memory_recall_survives_model_failure(tmp_path, monkeypatch) -> None:
         {"role": "user", "content": "Remember the project layout"}
     ]) == 0
     assert memory_runtime.read_memory_file(path.name) == recalled[0]["content"]
+
+
+def test_memory_disabled_skips_recall_extraction_and_consolidation(tmp_path, monkeypatch) -> None:
+    """The MVP default does not read or make model calls for optional memory."""
+    monkeypatch.setattr(memory_runtime.core, "WORKDIR", tmp_path)
+    monkeypatch.setattr(memory_runtime.core, "MEMORY_ENABLED", False)
+    memory_runtime.write_memory_file(
+        "Project layout", "project", "Source layout", "Use the src directory."
+    )
+    calls = []
+
+    def fail_model(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("disabled memory must not call the model")
+
+    monkeypatch.setattr(
+        memory_runtime.core,
+        "client",
+        SimpleNamespace(messages=SimpleNamespace(create=fail_model)),
+    )
+
+    assert memory_runtime.read_memory_index() == ""
+    assert memory_runtime.load_memories([
+        {"role": "user", "content": "Explain the project layout"}
+    ]) == ""
+    assert memory_runtime.extract_memories([
+        {"role": "user", "content": "Remember the project layout"}
+    ]) == 0
+    assert memory_runtime.consolidate_memories() == 0
+    assert calls == []

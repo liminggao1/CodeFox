@@ -46,6 +46,7 @@ def host_factory(tmp_path, monkeypatch):
         # 路径和运行时状态位于模块全局变量中；新会话不能继承上个测试的
         # 启动目录、子 agent、计划审批、任务分配或 MCP 客户端。
         host.core.WORKDIR = tmp_path
+        monkeypatch.setattr(host.core, "MEMORY_ENABLED", enable_memory)
         host.subagent.active_subagents.clear()
         host.subagent.PROTOCOL.clear()
         host.tasks.assignments.clear()

@@ -25,7 +25,8 @@ def test_snapshot_owns_its_values(host_factory, monkeypatch) -> None:
 
 
 def test_agent_refreshes_memory_mcp_and_subagents_after_tool_round(host_factory, monkeypatch):
-    host = host_factory()
+    host = host_factory(enable_memory=True)
+    monkeypatch.setattr(host, "remember_after_turn", lambda messages: None)
     calls = []
     monkeypatch.setattr(host.memory_runtime, "load_memories", lambda messages: "recalled")
 

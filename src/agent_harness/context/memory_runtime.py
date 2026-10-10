@@ -62,6 +62,11 @@ MEMORY_DIALOGUE_CHAR_LIMIT = 8000
 MEMORY_EXTRACTION_CATALOG_CHAR_LIMIT = 6000
 MEMORY_CONSOLIDATION_RECORD_LIMIT = 30
 
+
+def memory_enabled() -> bool:
+    """Return whether optional long-term memory behavior is enabled."""
+    return bool(getattr(core, "MEMORY_ENABLED", False))
+
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     if not text.startswith("---\n"):
         return {}, text
@@ -200,6 +205,8 @@ def read_memory_index() -> str:
     返回：去掉首尾空白的索引文本；路径不合法或文件不存在时为空字符串。
         文件存在但读取失败时异常继续抛出。
     """
+    if not memory_enabled():
+        return ""
     # 函数签名：返回记忆索引文件的文本内容；读不到就返回 ""（空字符串）
     try:
         # 尝试定位记忆索引文件的路径（allow_index=True 表示允许走索引文件）
@@ -319,6 +326,8 @@ def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
     Returns:
         字符串列表，元素是记忆文件的文件名；无匹配记忆返回空列表
     """
+    if not memory_enabled():
+        return []
     # 获取全部记忆文件的元信息（名称、描述、文件路径）
     records = list_memory_files()
     # 提取对话里最近的用户文本，作为检索query
@@ -448,7 +457,7 @@ def extract_memories(messages: list) -> int:
         校验后仅写入非临时且不重复的持久化记录，并更新索引；异常打印跳过原因。
     """
     from ..runtime import interaction
-    if interaction.stopped():
+    if not memory_enabled() or interaction.stopped():
         return 0
     dialogue = dialogue_text(messages)
     if not dialogue:
@@ -523,7 +532,7 @@ def consolidate_memories() -> int:
         输入目录过大时跳过本轮，避免把未发送的记忆覆盖丢失。
     """
     from ..runtime import interaction
-    if interaction.stopped():
+    if not memory_enabled() or interaction.stopped():
         return 0
     records = list_memory_files()
     if len(records) < CONSOLIDATE_THRESHOLD:

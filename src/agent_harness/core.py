@@ -63,6 +63,10 @@ COMPACTION_MAX_TOKENS = 2000        # 历史压缩摘要输出上限
 MEMORY_SELECTION_MAX_TOKENS = 200  # 记忆筛选结果输出上限
 MEMORY_EXTRACTION_MAX_TOKENS = 1000 # 新记忆抽取输出上限
 MEMORY_CONSOLIDATION_MAX_TOKENS = 3000  # 记忆合并输出上限
+# 长期记忆会在回合结束后额外调用模型；MVP 默认关闭，显式设为 1/true/on 才启用。
+MEMORY_ENABLED = os.getenv("AGENT_MEMORY_ENABLED", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 MAX_RETRIES = 3                     # API 调用失败最大重试次数
 MAX_CONSECUTIVE_529 = 2             # 连续 529（限流）容忍次数
 MAX_RECOVERY_RETRIES = 2            # 恢复后的最大重试次数
