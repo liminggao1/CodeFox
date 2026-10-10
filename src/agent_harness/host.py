@@ -173,7 +173,6 @@ def remember_after_turn(messages: list) -> None:
 
 # -- Agent 主循环 --
 
-rounds_since_todo = 0
 agent_lock = threading.Lock()
 
 
@@ -297,19 +296,6 @@ def evaluate_goal(messages: list):
         return None
 
 
-def _track_tool_completion(name):
-    """跨回合保留 TODO 提醒计数，批次中途失败也保留已完成工具的计数。"""
-    global rounds_since_todo
-    # 写入 TODO 后重新开始计算提醒间隔。
-    if name == "todo_write":
-        # 清零已累计的非 TODO 工具调用次数。
-        rounds_since_todo = 0
-    # 其他工具调用会增加 TODO 提醒计数。
-    else:
-        # 记录又完成了一次非 TODO 工具调用。
-        rounds_since_todo += 1
-
-
 # Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
 def agent_loop(messages: list, active_request: str, save_context=None, on_usage=None):
     """执行 Agent 主循环，直到模型完成回答或本轮无法继续。
@@ -323,8 +309,6 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
     LeadTurn 负责本轮记录与收尾，工具批次复用 hooks；本循环保留
     上下文准备、模型重试/续写、goal 判定和工具迭代的显式顺序。
     """
-    # 全局变量，记录距离上次待办任务 todo 的迭代轮数，用于任务续做/压缩判断
-    global rounds_since_todo
     # 创建本轮回合对象 LeadTurn：管理本轮所有记录、状态、会话保存、token用量回调
     turn = LeadTurn(messages, save_context, on_usage)
     # 实例化恢复状态对象：保存本轮API重试、模型降级、上下文回滚恢复相关状态
@@ -347,13 +331,6 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             active_request = turn.inject_scheduled(active_request)
             # 将已完成的后台任务通知加入对话历史。
             inject_background_notifications(messages, save_context)
-            # 达到未更新 TODO 的工具轮数阈值时，提醒模型更新。
-            if rounds_since_todo >= core.TODO_REMINDER_ROUNDS:
-                # 把提醒作为用户消息加入历史。
-                turn.append({"role": "user", "content": "<reminder>Update your todos.</reminder>"})
-                # 本次提醒后重新累计调用次数。
-                rounds_since_todo = 0
-
             # 按上下文预算裁剪或压缩历史消息。
             compacted = compaction.prepare_history(
                 messages, active_request, enabled=automatic_compaction_enabled)
@@ -469,7 +446,7 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
 
         # -- 逐项结算工具，再将完整结果批次交给模型 --
         results = execute_tool_batch(
-            response.content, handlers, manual_compaction, turn, _track_tool_completion)
+            response.content, handlers, manual_compaction, turn)
         # 把所有工具结果及已完成的后台通知写入历史。
         turn.append({"role": "user", "content": build_user_content(results)})
         if interaction.stopped():

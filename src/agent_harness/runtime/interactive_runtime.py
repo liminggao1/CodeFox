@@ -406,7 +406,6 @@ class InteractiveRuntime:
         core.WORKDIR = root
         self.session.store.workdir = root
         host.mcp_clients.clear()
-        host.rounds_since_todo = 0
         host.GOAL = restored_goal
         host.tasks.activate_lead_context(snapshot["id"], snapshot, assignment)
         self.session.activate(snapshot)

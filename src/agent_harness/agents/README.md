@@ -6,7 +6,7 @@
 | 文件 | 职责 |
 | --- | --- |
 | [lead_turn.py](lead_turn.py) | `LeadTurn`：接受的模型历史、流式调用与正式消息关联、逐项工具结果与检查点、cron 交付登记，以及完成/失败/停止/截断的收尾 |
-| [lead_tools.py](lead_tools.py) | `execute_tool_batch`：Lead 的 compact 特殊路径、普通工具与后台派发；逐项记录结果并通知 TODO 计数，权限与同步执行复用 hooks |
+| [lead_tools.py](lead_tools.py) | `execute_tool_batch`：Lead 的 compact 特殊路径、普通工具与后台派发；逐项记录结果，权限与同步执行复用 hooks |
 | [subagent.py](subagent.py) | `spawn_subagent` 统一创建 once/persistent 子 agent；维护生命周期、信箱和协议投递 |
 | [subagent_protocol.py](subagent_protocol.py) | 唯一计划门禁与计划/关闭请求状态；集中提交、审核、回复校验、任务版本失效与清理 |
 | [subagent_session.py](subagent_session.py) | `SubagentSession`：两种模式共用的模型回合、工具能力选择与白名单、执行门禁和历史压缩；共用定义与身份绑定委托 tools |

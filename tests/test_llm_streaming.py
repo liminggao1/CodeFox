@@ -104,6 +104,53 @@ def test_first_text_arrives_before_complete_response(protocol):
 
 
 @pytest.mark.parametrize("protocol", ["responses", "anthropic"])
+def test_streamed_native_tools_have_parsed_arguments_and_matching_results(protocol):
+    arguments = {"todos": [{"content": "读取中文文件", "status": "in_progress"}]}
+    raw = json.dumps(arguments, ensure_ascii=False)
+    if protocol == "responses":
+        chunks = [frame({"type": "response.completed", "response": {
+            "id": "r", "status": "completed", "output": [
+                {"type": "function_call", "name": "todo_write", "call_id": "todo", "arguments": raw},
+                {"type": "function_call", "name": "list_tasks", "call_id": "tasks", "arguments": "{}"},
+            ], "usage": {"input_tokens": 7, "output_tokens": 2}}})]
+    else:
+        chunks = frames(protocol, final=False)[:1]
+        for index, (name, call_id, value) in enumerate([
+                ("todo_write", "todo", raw), ("list_tasks", "tasks", "{}")]):
+            chunks.append(frame({"type": "content_block_start", "index": index,
+                                 "content_block": {"type": "tool_use", "id": call_id, "name": name, "input": {}}}))
+            # 将工具参数分成两段，验证消费器等待完整 JSON 后才接受调用。
+            for partial in (value[:len(value) // 2], value[len(value) // 2:]):
+                chunks.append(frame({"type": "content_block_delta", "index": index,
+                                     "delta": {"type": "input_json_delta", "partial_json": partial}}))
+            chunks.append(frame({"type": "content_block_stop", "index": index}))
+        chunks.extend([
+            frame({"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                   "usage": {"output_tokens": 2}}),
+            frame({"type": "message_stop"}),
+        ])
+    with server_for(chunks) as (url, received):
+        client = client_for(protocol, url)
+        message = llm_client.stream_message(
+            client, on_text=lambda *args: pytest.fail("工具参数不能作为正文展示"),
+            stopped=lambda: False, model="test", messages=[], max_tokens=100)
+        assert message.stop_reason == "tool_use"
+        assert [(block.name, block.id, block.input) for block in message.content] == [
+            ("todo_write", "todo", arguments), ("list_tasks", "tasks", {})]
+        results = [{"type": "tool_result", "tool_use_id": "todo", "content": "updated"},
+                   {"type": "tool_result", "tool_use_id": "tasks", "content": "listed"}]
+        llm_client.stream_message(client, on_text=lambda *args: None, stopped=lambda: False,
+                                  model="test", max_tokens=100, messages=[
+                                      {"role": "assistant", "content": message.content},
+                                      {"role": "user", "content": results}])
+        if protocol == "responses":
+            outputs = [item for item in received[1]["input"] if item["type"] == "function_call_output"]
+            assert [(item["call_id"], item["output"]) for item in outputs] == [("todo", "updated"), ("tasks", "listed")]
+        else:
+            assert received[1]["messages"][-1]["content"] == results
+
+
+@pytest.mark.parametrize("protocol", ["responses", "anthropic"])
 def test_eof_after_partial_text_is_not_a_completed_message(protocol):
     with server_for(frames(protocol, final=False)) as (url, _):
         parts = []

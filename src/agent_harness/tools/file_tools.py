@@ -6,10 +6,8 @@
 
 from __future__ import annotations
 
-import ast
 import atexit
 import glob
-import json
 import os
 import signal
 import subprocess
@@ -313,14 +311,7 @@ def call_tool_handler(handler, args: dict, name: str, *, on_status=None) -> str:
 
 
 def _normalize_todos(todos):
-    if isinstance(todos, str):
-        try:
-            todos = json.loads(todos)
-        except json.JSONDecodeError:
-            try:
-                todos = ast.literal_eval(todos)
-            except (SyntaxError, ValueError):
-                return None, "Error: todos must be a list or JSON array string"
+    """检查协议层已解析的列表，不修复参数或判断任务是否完成。"""
     if not isinstance(todos, list):
         return None, "Error: todos must be a list"
     for i, todo in enumerate(todos):
@@ -328,6 +319,8 @@ def _normalize_todos(todos):
             return None, f"Error: todos[{i}] must be an object"
         if "content" not in todo or "status" not in todo:
             return None, f"Error: todos[{i}] missing 'content' or 'status'"
+        if not isinstance(todo["content"], str):
+            return None, f"Error: todos[{i}].content must be a string"
         if todo["status"] not in ("pending", "in_progress", "completed"):
             return None, f"Error: todos[{i}] has invalid status '{todo['status']}'"
     return todos, None
@@ -335,15 +328,21 @@ def _normalize_todos(todos):
 def run_todo_write(todos: list) -> str:
     """校验并替换当前会话的内存 TODO 列表。
 
-    输入：todos 为包含 content 和 status 的条目列表，也支持规范化器接受的字符串。
-    返回：更新数量的确认或错误文本；成功时替换 tasks.CURRENT_TODOS，不写任务 JSON。
+    输入：todos 为协议层已解析的列表，每项包含 content 和 status。
+    返回：更新后的清单状态统计或错误文本；成功时替换 tasks.CURRENT_TODOS，不写任务 JSON。
     """
     todos, error = _normalize_todos(todos)
     if error:
         return error
+    # 整份列表通过检查后再更新；失败不会发布事件或覆盖原状态。
     with tasks.task_lock:
         tasks.CURRENT_TODOS = todos
         interaction.publish("todo_updated", todos=todos)
     tasks.checkpoint_lead()
-    core.terminal_print(f"  \033[33m[todo] updated {len(tasks.CURRENT_TODOS)} item(s)\033[0m")
-    return f"Updated {len(tasks.CURRENT_TODOS)} todos"
+    core.terminal_print(f"  \033[33m[todo] updated {len(todos)} item(s)\033[0m")
+    # 统计本次接受的列表，不从其他工具结果推断任务完成情况。
+    counts = {status: 0 for status in ("completed", "in_progress", "pending")}
+    for todo in todos:
+        counts[todo["status"]] += 1
+    return (f"已更新 {len(todos)} 项待办：完成 {counts['completed']} 项，"
+            f"进行中 {counts['in_progress']} 项，待处理 {counts['pending']} 项。")

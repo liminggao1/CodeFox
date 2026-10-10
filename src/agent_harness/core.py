@@ -74,7 +74,6 @@ BASE_DELAY_MS = 500                 # 重试基础退避延迟（毫秒）
 MAX_RETRY_DELAY_MS = 32000          # 重试退避延迟上限（毫秒，不含抖动）
 RETRY_JITTER_RATIO = 0.25           # 在退避延迟上追加的随机抖动比例
 SUBAGENT_MAX_ROUNDS = 30            # 一次性子代理的模型调用轮数上限
-TODO_REMINDER_ROUNDS = 3            # 未更新 TODO 的工具轮数提醒阈值
 ASYNC_EVENT_POLL_SECONDS = 1        # 主循环后台事件检查间隔（秒）
 CRON_POLL_SECONDS = 1               # 定时任务检查间隔（秒）
 

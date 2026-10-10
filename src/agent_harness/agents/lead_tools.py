@@ -7,8 +7,8 @@
 from ..runtime import hooks, interaction, scheduler
 
 
-def execute_tool_batch(blocks, handlers, manual_compaction, turn, on_completed):
-    """按顺序返回工具结果，在保存检查点前报告普通工具完成情况。"""
+def execute_tool_batch(blocks, handlers, manual_compaction, turn):
+    """按顺序执行工具，并逐项记录结果与保存检查点。"""
     # 本次响应包含工具调用，准备收集工具执行结果。
     results = []
     # 按模型返回顺序处理每个内容块。
@@ -17,10 +17,8 @@ def execute_tool_batch(blocks, handlers, manual_compaction, turn, on_completed):
         if block.type != "tool_use":
             # 跳过文本等非工具内容。
             continue
-        result, status, counted = _execute_tool(
+        result, status = _execute_tool(
             block, handlers, manual_compaction, turn.model_call_id)
-        if counted:
-            on_completed(block.name)
         results.append(result)
         # 将同步工具输出与原调用 ID 配对。
         turn.record_tool_result(result, status)
@@ -35,7 +33,7 @@ def _result(block, text, *, error=False):
 
 
 def _interrupted(block):
-    return _result(block, "Interrupted before execution", error=True), "stopped", False
+    return _result(block, "Interrupted before execution", error=True), "stopped"
 
 
 def _execute_tool(block, handlers, manual_compaction, model_call_id):
@@ -52,12 +50,12 @@ def _execute_tool(block, handlers, manual_compaction, model_call_id):
         status = "failed" if compact_result.get("is_error") else "returned"
         # 保留与模型工具调用对应的结果。
         # 其他工具继续按原有路径执行。
-        return compact_result, status, False
+        return compact_result, status
 
     with interaction.operation_context(model_call_id=model_call_id):
         check = hooks.check_tool_use(block, stopped=interaction.stopped)
     if check.status != "allowed":
-        return _result(block, check.text, error=check.status == "stopped"), check.status, False
+        return _result(block, check.text, error=check.status == "stopped"), check.status
 
     # 后台工具复用前置检查，在实际完成后执行自己的后置 hook。
     # 可后台执行的工具不阻塞当前模型轮次。
@@ -80,7 +78,7 @@ def _execute_tool(block, handlers, manual_compaction, model_call_id):
             status = "failed"
         # 为本次后台工具调用登记返回内容。
         # 后台工具不再进入同步执行路径。
-        return _result(block, output), status, False
+        return _result(block, output), status
 
     statuses = ["returned"]
     # 根据工具名查找同步处理函数。
@@ -91,4 +89,4 @@ def _execute_tool(block, handlers, manual_compaction, model_call_id):
     # 在终端显示截短的执行结果。
     if interaction.current_context() is None:
         print(str(output)[:300])
-    return _result(block, output), statuses[-1], True
+    return _result(block, output), statuses[-1]

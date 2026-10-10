@@ -406,17 +406,94 @@ def test_backend_fact_queue_is_independent_of_frontend_delivery_and_detached():
     assert channel.drain_facts() == []
 
 
-def test_todo_records_include_only_applied_updates(runtime_factory):
+@pytest.mark.parametrize("invalid", [
+    None,
+    {"content": "bad", "status": "pending"},
+    '[{"content":"bad","status":"pending"}]',
+    "[{'content': 'bad', 'status': 'pending'}]",
+    ["bad"],
+    [{"content": "bad"}],
+    [{"status": "pending"}],
+    [{"content": 42, "status": "pending"}],
+    [{"content": "bad", "status": "unknown"}],
+    [{"content": "valid prefix", "status": "pending"}, {"content": None, "status": "pending"}],
+])
+def test_todo_records_include_only_applied_updates(runtime_factory, invalid):
     todos = [{"content": "Check output", "status": "in_progress"}]
-    runtime, host = runtime_factory([
+    values = iter([
         response(tools=[tool("todo_write", "valid", todos=todos),
-                        tool("todo_write", "invalid", todos=[{"content": "bad", "status": "unknown"}])],
+                        tool("todo_write", "invalid", todos=invalid)],
                  stop="tool_use"), response("Done")])
+    requests = []
+
+    def model(**kwargs):
+        requests.append(copy.deepcopy(kwargs["messages"]))
+        return next(values)
+
+    runtime, host = runtime_factory(client=model)
     complete(runtime, "track progress")
     updates = records(stored(runtime), "todo_updated")
     assert len(updates) == 1
     assert updates[0]["payload"]["todos"] == todos
     assert stored(runtime)["todos"] == todos
+    assert host.tasks.CURRENT_TODOS == todos
+    results = requests[1][-1]["content"]
+    assert [item["tool_use_id"] for item in results] == ["valid", "invalid"]
+    assert results[0]["content"] == "已更新 1 项待办：完成 0 项，进行中 1 项，待处理 0 项。"
+    assert results[1]["content"].startswith("Error: ")
+
+
+def test_model_owns_todo_updates_without_cross_round_reminders(runtime_factory):
+    todos = [
+        {"content": "准备文件", "status": "completed"},
+        {"content": "读取文件", "status": "in_progress"},
+        {"content": "总结结果", "status": "pending"},
+    ]
+    completed = [dict(todo, status="completed") for todo in todos]
+    values = iter([
+        response(tools=[tool("todo_write", "plan", todos=todos)], stop="tool_use"),
+        # 分六轮执行真实普通工具，覆盖跨模型轮次的旧提醒触发条件。
+        *[response(tools=[tool("read_file", f"read-{index}",
+                              path="输入.txt" if index % 2 == 0 else "不存在.txt")], stop="tool_use")
+          for index in range(6)],
+        response(tools=[tool("todo_write", "finish-plan", todos=completed)], stop="tool_use"),
+        response(tools=[tool("todo_write", "clear-plan", todos=[])], stop="tool_use"),
+        response("Done"),
+    ])
+    requests, observed = [], []
+
+    def model(**kwargs):
+        requests.append(copy.deepcopy(kwargs["messages"]))
+        observed.append(copy.deepcopy(host.tasks.CURRENT_TODOS))
+        return next(values)
+
+    runtime, host = runtime_factory(client=model)
+    (host.core.WORKDIR / "输入.txt").write_text("读取成功", encoding="utf-8")
+    finished, _ = complete(runtime, "读取文件并记录计划")
+    assert finished.payload["outcome"]["status"] == "completed"
+    assert len(requests) == 10
+    assert observed == [[], *[todos for _ in range(7)], completed, []]
+    expected_ids = ["plan", *[f"read-{index}" for index in range(6)], "finish-plan", "clear-plan"]
+    for index, call_id in enumerate(expected_ids, start=1):
+        # 每轮只追加助手响应和配对结果，模型历史里没有额外提醒消息。
+        assert len(requests[index]) == 1 + index * 2
+        results = requests[index][-1]["content"]
+        assert len(results) == 1
+        assert results[0]["type"] == "tool_result"
+        assert results[0]["tool_use_id"] == call_id
+        assert "<reminder>" not in str(requests[index])
+    assert requests[1][-1]["content"][0]["content"] == "已更新 3 项待办：完成 1 项，进行中 1 项，待处理 1 项。"
+    for index in range(6):
+        output = requests[index + 2][-1]["content"][0]["content"]
+        if index % 2 == 0:
+            assert "读取成功" in output
+        else:
+            assert output.startswith("Error:")
+    assert requests[8][-1]["content"][0]["content"] == "已更新 3 项待办：完成 3 项，进行中 0 项，待处理 0 项。"
+    assert requests[9][-1]["content"][0]["content"] == "已更新 0 项待办：完成 0 项，进行中 0 项，待处理 0 项。"
+    updates = records(stored(runtime), "todo_updated")
+    assert [item["payload"]["todos"] for item in updates] == [todos, completed, []]
+    assert stored(runtime)["todos"] == host.tasks.CURRENT_TODOS == []
 
 
 @pytest.mark.parametrize("action,decision", [("stop", "deny"), ("close", "closed")])

@@ -36,6 +36,20 @@ def test_completed_text_tool_and_usage(monkeypatch):
     assert (message.usage.input_tokens, message.usage.output_tokens) == (12, 4)
 
 
+def test_plain_json_text_is_not_executed_as_a_tool(host_factory, monkeypatch):
+    host = host_factory()
+    text = '{"name":"write_file","input":{"path":"unwanted.txt","content":"must not run"}}'
+    client = client_for(monkeypatch, {"status": "completed", "output": [
+        {"type": "message", "content": [{"type": "output_text", "text": text}]},
+    ]})
+    monkeypatch.setattr(host.core, "client", client)
+    messages = [{"role": "user", "content": "展示工具调用格式"}]
+    outcome = host.agent_loop(messages, "展示工具调用格式")
+    assert outcome.status == "completed"
+    assert messages[-1]["content"][0]["text"] == text
+    assert not (host.core.WORKDIR / "unwanted.txt").exists()
+
+
 @pytest.mark.parametrize("status", ["failed", "cancelled", "queued", "in_progress", None, "unknown", []])
 def test_invalid_status_is_not_normal_completion(monkeypatch, status):
     with pytest.raises(llm_client.ProtocolResponseError):
