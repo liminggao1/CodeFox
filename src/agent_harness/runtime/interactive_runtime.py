@@ -8,17 +8,17 @@ import time
 import uuid
 
 from .. import core
-from ..agents import goal
 from .. import host
 from ..workspace import tasks
 from ..agents import subagent as subagent_runtime
 from ..tools import file_tools
 from . import hooks, scheduler
 from . import interaction
+from .commands import CommandRouter
 from .lead_context import LeadContext
 from .local_commands import find_command
 from .session_switch import SessionSwitch
-from .session_store import InteractiveSession, SessionError, SessionStore, json_value
+from .session_store import InteractiveSession, SessionStore, json_value
 
 
 class InteractiveRuntime:
@@ -51,6 +51,10 @@ class InteractiveRuntime:
             record=self._record, pause_background=self._pause_background,
             after_activate=self._after_activate,
             read_goal=self._read_goal, replace_goal=self._replace_goal)
+        self.command_router = CommandRouter(
+            store=self.session.store, session_id=lambda: self.session.session_id,
+            read_goal=self._read_goal, record=self._record, close=self.close,
+            session_switch=self.session_switch)
 
     def _session_context(self):
         with tasks.task_lock:
@@ -248,16 +252,16 @@ class InteractiveRuntime:
             try:
                 if kind == "command":
                     with interaction.execution_context(context):
-                        followup = self._command(text)
-                    if followup is None:
+                        outcome = self.command_router.dispatch(text)
+                    if outcome.followup is None:
                         with self._lifecycle:
                             self._busy = False
                         self._snapshot(self._context())
                         context = self._context()
                         self._complete_event(context, "command_result", submission_id=submission_id,
-                                             command=text.split()[0], status="completed", data=self._command_data)
+                                             command=outcome.command, status="completed", data=outcome.data)
                         return
-                    text = followup
+                    text = outcome.followup
                 with self._lifecycle:
                     self._turn = uuid.uuid4().hex
                     self._turn_started_at = time.monotonic()
@@ -287,7 +291,7 @@ class InteractiveRuntime:
                 with interaction.execution_context(context):
                     if kind == "command":
                         context.publish("command_result", submission_id=submission_id,
-                                        command="/goal", status="completed", data=self._command_data,
+                                        command=outcome.command, status="completed", data=outcome.data,
                                         turn_id=context.turn_id, recorded=True)
                     if kind != "background":
                         context.publish("user_message", text=text, submission_id=submission_id)
@@ -326,44 +330,6 @@ class InteractiveRuntime:
                                 status="failed", data={"error": str(exc)},
                                 outcome=asdict(interaction.TurnOutcome("failed", str(exc))),
                                 summary=self._turn_summary(context))
-
-    def _command(self, text):
-        parts = text.split()
-        command = parts[0]
-        self._command_data = {}
-        if command == "/quit":
-            self.close()
-        elif command == "/goal":
-            argument = text[5:].strip()
-            if not argument:
-                self._command_data = {"text": host.GOAL.status(0)}
-                self._record("goal_query", text, save=False)
-            elif argument.lower() in goal.CLEAR_ALIASES:
-                self._command_data = {"text": host.GOAL.clear()}
-                self._record("goal_clear", text, save=False)
-            else:
-                host.GOAL.set_goal(argument)
-                self._record("goal_set", argument, save=False)
-                self._command_data = {"text": f"Goal set: {argument}"}
-                return argument
-        elif command == "/resume" and len(parts) == 1:
-            entries, errors = self.session.store.list_sessions()
-            self._command_data = {"sessions": entries, "errors": errors}
-        else:
-            if len(parts) != 2:
-                raise SessionError(f"Usage: {command} <session_id>")
-            target = parts[1]
-            self.session.store.path(target)
-            if command == "/delete":
-                if target == self.session.session_id:
-                    raise SessionError("Cannot delete the active session")
-                self.session.store.delete(target)
-                self._command_data = {"text": f"Deleted {target}"}
-            elif target == self.session.session_id:
-                self._command_data = {"text": f"Already using {target}"}
-            else:
-                self._command_data = self.session_switch.switch(target)
-        return None
 
     # -- 会话切换已移入 session_switch.SessionSwitch；这里只提供它的窄回调。 --
 

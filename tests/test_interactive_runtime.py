@@ -920,3 +920,31 @@ def test_switch_moves_directory_generation_and_assignment(runtime_factory):
     assert runtime._generation == before_generation + 1
     assert runtime.session.session_id == target["id"]
     assert tasks.assignment_cwd("agent") == other_root
+
+
+# -- C2：命令路由是独立 module，命令结果经明确对象返回，不再走实例字段通道 --
+
+def test_command_dispatch_returns_explicit_outcome(runtime_factory):
+    runtime, host = runtime_factory(client=lambda **kwargs: response())
+    router = runtime.command_router
+
+    goal_outcome = router.dispatch("/goal ship the feature")
+    assert goal_outcome.command == "/goal"
+    assert goal_outcome.data["text"] == "Goal set: ship the feature"
+    # /goal <text> 之后仍要跑一个回合，followup 是明确返回值而不是隐藏字段。
+    assert goal_outcome.followup == "ship the feature"
+
+    query_outcome = router.dispatch("/goal")
+    assert query_outcome.command == "/goal"
+    assert "ship" in query_outcome.data["text"]
+    assert query_outcome.followup is None
+
+
+def test_command_dispatch_lists_sessions_and_rejects_bad_usage(runtime_factory):
+    runtime, _ = runtime_factory(client=lambda **kwargs: response())
+    from agent_harness.runtime.session_store import SessionError
+    listed = runtime.command_router.dispatch("/resume")
+    assert "sessions" in listed.data
+    assert listed.followup is None
+    with pytest.raises(SessionError):
+        runtime.command_router.dispatch("/delete")

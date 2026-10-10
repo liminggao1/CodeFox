@@ -5,8 +5,9 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| [interactive_runtime.py](interactive_runtime.py) | `InteractiveRuntime`：接收输入、执行本地命令、串行驱动 Lead 回合、消费后台输入、生成展示记录、统一保存与恢复交付、停止和关闭；会话切换委托 `SessionSwitch` |
+| [interactive_runtime.py](interactive_runtime.py) | `InteractiveRuntime`：接收输入、串行驱动 Lead 回合、消费后台输入、生成展示记录、统一保存与恢复交付、停止和关闭；命令路由委托 `CommandRouter`，会话切换委托 `SessionSwitch` |
 | [session_switch.py](session_switch.py) | `SessionSwitch`：会话切换事务的唯一拥有者；读快照、校验、停服务、切换目录、激活归属、重启服务与发布 `session_changed` 都在实现内按序完成 |
+| [commands.py](commands.py) | `CommandRouter`：`/quit`、`/goal`、`/resume`、`/delete` 的解析与分派；结果经 `CommandOutcome` 显式返回，`/resume` 委托 `SessionSwitch` |
 | [lead_context.py](lead_context.py) | `LeadContext`：运行时拥有的 Todo、会话 ID 和保留工作树；防御性复制、显式激活和目录绑定；离线入口显式提供状态作用域 |
 | [interaction.py](interaction.py) | 执行上下文、事件通道、独立事实队列、稳定记录 ID、审批请求及展示确认，关联会话代次和停止状态 |
 | [local_commands.py](local_commands.py) | `LocalCommand`、命令元数据和查找；供运行时路由与前端补全共用 |
