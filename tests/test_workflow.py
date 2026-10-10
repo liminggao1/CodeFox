@@ -1028,8 +1028,8 @@ def test_actual_workflow_tool_executes_child_tools_and_replays(host_factory, mon
     responses = iter([workflow_reply(tokens=7, block=S(type="tool_use", id="w", name="write_file",
                           input={"path": "workflow.txt", "content": "saved"})), workflow_reply(tokens=11)])
     def create(**kw):
-        assert len(subagent_runtime.active_subagents) == 1
-        record = next(iter(subagent_runtime.active_subagents.values()))
+        assert len(subagent_runtime._active_subagents) == 1
+        record = next(iter(subagent_runtime._active_subagents.values()))
         assert record.mode == "once" and record.role == "workflow"
         assert subagent_runtime.is_valid_agent_name(record.name)
         calls.append(kw)
@@ -1044,7 +1044,7 @@ def test_actual_workflow_tool_executes_child_tools_and_replays(host_factory, mon
     assert first["task"]["status"] == "completed"
     assert first["task"]["usage"] == {"agents": 1, "tokens": 18}
     assert resumed["task"]["usage"] == {"agents": 0, "tokens": 0}
-    assert len(calls) == 2 and not subagent_runtime.active_subagents
+    assert len(calls) == 2 and not subagent_runtime._active_subagents
     assert {t["name"] for t in calls[0]["tools"]} == set(subagent_runtime.selected_tool_names(None))
     assert all(r["model"] == "injected" and r["max_tokens"] == core.WORKFLOW_AGENT_MAX_TOKENS
                for r in calls)
@@ -1089,7 +1089,7 @@ def test_format_repair_does_not_repeat_file_operations(host_factory, monkeypatch
     assert "invalid result" in calls[2]["messages"][0]["content"]
     assert "Correct only" in calls[2]["messages"][0]["content"]
     assert (core.WORKDIR / "once.txt").read_text() == "saved"
-    assert not subagent_runtime.active_subagents
+    assert not subagent_runtime._active_subagents
 
 
 @pytest.mark.parametrize("failure", ["truncated", "exception", "invalid_json"])
@@ -1118,7 +1118,7 @@ def test_failed_step_is_billed_without_cache_and_resume_keeps_usage(host_factory
     assert resumed["task"].status == "failed"
     assert resumed["task"].usage == {"agents": 0, "tokens": 0}
     assert resumed["task"].cumulative_usage == {"agents": 1, "tokens": total}
-    assert not subagent_runtime.active_subagents
+    assert not subagent_runtime._active_subagents
 
 
 def test_tools_are_part_of_the_cache_identity(host_factory, monkeypatch):
@@ -1171,7 +1171,7 @@ def test_parallel_format_retries_respect_concurrency_and_unique_names(host_facto
     assert out["task"].status == "completed", out["result"]
     assert maximum == 2 and len(names) == 8
     assert out["task"].usage == {"agents": 4, "tokens": 40}
-    assert not subagent_runtime.active_subagents
+    assert not subagent_runtime._active_subagents
 
 
 @pytest.mark.parametrize("budget", [1, 5])
@@ -1192,7 +1192,7 @@ def test_overspend_or_exhaustion_blocks_format_retry_and_records_consumption(hos
     assert expected in first["result"]["error"]
     resumed = asyncio.run(wf.WorkflowTool().call(meta, step, resume_from_run_id=first["task"].run_id))
     assert resumed["task"].usage == {"agents": 0, "tokens": 0}
-    assert len(calls) == 1 and not subagent_runtime.active_subagents
+    assert len(calls) == 1 and not subagent_runtime._active_subagents
 
 
 def test_invalid_workflow_tools_fail_without_child_or_model(host_factory, monkeypatch):
@@ -1202,7 +1202,7 @@ def test_invalid_workflow_tools_fail_without_child_or_model(host_factory, monkey
         return await ctx.agent("Inspect", tools=["send_message"])
     out = asyncio.run(wf.WorkflowTool().call({"name": "bad-tools", "description": "test"}, step))
     assert out["task"].status == "failed" and out["task"].usage == {"agents": 0, "tokens": 0}
-    assert not subagent_runtime.active_subagents
+    assert not subagent_runtime._active_subagents
 
 
 def test_workflow_write_rejection_does_not_execute_or_run_post_hook(host_factory, monkeypatch):

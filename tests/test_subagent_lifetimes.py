@@ -36,7 +36,7 @@ def runtime(host_factory, monkeypatch, runtime_threads):
         return thread
     monkeypatch.setattr(subagent_runtime.threading, "Thread", thread_factory)
     yield host
-    for name in list(subagent_runtime.active_subagents):
+    for name in list(subagent_runtime._active_subagents):
         subagent_runtime.run_request_shutdown(name).content
     for thread in threads:
         thread.join(3)
@@ -55,7 +55,7 @@ def spawn(host, name="worker", mode="once", **kwargs):
 def wait_event(host, kind):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        messages = subagent_runtime.BUS.wait_for_messages("lead", deadline - time.monotonic())
+        messages = subagent_runtime._BUS.wait_for_messages("lead", deadline - time.monotonic())
         error = next((m for m in messages if m["type"] == "error"), None)
         assert error is None, error
         found = next((m for m in messages if m["type"] == kind), None)
@@ -78,9 +78,9 @@ def test_invalid_creation_has_no_side_effects(runtime, arguments):
     result = json.loads(registrations.run_spawn_subagent(**request).content)
     assert result["status"] == "failed"
     assert calls == []
-    assert subagent_runtime.active_subagents == {}
+    assert subagent_runtime._active_subagents == {}
     assert task_state.assignments == {}
-    assert subagent_runtime.PROTOCOL.empty()
+    assert subagent_runtime._PROTOCOL.empty()
 
 
 def test_single_creation_tool_and_missing_mode(runtime):
@@ -91,7 +91,7 @@ def test_single_creation_tool_and_missing_mode(runtime):
     assert not {"task", "spawn_teammate", "list_teammates"} & names
     result = tool_execution.call_tool_handler(handlers["spawn_subagent"],
                                    {"name": "worker", "prompt": "Inspect"}, "spawn_subagent").content
-    assert "Error" in result and subagent_runtime.active_subagents == {}
+    assert "Error" in result and subagent_runtime._active_subagents == {}
 
 
 def test_once_round_limit_and_unfinished_task_are_failures(runtime, monkeypatch):
@@ -101,12 +101,12 @@ def test_once_round_limit_and_unfinished_task_are_failures(runtime, monkeypatch)
     result = spawn(host, task_id=task.id)
     assert result["status"] == "failed" and "unfinished" in result["text"]
     assert task_state.load_task(task.id).status == "pending"
-    assert task_state.assignments == {} and subagent_runtime.active_subagents == {}
+    assert task_state.assignments == {} and subagent_runtime._active_subagents == {}
     monkeypatch.setattr(core, "SUBAGENT_MAX_ROUNDS", 1)
     client(host, lambda **kwargs: blocks(tool_call("read_file", path="missing.txt")))
     result = spawn(host)
     assert result["status"] == "failed" and "round limit" in result["text"]
-    assert subagent_runtime.active_subagents == {}
+    assert subagent_runtime._active_subagents == {}
 
 
 def test_claim_and_thread_start_failures_roll_back(runtime, monkeypatch):
@@ -125,7 +125,7 @@ def test_claim_and_thread_start_failures_roll_back(runtime, monkeypatch):
     result = spawn(host, mode="persistent", task_id=second.id)
     assert result["status"] == "failed" and "start failed" in result["text"]
     assert task_state.load_task(second.id).status == "pending"
-    assert subagent_runtime.active_subagents == {} and subagent_runtime.PROTOCOL.empty()
+    assert subagent_runtime._active_subagents == {} and subagent_runtime._PROTOCOL.empty()
     assert set(task_state.assignments) == {"agent"}
 
 
@@ -149,19 +149,19 @@ def test_once_uses_task_directory_until_final_answer(runtime, monkeypatch):
     assert directory.joinpath("once.txt").read_text() == "task result"
     assert not core.WORKDIR.joinpath("once.txt").exists()
     assert task_state.load_task(task.id).status == "completed"
-    assert not task_state.assignments and not subagent_runtime.active_subagents
+    assert not task_state.assignments and not subagent_runtime._active_subagents
 
 
 def test_persistent_without_task_keeps_history_and_never_auto_claims(runtime, monkeypatch):
     host = runtime
     calls = []
     waiting = threading.Event()
-    original_wait = subagent_runtime.BUS.wait_for_messages
+    original_wait = subagent_runtime._BUS.wait_for_messages
     def wait(name, timeout=None):
         if name == "worker":
             waiting.set()
         return original_wait(name, timeout)
-    monkeypatch.setattr(subagent_runtime.BUS, "wait_for_messages", wait)
+    monkeypatch.setattr(subagent_runtime._BUS, "wait_for_messages", wait)
     def create(**kwargs):
         calls.append((id(kwargs["messages"]), list(kwargs["messages"])))
         return blocks(text_block(f"Result {len(calls)}"))
@@ -177,7 +177,7 @@ def test_persistent_without_task_keeps_history_and_never_auto_claims(runtime, mo
     assert len(calls) == 2
     assert calls[0][0] == calls[1][0]
     assert any("Result 1" in str(message) for message in calls[1][1])
-    assert subagent_runtime.active_subagents["worker"].active_request == "Second investigation"
+    assert subagent_runtime._active_subagents["worker"].active_request == "Second investigation"
     listing = json.loads(registrations.run_list_subagents().content)
     assert listing == [{"name": "worker", "role": "coder",
                         "mode": "persistent", "status": "idle"}]
@@ -226,7 +226,7 @@ def test_persistent_switches_tasks_only_after_final_answer(runtime, monkeypatch)
     assert not core.WORKDIR.joinpath("next-round.txt").exists()
     assert task_state.load_task(b.id).status == "completed"
     assert "worker" not in task_state.assignments
-    assert len(set(histories)) == 1 and "worker" in subagent_runtime.active_subagents
+    assert len(set(histories)) == 1 and "worker" in subagent_runtime._active_subagents
 
 
 def test_persistent_unfinished_task_retains_owner_until_guidance(runtime):
@@ -294,10 +294,10 @@ def test_messages_during_work_and_between_children_are_model_selected(runtime):
     spawn(host, name="sender", mode="persistent")
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and (counts.get("receiver", 0) < 2 or counts.get("sender", 0) < 2):
-        subagent_runtime.BUS.wait_for_messages("lead", deadline - time.monotonic())
+        subagent_runtime._BUS.wait_for_messages("lead", deadline - time.monotonic())
     assert counts == {"receiver": 2, "sender": 2}
     assert "Additional evidence" in str(next(history for name, history in reversed(calls) if name == "sender"))
-    assert subagent_runtime.active_subagents["sender"].active_request == "Investigate"
+    assert subagent_runtime._active_subagents["sender"].active_request == "Investigate"
     assert "Peer investigation" in str(next(history for name, history in reversed(calls) if name == "receiver"))
 
 
@@ -317,11 +317,11 @@ def test_pending_plan_can_shutdown_without_another_model_call(runtime, runtime_t
     for thread in runtime_threads:
         thread.join(3)
         assert not thread.is_alive()
-    assert "worker" not in subagent_runtime.active_subagents
-    assert subagent_runtime.PROTOCOL.empty()
+    assert "worker" not in subagent_runtime._active_subagents
+    assert subagent_runtime._PROTOCOL.empty()
     assert len(calls) == 1
     assert acknowledgement["metadata"]["approve"] is True
-    assert subagent_runtime.PROTOCOL.request(plan["metadata"]["request_id"]) is None
+    assert subagent_runtime._PROTOCOL.request(plan["metadata"]["request_id"]) is None
 
 
 @pytest.mark.parametrize("replay_approval", [False, True])
@@ -331,7 +331,7 @@ def test_stale_protocol_does_not_wake_idle_model(runtime, monkeypatch, replay_ap
     histories = []
     delivered = threading.Event()
     waiting_again = threading.Event()
-    wait = subagent_runtime.BUS.wait_for_messages
+    wait = subagent_runtime._BUS.wait_for_messages
 
     def observe_wait(name, timeout=None):
         if name == "worker" and delivered.is_set():
@@ -341,7 +341,7 @@ def test_stale_protocol_does_not_wake_idle_model(runtime, monkeypatch, replay_ap
             delivered.set()
         return messages
 
-    monkeypatch.setattr(subagent_runtime.BUS, "wait_for_messages", observe_wait)
+    monkeypatch.setattr(subagent_runtime._BUS, "wait_for_messages", observe_wait)
 
     def create(**kwargs):
         histories.append(list(kwargs["messages"]))
@@ -356,7 +356,7 @@ def test_stale_protocol_does_not_wake_idle_model(runtime, monkeypatch, replay_ap
         request_id = wait_event(host, "plan_approval_request")["metadata"]["request_id"]
         assert "approved" in subagent_runtime.run_review_plan(request_id, True).content
     wait_event(host, "idle_notification")
-    subagent_runtime.BUS.send("lead", "worker", "stale", message_type,
+    subagent_runtime._BUS.send("lead", "worker", "stale", message_type,
                   {"request_id": request_id, "approve": True})
     assert waiting_again.wait(3)
     assert len(histories) == (2 if replay_approval else 1)

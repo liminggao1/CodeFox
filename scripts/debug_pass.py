@@ -262,7 +262,7 @@ def _main() -> int:
             replay = json.loads(handler(name="debug-write", resume_from_run_id=out["task"]["runId"]).content)
             assert out["task"]["status"] == "completed", out
             assert replay["task"]["usage"] == {"agents": 0, "tokens": 0}, replay
-            assert len(client.calls) == 2 and not subagent_runtime.active_subagents
+            assert len(client.calls) == 2 and not subagent_runtime._active_subagents
             assert (workdir / "workflow-child.txt").read_text() == "saved"
         finally:
             wf.RUNNER_FACTORY = original_factory
@@ -288,7 +288,7 @@ def _main() -> int:
         try:
             create = registrations.BUILTIN_HANDLERS["spawn_subagent"]
             once = json.loads(create(name="scout", prompt="Inspect", mode="once").content)
-            assert once["status"] == "completed" and "scout" not in subagent_runtime.active_subagents
+            assert once["status"] == "completed" and "scout" not in subagent_runtime._active_subagents
             started = json.loads(create(name="worker", prompt="Write child.txt", mode="persistent").content)
             assert started["status"] == "started"
             events = []
@@ -296,19 +296,19 @@ def _main() -> int:
             while time.monotonic() < deadline and not any(
                 message["type"] == "idle_notification" for message in events
             ):
-                events.extend(subagent_runtime.BUS.wait_for_messages("lead", deadline - time.monotonic()))
+                events.extend(subagent_runtime._BUS.wait_for_messages("lead", deadline - time.monotonic()))
             assert any(message["type"] == "result" for message in events), events
             assert any(message["type"] == "idle_notification" for message in events), events
             assert (workdir / "child.txt").read_text(encoding="utf-8") == "child result"
-            assert subagent_runtime.active_subagents["worker"].status == "idle"
+            assert subagent_runtime._active_subagents["worker"].status == "idle"
             subagent_runtime.run_request_shutdown("worker").content
             assert done.wait(3), "child failed to stop"
-            assert "worker" not in subagent_runtime.active_subagents
+            assert "worker" not in subagent_runtime._active_subagents
             assert any(message["type"] == "shutdown_response"
                        for message in subagent_runtime.consume_lead_inbox()), "no shutdown acknowledgement"
             return "once result; persistent start/write/events/shutdown"
         finally:
-            if "worker" in subagent_runtime.active_subagents:
+            if "worker" in subagent_runtime._active_subagents:
                 subagent_runtime.run_request_shutdown("worker").content
                 done.wait(3)
             subagent_runtime.threading.Thread = original_thread

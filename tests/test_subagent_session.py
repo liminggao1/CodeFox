@@ -40,15 +40,15 @@ def test_subagent_completion_and_failure_release_assignment(host_factory, monkey
 
     def shutdown(name, timeout=None):
         subagent_runtime.run_request_shutdown(name).content
-        return subagent_runtime.BUS.read_inbox(name)
+        return subagent_runtime._BUS.read_inbox(name)
 
-    monkeypatch.setattr(subagent_runtime.BUS, "wait_for_messages", shutdown)
+    monkeypatch.setattr(subagent_runtime._BUS, "wait_for_messages", shutdown)
     subagent_runtime.spawn_subagent("alice", "Finish the task", "persistent", role="tester", task_id=task.id)
 
     assert "alice" not in tasks.assignments
-    assert "alice" not in subagent_runtime.active_subagents
+    assert "alice" not in subagent_runtime._active_subagents
     assert tasks.load_task(task.id).status == ("pending" if fail else "completed")
-    inbox = subagent_runtime.BUS.read_inbox("lead")
+    inbox = subagent_runtime._BUS.read_inbox("lead")
     assert any(msg["type"] == ("error" if fail else "result") for msg in inbox)
     if fail:
         assert not any(msg["type"] == "result" for msg in inbox)

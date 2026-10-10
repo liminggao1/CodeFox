@@ -10,6 +10,7 @@ import json
 import re
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -112,7 +113,20 @@ class MessageBus:
             return self._read_unlocked(agent)
 
 
-BUS = MessageBus()
+_BUS = MessageBus()
+
+
+@contextmanager
+def _team_lock():
+    """团队状态唯一锁序：先任务表锁，再子 agent 锁。
+
+    所有同时触碰 `tasks` 与子 agent 注册表的写入点都经此进入，锁序只在这里定义。
+    """
+    with tasks.task_lock:
+        with _subagent_lock:
+            yield
+
+
 @dataclass
 class SubagentRecord:
     name: str
@@ -124,18 +138,31 @@ class SubagentRecord:
     usage: dict = field(default_factory=lambda: {"tokens": 0, "model_calls": 0})
 
 
-active_subagents: dict[str, SubagentRecord] = {}
-subagent_lock = threading.RLock()
-PROTOCOL = SubagentProtocol(subagent_lock)
+_active_subagents: dict[str, SubagentRecord] = {}
+_subagent_lock = threading.RLock()
+_PROTOCOL = SubagentProtocol(_subagent_lock)
 _persistent_threads: list[threading.Thread] = []
 
 
+# -- 子 agent 操作 interface：调用方不再持有注册表、锁、总线或协议对象 --
+
+def has_pending_inbox() -> bool:
+    """Lead 信箱是否有待消费内容；替代调用方直接查询消息总线。"""
+    return _BUS.peek("lead")
+
+
+def active_names() -> tuple[str, ...]:
+    """当前活跃子 agent 的名称快照；供运行时构造上下文时读取。"""
+    with _subagent_lock:
+        return tuple(_active_subagents)
+
+
 def wait_for_subagents():
-    with subagent_lock:
+    with _subagent_lock:
         threads = list(_persistent_threads)
     for thread in threads:
         thread.join()
-    with subagent_lock:
+    with _subagent_lock:
         _persistent_threads.clear()
 
 
@@ -147,7 +174,7 @@ def consume_lead_inbox(route_protocol=True) -> list[dict]:
     输入：route_protocol 为是否处理带 request_id 的协议回复，默认开启。
     返回：本次收到的全部消息列表，包括协议消息；读取成功后信箱已被清空。
     """
-    msgs = BUS.read_inbox("lead")
+    msgs = _BUS.read_inbox("lead")
     if route_protocol:
         for msg in msgs:
             meta = msg.get("metadata", {})
@@ -156,11 +183,11 @@ def consume_lead_inbox(route_protocol=True) -> list[dict]:
             # Exited children have already cleared their protocol indices.
             # Their acknowledgement remains an event for Lead to consume.
             if msg_type.endswith("_response"):
-                matched = PROTOCOL.match_response(
+                matched = _PROTOCOL.match_response(
                     msg_type, req_id, meta.get("approve", False),
                     msg.get("from", ""), msg.get("to", ""))
                 if matched:
-                    state = PROTOCOL.request(req_id)
+                    state = _PROTOCOL.request(req_id)
                     if state is not None:
                         color = "32" if state.status == "approved" else "31"
                         core.terminal_print(f"  \033[{color}m[protocol] {state.type} "
@@ -195,8 +222,8 @@ def authorize_subagent_tool(name: str, block) -> str | None:
         分配版本变化会清理旧请求，并让需要审批的计划重新进入 required 状态。
         bash、写入、编辑和完成任务需获批；此处放行后仍需经过通用权限 hooks。
     """
-    with tasks.task_lock:
-        return PROTOCOL.authorize(name, block.name, tasks.assignment_identity(name))
+    with _team_lock():
+        return _PROTOCOL.authorize(name, block.name, tasks.assignment_identity(name))
 
 
 def create_subagent_session(name: str, system: str = "", *,
@@ -209,7 +236,7 @@ def create_subagent_session(name: str, system: str = "", *,
         lambda to, content: ToolResult(send_message(name, to, content)),
         lambda plan: ToolResult(submit_plan(name, plan)),
         mode=mode, task_tools=task_tools, tools=tools, max_tokens=max_tokens,
-        work_context=lambda: f"Plan status: {PROTOCOL.gate(name)}",
+        work_context=lambda: f"Plan status: {_PROTOCOL.gate(name)}",
     )
 
 
@@ -221,15 +248,14 @@ def apply_plan_response(name: str, msg: dict) -> tuple[bool, str]:
         更新计划门禁、将子 agent登记为 working，并移除当前计划请求索引。
         不匹配时返回忽略提示；批准和拒绝都会被接受，但拒绝不会开放工具权限。
     """
-    with tasks.task_lock:
+    with _team_lock():
         identity = tasks.assignment_identity(name)
-        with subagent_lock:
-            if name not in active_subagents:
-                return False, "[Ignored plan response: request mismatch]"
-            accepted, notice = PROTOCOL.apply_plan(name, msg, identity)
-            if accepted:
-                active_subagents[name].status = "working"
-            return accepted, notice
+        if name not in _active_subagents:
+            return False, "[Ignored plan response: request mismatch]"
+        accepted, notice = _PROTOCOL.apply_plan(name, msg, identity)
+        if accepted:
+            _active_subagents[name].status = "working"
+        return accepted, notice
 
 
 def apply_shutdown_request(name: str, msg: dict) -> tuple[bool, str]:
@@ -239,11 +265,11 @@ def apply_shutdown_request(name: str, msg: dict) -> tuple[bool, str]:
     返回：有效时为 (True, 请求 ID)，并将子 agent标记为 stopping。
         无效或重复请求返回 (False, 忽略提示)，不在这里发送确认或退出线程。
     """
-    with subagent_lock:
-        record = active_subagents.get(name)
+    with _subagent_lock:
+        record = _active_subagents.get(name)
         if record is None or record.status == "stopping":
             return False, "[Ignored shutdown request: request mismatch]"
-        accepted, notice = PROTOCOL.accept_shutdown(name, msg)
+        accepted, notice = _PROTOCOL.accept_shutdown(name, msg)
         if accepted:
             record.status = "stopping"
         return accepted, notice
@@ -251,22 +277,22 @@ def apply_shutdown_request(name: str, msg: dict) -> tuple[bool, str]:
 
 def send_message(from_name: str, to: str, content: str) -> str:
     """Deliver a model-selected message to Lead or a live persistent child."""
-    with subagent_lock:
-        target = active_subagents.get(to)
+    with _subagent_lock:
+        target = _active_subagents.get(to)
         if to != "lead" and target is None:
             raise ValueError(f"Agent '{to}' is not active")
         if to != "lead" and (target.mode != "persistent" or target.status == "stopping"):
             raise ValueError(f"Agent '{to}' cannot receive messages in its current mode/status")
-        BUS.send(from_name, to, content)
+        _BUS.send(from_name, to, content)
     return f"Sent to {to}"
 
 
 def list_subagents() -> list[dict]:
     """Return public metadata for active instances without exposing history."""
-    with subagent_lock:
+    with _subagent_lock:
         return [{"name": item.name, "role": item.role, "mode": item.mode,
                  "status": item.status}
-                for item in sorted(active_subagents.values(), key=lambda item: item.name)]
+                for item in sorted(_active_subagents.values(), key=lambda item: item.name)]
 
 
 class _StopSubagent(Exception):
@@ -282,7 +308,7 @@ def _receive(record, session, messages):
         if kind == "shutdown_request":
             accepted, notice = apply_shutdown_request(record.name, msg)
             if accepted:
-                BUS.send(record.name, "lead", "Shutting down gracefully.",
+                _BUS.send(record.name, "lead", "Shutting down gracefully.",
                          "shutdown_response", {"request_id": notice, "approve": True})
                 raise _StopSubagent()
             # A stale protocol message must not wake an idle model.
@@ -309,7 +335,7 @@ def _receive(record, session, messages):
 def _wait_for_work(record, session):
     """Wait for useful input or shutdown; never scan or auto-claim the board."""
     while True:
-        inbox = BUS.wait_for_messages(record.name)
+        inbox = _BUS.wait_for_messages(record.name)
         if _receive(record, session, inbox):
             return
 
@@ -320,8 +346,8 @@ def _execute_work(record, session):
     while record.mode == "persistent" or round_index < core.SUBAGENT_MAX_ROUNDS:
         round_index += 1
         if record.mode == "persistent":
-            _receive(record, session, BUS.read_inbox(record.name))
-            while PROTOCOL.gate(record.name) == "pending":
+            _receive(record, session, _BUS.read_inbox(record.name))
+            while _PROTOCOL.gate(record.name) == "pending":
                 record.status = "waiting_approval"
                 _wait_for_work(record, session)
         record.status = "working"
@@ -337,10 +363,10 @@ def _cleanup(record):
     try:
         tasks.release_assignment(record.name)
     finally:
-        with subagent_lock:
-            active_subagents.pop(record.name, None)
-            PROTOCOL.clear(record.name)
-        BUS.read_inbox(record.name)
+        with _subagent_lock:
+            _active_subagents.pop(record.name, None)
+            _PROTOCOL.clear(record.name)
+        _BUS.read_inbox(record.name)
 
 
 def _persistent_loop(record, session):
@@ -354,28 +380,28 @@ def _persistent_loop(record, session):
                     str(assignment["task_id"])).status == "in_progress")
             if unfinished:
                 summary = f"[Task unfinished; assignment retained]\n{summary}"
-            BUS.send(record.name, "lead", summary or "Finished without a text summary.", "result")
+            _BUS.send(record.name, "lead", summary or "Finished without a text summary.", "result")
             released = tasks.release_completed_assignment(record.name)
             if released or not assignment:
                 if not assignment:
                     tasks.advance_assignment_version(record.name)
-                with tasks.task_lock:
-                    PROTOCOL.reset_work(record.name, tasks.assignment_identity(record.name)[0])
+                with _team_lock():
+                    _PROTOCOL.reset_work(record.name, tasks.assignment_identity(record.name)[0])
             record.status = "idle"
             interaction.publish("subagent_status", name=record.name, mode=record.mode, status=record.status)
-            BUS.send(record.name, "lead",
+            _BUS.send(record.name, "lead",
                      "Waiting for guidance on the unfinished Task." if unfinished else "Waiting for more work.",
                      "idle_notification")
             _wait_for_work(record, session)
     except _StopSubagent:
         pass
     except Exception as exc:
-        BUS.send(record.name, "lead", f"{type(exc).__name__}: {exc}", "error")
+        _BUS.send(record.name, "lead", f"{type(exc).__name__}: {exc}", "error")
     finally:
         try:
             _cleanup(record)
         except Exception as exc:
-            BUS.send(record.name, "lead", f"Cleanup failed: {type(exc).__name__}: {exc}", "error")
+            _BUS.send(record.name, "lead", f"Cleanup failed: {type(exc).__name__}: {exc}", "error")
 
 
 def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
@@ -420,16 +446,15 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
         result["text"] = str(exc)
         return result
     record = SubagentRecord(name, role, mode, active_request=prompt)
-    with tasks.task_lock:
-        with subagent_lock:
-            if any(key.casefold() == name.casefold() for key in active_subagents):
-                result["text"] = f"Subagent '{name}' already exists"
-                return result
-            if tasks.assignments.get(name) or tasks._owner_in_progress(name):
-                result["text"] = f"Subagent '{name}' already owns a Task"
-                return result
-            active_subagents[name] = record
-            PROTOCOL.register(name, require_plan, tasks.assignment_identity(name)[0])
+    with _team_lock():
+        if any(key.casefold() == name.casefold() for key in _active_subagents):
+            result["text"] = f"Subagent '{name}' already exists"
+            return result
+        if tasks.assignments.get(name) or tasks._owner_in_progress(name):
+            result["text"] = f"Subagent '{name}' already owns a Task"
+            return result
+        _active_subagents[name] = record
+        _PROTOCOL.register(name, require_plan, tasks.assignment_identity(name)[0])
     session = None
     try:
         if task_id is not None:
@@ -471,7 +496,7 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
             thread = threading.Thread(target=run_persistent, daemon=True)
             thread.start()
             if context is not None:
-                with subagent_lock:
+                with _subagent_lock:
                     _persistent_threads[:] = [item for item in _persistent_threads if item.is_alive()]
                     _persistent_threads.append(thread)
             result.update(status="started", text="Started; the runtime will deliver results and idle events.")
@@ -503,18 +528,17 @@ def submit_plan(from_name: str, plan: str) -> str:
     返回：提交确认和新 request_id；已有 pending 计划时拒绝重复提交。
         保存当前任务 ID 和分配版本，将计划设为 pending、子 agent设为 waiting_approval。
     """
-    with tasks.task_lock:
+    with _team_lock():
         identity = tasks.assignment_identity(from_name)
-        with subagent_lock:
-            record = active_subagents.get(from_name)
-            if record is None or record.status == "stopping":
-                raise ValueError(f"Subagent '{from_name}' is not active")
-            state, notice = PROTOCOL.submit_plan(from_name, plan, identity)
-            if state is None:
-                raise ValueError(notice)
-            req_id = state.request_id
-            record.status = "waiting_approval"
-    BUS.send(from_name, "lead", plan,
+        record = _active_subagents.get(from_name)
+        if record is None or record.status == "stopping":
+            raise ValueError(f"Subagent '{from_name}' is not active")
+        state, notice = _PROTOCOL.submit_plan(from_name, plan, identity)
+        if state is None:
+            raise ValueError(notice)
+        req_id = state.request_id
+        record.status = "waiting_approval"
+    _BUS.send(from_name, "lead", plan,
              "plan_approval_request",
              {"request_id": req_id})
     return f"Plan submitted ({req_id}). Wait for Lead's decision."
@@ -530,14 +554,14 @@ def run_request_shutdown(name: str) -> ToolResult:
     返回：请求确认或子 agent不活跃的提示。登记 pending 请求并写入信箱，
         不直接终止线程，等待子 agent处理关闭请求并回复确认。
     """
-    with subagent_lock:
-        record = active_subagents.get(name)
+    with _subagent_lock:
+        record = _active_subagents.get(name)
         if record is None:
             return ToolResult(f"Subagent '{name}' is not active", "failed")
         if record.mode != "persistent":
             return ToolResult(f"Subagent '{name}' requires persistent mode", "failed")
-        req_id = PROTOCOL.request_shutdown(name).request_id
-    BUS.send("lead", name, "Finish the current step and shut down.",
+        req_id = _PROTOCOL.request_shutdown(name).request_id
+    _BUS.send("lead", name, "Finish the current step and shut down.",
              "shutdown_request",
              {"request_id": req_id})
     core.terminal_print(f"  \033[35m[protocol] shutdown_request -> {name} "
@@ -552,14 +576,14 @@ def run_request_plan(name: str, task: str) -> ToolResult:
     返回：投递确认或子 agent不活跃的提示。将门禁设为 required 并发送 plan_request；
         审批请求 ID 会在子 agent真正提交计划时生成。
     """
-    with subagent_lock:
-        record = active_subagents.get(name)
+    with _subagent_lock:
+        record = _active_subagents.get(name)
         if record is None:
             return ToolResult(f"Subagent '{name}' is not active", "failed")
         if record.mode != "persistent":
             return ToolResult(f"Subagent '{name}' requires persistent mode", "failed")
-        PROTOCOL.require_plan(name)
-    BUS.send("lead", name, task, "plan_request")
+        _PROTOCOL.require_plan(name)
+    _BUS.send("lead", name, task, "plan_request")
     return ToolResult(f"Plan requested from {name}", "success")
 
 
@@ -571,16 +595,16 @@ def run_review_plan(request_id: str, approve: bool,
     返回：审批结果或拒绝处理的原因。只更新当前任务、版本和计划索引匹配的请求；
         将协议状态设为 approved 或 rejected 后投递回复，子 agent收信时再更新工具门禁。
     """
-    state = PROTOCOL.request(request_id)
+    state = _PROTOCOL.request(request_id)
     if not state:
         return ToolResult(f"Request {request_id} not found", "failed")
-    with tasks.task_lock:
-        state, notice = PROTOCOL.review_plan(request_id, approve, tasks.assignment_identity(state.sender))
+    with _team_lock():
+        state, notice = _PROTOCOL.review_plan(request_id, approve, tasks.assignment_identity(state.sender))
         if state is None:
             return ToolResult(notice, "failed")
     content = feedback or ("Plan approved." if approve
                            else "Revise the plan and submit it again.")
-    BUS.send("lead", state.sender, content,
+    _BUS.send("lead", state.sender, content,
              "plan_approval_response",
              {"request_id": request_id, "approve": approve})
     icon = "approved" if approve else "rejected"

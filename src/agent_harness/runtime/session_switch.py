@@ -51,7 +51,7 @@ class SessionSwitch:
         if not root.is_dir():
             raise SessionError(f"Session startup directory does not exist: {root}")
         if (scheduler.has_background_tasks() or subagent_runtime.list_subagents()
-                or subagent_runtime.BUS.peek("lead")):
+                or subagent_runtime.has_pending_inbox()):
             raise SessionError("Background work or results remain; finish them and retry /resume")
         with scheduler.cron_lock:
             if scheduler.cron_queue:

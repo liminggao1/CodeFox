@@ -35,8 +35,7 @@ def build_context(messages: list) -> RuntimeContext:
     返回：RuntimeContext，包含记忆索引、相关正文、已连接 MCP 和活跃子 agent名称。
         记忆选取可能请求模型；读取或选取异常按记忆模块规则处理。
     """
-    with subagent.subagent_lock:
-        subagent_names = tuple(subagent.active_subagents)
+    subagent_names = subagent.active_names()
     return RuntimeContext(
         memory_catalog=memory_runtime.read_memory_index(),
         memories=memory_runtime.load_memories(messages),

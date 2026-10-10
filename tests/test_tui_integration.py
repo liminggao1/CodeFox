@@ -499,7 +499,7 @@ def test_command_draft_survives_actual_background_wakeup(runtime_factory, monkey
             app._submit("initial")
             await wait_for(pilot, lambda: not app.busy)
             editor = await command_draft(app, pilot, "/goal clear")
-            subagent_runtime.BUS.send("child", "lead", "Background result")
+            subagent_runtime._BUS.send("child", "lead", "Background result")
             await wait_for(pilot, lambda: started.is_set() and app.busy)
             assert not app.query_one(CommandCandidates).display
             count = len(submissions)

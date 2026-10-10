@@ -95,7 +95,7 @@ def test_stop_waiting_approval_completes_tools_and_pauses_background(runtime_fac
     assert finished.payload["outcome"]["status"] == "stopped"
     assert not (core.WORKDIR / "unwanted").exists()
     assert len([event for event in events if event.type == "tool_result"]) == 2
-    subagent_runtime.BUS.send("child", "lead", "Waiting result")
+    subagent_runtime._BUS.send("child", "lead", "Waiting result")
     assert runtime.turns.background_paused
     assert runtime.submit("continue").status == "accepted"
     assert not runtime.turns.background_paused
@@ -318,7 +318,7 @@ def test_background_delivery_runs_with_noninteractive_permissions(runtime_factor
     runtime, host = runtime_factory([response("initial"), response(tools=[tool("bash", command="touch unwanted")], stop="tool_use"), response("delivered")])
     submission = runtime.submit("run")
     until(runtime, "turn_finished", submission_id=submission.submission_id)
-    subagent_runtime.BUS.send("child", "lead", "Background result")
+    subagent_runtime._BUS.send("child", "lead", "Background result")
     finished, events = until(runtime, "turn_finished")
     assert finished.payload["submission_id"] is None
     assert finished.payload["outcome"]["status"] == "completed"
@@ -366,7 +366,7 @@ def test_close_waits_for_owned_persistent_thread(runtime_factory):
     runtime.close()
     closed, _ = until(runtime, "runtime_closed")
     assert closed.payload["saved"]
-    assert not subagent_runtime.active_subagents
+    assert not subagent_runtime._active_subagents
     assert not subagent_runtime._persistent_threads
 
 

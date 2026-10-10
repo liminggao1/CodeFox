@@ -128,7 +128,7 @@ class InteractiveRuntime:
             return False
         with scheduler.cron_lock:
             fired = bool(scheduler.cron_queue)
-        return fired or subagent_runtime.BUS.peek("lead") or scheduler.has_pending_background()
+        return fired or subagent_runtime.has_pending_inbox() or scheduler.has_pending_background()
 
     @staticmethod
     def _display_record(fact):

@@ -61,8 +61,8 @@ def host_factory(tmp_path, monkeypatch):
         # 启动目录、子 agent、计划审批、任务分配或 MCP 客户端。
         core.WORKDIR = tmp_path
         monkeypatch.setattr(core, "MEMORY_ENABLED", enable_memory)
-        subagent_runtime.active_subagents.clear()
-        subagent_runtime.PROTOCOL.clear()
+        subagent_runtime._active_subagents.clear()
+        subagent_runtime._PROTOCOL.clear()
         tasks.assignments.clear()
         tasks.assignment_versions.clear()
         contexts.enter_context(lead_context_scope(LeadContext(tasks.task_lock)))
@@ -127,7 +127,7 @@ def runtime_factory(host_factory, monkeypatch):
         runtime._thread.join(timeout=5)
         assert not runtime._thread.is_alive()
     assert scheduler._runtime_thread is None
-    assert not subagent_runtime.active_subagents
+    assert not subagent_runtime._active_subagents
     contexts.close()
 
 

@@ -266,10 +266,10 @@ def test_message_bus_rejects_unregistered_or_unsafe_recipients(
     host_factory, tmp_path
 ) -> None:
     host = host_factory()
-    subagent_runtime.active_subagents["alice"] = subagent_runtime.SubagentRecord("alice", status="idle")
+    subagent_runtime._active_subagents["alice"] = subagent_runtime.SubagentRecord("alice", status="idle")
 
     with pytest.raises(ValueError):
-        subagent_runtime.BUS.send("alice", "../escape", "bad")
+        subagent_runtime._BUS.send("alice", "../escape", "bad")
     assert not (tmp_path / "escape.jsonl").exists()
 
     with pytest.raises(ValueError) as error:
@@ -287,12 +287,12 @@ def test_reserved_subagent_names_do_not_shadow_runtime_identities(
     for name in ("lead", "agent", "Lead", "Agent"):
         rejected = subagent_runtime.spawn_subagent(name, "Inspect auth.", "persistent", role="backend")["text"]
         assert "reserved" in rejected.lower()
-        assert name not in subagent_runtime.active_subagents
+        assert name not in subagent_runtime._active_subagents
 
-    subagent_runtime.BUS.send("alice", "lead", "still routable")
-    assert subagent_runtime.BUS.read_inbox("lead")[0]["content"] == "still routable"
+    subagent_runtime._BUS.send("alice", "lead", "still routable")
+    assert subagent_runtime._BUS.read_inbox("lead")[0]["content"] == "still routable"
 
-    subagent_runtime.active_subagents["Alice"] = subagent_runtime.SubagentRecord("Alice", status="idle")
+    subagent_runtime._active_subagents["Alice"] = subagent_runtime.SubagentRecord("Alice", status="idle")
     duplicate = subagent_runtime.spawn_subagent("alice", "Inspect auth.", "persistent", role="backend")["text"]
     assert "already exists" in duplicate
 
@@ -322,7 +322,7 @@ def test_plan_gate_blocks_mutating_subagent_tools(host_factory, monkeypatch, tmp
         assert (tmp_path / "config.py").read_text() == before
         subagent_runtime.run_review_plan(submission, True).content
         assert "Blocked" in session.execute_tool(block).result.content
-        assert subagent_runtime.apply_plan_response("alice", subagent_runtime.BUS.read_inbox("alice")[-1])[0]
+        assert subagent_runtime.apply_plan_response("alice", subagent_runtime._BUS.read_inbox("alice")[-1])[0]
         output = session.execute_tool(block).result.content
         assert output.startswith("Wrote" if tool_name == "write_file" else "Edited")
 
@@ -346,29 +346,29 @@ def test_plan_rejection_requires_a_new_submission(host_factory, monkeypatch) -> 
     spawn_paused(host, monkeypatch)
 
     assert "Plan requested" in subagent_runtime.run_request_plan("alice", "Refactor auth").content
-    request = subagent_runtime.BUS.read_inbox("alice")
+    request = subagent_runtime._BUS.read_inbox("alice")
     assert request[0]["type"] == "plan_request"
-    assert subagent_runtime.PROTOCOL.gate("alice") == "required"
+    assert subagent_runtime._PROTOCOL.gate("alice") == "required"
 
     submission = subagent_runtime.submit_plan("alice", "1. Read\n2. Test")
     request_id = submission.split("(")[1].split(")")[0]
-    assert subagent_runtime.PROTOCOL.request(request_id).status == "pending"
+    assert subagent_runtime._PROTOCOL.request(request_id).status == "pending"
 
     result = subagent_runtime.run_review_plan(request_id, False, "Add a rollback step.").content
     assert "rejected" in result
-    assert subagent_runtime.PROTOCOL.gate("alice") == "pending"
+    assert subagent_runtime._PROTOCOL.gate("alice") == "pending"
 
-    responses = subagent_runtime.BUS.read_inbox("alice")
+    responses = subagent_runtime._BUS.read_inbox("alice")
     accepted, _ = subagent_runtime.apply_plan_response("alice", responses[-1])
     assert accepted is True
-    assert subagent_runtime.PROTOCOL.gate("alice") == "rejected"
+    assert subagent_runtime._PROTOCOL.gate("alice") == "rejected"
 
     second = subagent_runtime.submit_plan(
         "alice", "1. Read\n2. Change\n3. Test\n4. Roll back on failure"
     )
     second_id = second.split("(")[1].split(")")[0]
     assert second_id != request_id
-    assert subagent_runtime.PROTOCOL.request(second_id).status == "pending"
+    assert subagent_runtime._PROTOCOL.request(second_id).status == "pending"
 
 
 def test_mismatched_plan_response_cannot_release_gate(host_factory, monkeypatch) -> None:
@@ -401,7 +401,7 @@ def test_old_approval_cannot_unlock_a_new_assignment(host_factory, monkeypatch) 
     submission = subagent_runtime.submit_plan("alice", "1. Inspect\n2. Test")
     request_id = submission.split("(")[1].split(")")[0]
     assert "approved" in subagent_runtime.run_review_plan(request_id, True).content
-    response = subagent_runtime.BUS.read_inbox("alice")[-1]
+    response = subagent_runtime._BUS.read_inbox("alice")[-1]
 
     assert "Completed" in tasks.complete_task(task.id, owner="alice")
     assert tasks.release_completed_assignment("alice")
@@ -423,14 +423,14 @@ def test_shutdown_response_must_come_from_requested_subagent(host_factory, monke
     result = subagent_runtime.run_request_shutdown("alice").content
     request_id = result.split("(")[1].split(")")[0]
 
-    subagent_runtime.BUS.send(
+    subagent_runtime._BUS.send(
         "bob", "lead", "Shutdown acknowledged.",
         "shutdown_response",
         {"request_id": request_id, "approve": True},
     )
     subagent_runtime.consume_lead_inbox()
 
-    assert subagent_runtime.PROTOCOL.request(request_id).status == "pending"
+    assert subagent_runtime._PROTOCOL.request(request_id).status == "pending"
 
 
 def test_shutdown_request_must_match_active_protocol(host_factory, monkeypatch) -> None:
@@ -447,16 +447,16 @@ def test_shutdown_request_must_match_active_protocol(host_factory, monkeypatch) 
     accepted, notice = subagent_runtime.apply_shutdown_request("alice", forged)
     assert accepted is False
     assert "Ignored" in notice
-    assert subagent_runtime.active_subagents["alice"].status == "working"
+    assert subagent_runtime._active_subagents["alice"].status == "working"
 
     result = subagent_runtime.run_request_shutdown("alice").content
     request_id = result.split("(")[1].split(")")[0]
-    request = subagent_runtime.BUS.read_inbox("alice")[-1]
+    request = subagent_runtime._BUS.read_inbox("alice")[-1]
     accepted, matched_id = subagent_runtime.apply_shutdown_request("alice", request)
 
     assert accepted is True
     assert matched_id == request_id
-    assert subagent_runtime.active_subagents["alice"].status == "stopping"
+    assert subagent_runtime._active_subagents["alice"].status == "stopping"
     replayed, _ = subagent_runtime.apply_shutdown_request("alice", request)
     assert replayed is False
 
@@ -471,11 +471,11 @@ def test_requesting_new_plan_invalidates_previous_decisions(host_factory, monkey
         old_id = request_id(subagent_runtime.submit_plan("alice", "old plan"))
         if gate != "pending":
             subagent_runtime.run_review_plan(old_id, gate == "approved").content
-            old_reply = subagent_runtime.BUS.read_inbox("alice")[-1]
+            old_reply = subagent_runtime._BUS.read_inbox("alice")[-1]
             assert subagent_runtime.apply_plan_response("alice", old_reply)[0]
-    assert subagent_runtime.PROTOCOL.gate("alice") == gate
+    assert subagent_runtime._PROTOCOL.gate("alice") == gate
     assert "Plan requested" in subagent_runtime.run_request_plan("alice", "new work").content
-    assert subagent_runtime.PROTOCOL.gate("alice") == "required"
+    assert subagent_runtime._PROTOCOL.gate("alice") == "required"
     if old_reply:
         assert not subagent_runtime.apply_plan_response("alice", old_reply)[0]
     if gate == "pending":
@@ -485,7 +485,7 @@ def test_requesting_new_plan_invalidates_previous_decisions(host_factory, monkey
     new_id = request_id(subagent_runtime.submit_plan("alice", "new plan"))
     assert new_id != old_id
     assert "approved" in subagent_runtime.run_review_plan(new_id, True).content
-    assert subagent_runtime.apply_plan_response("alice", subagent_runtime.BUS.read_inbox("alice")[-1])[0]
+    assert subagent_runtime.apply_plan_response("alice", subagent_runtime._BUS.read_inbox("alice")[-1])[0]
     assert session.execute_tool(SimpleNamespace(
         name="write_file", input={"path": "approved.txt", "content": "ok"})).result.content.startswith("Wrote")
 
@@ -498,7 +498,7 @@ def test_plan_reply_requires_matching_identity_type_and_decision(host_factory, m
     session = spawn_paused(host, monkeypatch, require_plan=True)
     current = request_id(subagent_runtime.submit_plan("alice", "plan"))
     subagent_runtime.run_review_plan(current, True).content
-    reply = subagent_runtime.BUS.read_inbox("alice")[-1]
+    reply = subagent_runtime._BUS.read_inbox("alice")[-1]
     forged = {**reply, "metadata": dict(reply["metadata"])}
     if field in {"approve", "request_id"}:
         forged["metadata"][field] = value
@@ -516,20 +516,20 @@ def test_shutdown_routing_is_optional_and_cleanup_keeps_ack_for_lead(host_factor
     spawn_paused(host, monkeypatch, require_plan=True)
     plan_id = request_id(subagent_runtime.submit_plan("alice", "pending plan"))
     shutdown_id = request_id(subagent_runtime.run_request_shutdown("alice").content)
-    request = subagent_runtime.BUS.read_inbox("alice")[-1]
+    request = subagent_runtime._BUS.read_inbox("alice")[-1]
     assert subagent_runtime.apply_shutdown_request("alice", request) == (True, shutdown_id)
-    subagent_runtime.BUS.send("alice", "lead", "ack", "shutdown_response",
+    subagent_runtime._BUS.send("alice", "lead", "ack", "shutdown_response",
                   {"request_id": shutdown_id, "approve": True})
     delivered = subagent_runtime.consume_lead_inbox(route_protocol=False)
     assert any(message["type"] == "shutdown_response" for message in delivered)
-    assert subagent_runtime.PROTOCOL.request(shutdown_id).status == "pending"
-    subagent_runtime.BUS.send("alice", "lead", "ack after cleanup", "shutdown_response",
+    assert subagent_runtime._PROTOCOL.request(shutdown_id).status == "pending"
+    subagent_runtime._BUS.send("alice", "lead", "ack after cleanup", "shutdown_response",
                   {"request_id": shutdown_id, "approve": True})
-    record = subagent_runtime.active_subagents["alice"]
+    record = subagent_runtime._active_subagents["alice"]
     subagent_runtime._cleanup(record)
-    assert subagent_runtime.PROTOCOL.request(plan_id) is None
-    assert subagent_runtime.PROTOCOL.request(shutdown_id) is None
-    assert subagent_runtime.PROTOCOL.empty()
+    assert subagent_runtime._PROTOCOL.request(plan_id) is None
+    assert subagent_runtime._PROTOCOL.request(shutdown_id) is None
+    assert subagent_runtime._PROTOCOL.empty()
     assert subagent_runtime.consume_lead_inbox()[0]["content"] == "ack after cleanup"
     with pytest.raises(ValueError, match="not active"):
         subagent_runtime.submit_plan("alice", "late plan")
@@ -541,8 +541,8 @@ def test_recreated_child_ignores_old_approval_and_cleanup_survives_release_error
     spawn_paused(host, monkeypatch, require_plan=True)
     current = request_id(subagent_runtime.submit_plan("alice", "old plan"))
     subagent_runtime.run_review_plan(current, True).content
-    old_reply = subagent_runtime.BUS.read_inbox("alice")[-1]
-    subagent_runtime._cleanup(subagent_runtime.active_subagents["alice"])
+    old_reply = subagent_runtime._BUS.read_inbox("alice")[-1]
+    subagent_runtime._cleanup(subagent_runtime._active_subagents["alice"])
     session = spawn_paused(host, monkeypatch, require_plan=True)
     assert not subagent_runtime.apply_plan_response("alice", old_reply)[0]
     assert "Blocked" in session.execute_tool(SimpleNamespace(
@@ -554,9 +554,9 @@ def test_recreated_child_ignores_old_approval_and_cleanup_survives_release_error
 
     monkeypatch.setattr(tasks, "release_assignment", fail_release)
     with pytest.raises(OSError, match="release failed"):
-        subagent_runtime._cleanup(subagent_runtime.active_subagents["alice"])
-    assert "alice" not in subagent_runtime.active_subagents
-    assert subagent_runtime.PROTOCOL.empty()
+        subagent_runtime._cleanup(subagent_runtime._active_subagents["alice"])
+    assert "alice" not in subagent_runtime._active_subagents
+    assert subagent_runtime._PROTOCOL.empty()
 
 
 @pytest.mark.parametrize("kind", ["plan", "shutdown"])
@@ -565,12 +565,12 @@ def test_request_creation_and_cleanup_are_atomic(host_factory, monkeypatch, kind
     host = host_factory()
     real_thread = threading.Thread
     spawn_paused(host, monkeypatch, require_plan=True)
-    record = subagent_runtime.active_subagents["alice"]
+    record = subagent_runtime._active_subagents["alice"]
     reached = threading.Event()
     release = threading.Event()
     results = []
     errors = []
-    send = subagent_runtime.BUS.send
+    send = subagent_runtime._BUS.send
 
     def delayed_send(*args, **kwargs):
         reached.set()
@@ -587,7 +587,7 @@ def test_request_creation_and_cleanup_are_atomic(host_factory, monkeypatch, kind
             errors.append(exc)
 
     if order == "request_first":
-        monkeypatch.setattr(subagent_runtime.BUS, "send", delayed_send)
+        monkeypatch.setattr(subagent_runtime._BUS, "send", delayed_send)
         worker = real_thread(target=request)
         worker.start()
         try:
@@ -597,14 +597,14 @@ def test_request_creation_and_cleanup_are_atomic(host_factory, monkeypatch, kind
             release.set()
     else:
         # Follow the production lock order while blocking the other caller.
-        with tasks.task_lock, subagent_runtime.subagent_lock:
+        with tasks.task_lock, subagent_runtime._subagent_lock:
             worker = real_thread(target=request)
             worker.start()
             assert reached.wait(3)
             subagent_runtime._cleanup(record)
     worker.join(3)
     assert not worker.is_alive()
-    assert subagent_runtime.PROTOCOL.empty() and "alice" not in subagent_runtime.active_subagents
+    assert subagent_runtime._PROTOCOL.empty() and "alice" not in subagent_runtime._active_subagents
     if order == "cleanup_first":
         if kind == "plan":
             assert len(errors) == 1 and isinstance(errors[0], ValueError)
@@ -679,7 +679,7 @@ def test_invalid_tools_do_not_claim_or_request(host_factory, tools):
                                          tools=tools, client=client)
     assert result["status"] == "failed"
     assert result["usage"] == {"tokens": 0, "model_calls": 0}
-    assert not subagent_runtime.active_subagents and not tasks.assignments
+    assert not subagent_runtime._active_subagents and not tasks.assignments
     assert tasks.load_task(task.id).status == "pending"
 
 
@@ -690,7 +690,7 @@ def test_injected_client_tools_and_usage_cover_multiple_rounds(host_factory):
                                   input={"path": "result.txt", "content": "result"})),
                       optioned_reply(tokens=11)])
     def create(**kw):
-        assert "child" in subagent_runtime.active_subagents
+        assert "child" in subagent_runtime._active_subagents
         requests.append(kw)
         return next(responses)
     client = S(messages=S(create=create))
@@ -701,7 +701,7 @@ def test_injected_client_tools_and_usage_cover_multiple_rounds(host_factory):
     assert all(r["model"] == "injected" and r["max_tokens"] == 123 for r in requests)
     assert [t["name"] for t in requests[0]["tools"]] == ["write_file"]
     assert (core.WORKDIR / "result.txt").read_text() == "result"
-    assert not subagent_runtime.active_subagents
+    assert not subagent_runtime._active_subagents
 
 
 @pytest.mark.parametrize("stop", ["end_turn", "max_tokens"])
@@ -739,4 +739,4 @@ def test_usage_includes_summary_and_failed_request(host_factory, monkeypatch):
     assert result["usage"] == {"tokens": 9, "model_calls": 2}
     assert requests[0]["max_tokens"] == core.COMPACTION_MAX_TOKENS
     assert all(r["model"] == "injected" for r in requests)
-    assert not subagent_runtime.active_subagents
+    assert not subagent_runtime._active_subagents

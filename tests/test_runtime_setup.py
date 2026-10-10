@@ -165,7 +165,7 @@ def test_snapshot_owns_its_values(host_factory, monkeypatch) -> None:
     monkeypatch.setattr(memory_runtime, "load_memories", lambda messages: "")
     first = runtime_context.build_context([])
     mcp_tools.connect_mcp("docs")
-    subagent_runtime.active_subagents["alice"] = subagent_runtime.SubagentRecord("alice")
+    subagent_runtime._active_subagents["alice"] = subagent_runtime.SubagentRecord("alice")
     second = runtime_context.build_context([])
 
     assert first.connected_mcp == ()
@@ -187,7 +187,7 @@ def test_agent_refreshes_memory_mcp_and_subagents_after_tool_round(host_factory,
         if len(calls) == 1:
             memory_runtime.write_memory_file("Layout", "project", "src layout", "src/")
             memory_runtime.rebuild_memory_index()
-            subagent_runtime.active_subagents["alice"] = "working"
+            subagent_runtime._active_subagents["alice"] = "working"
             content = [SimpleNamespace(
                 type="tool_use", id="connect", name="connect_mcp", input={"name": "docs"}
             )]
