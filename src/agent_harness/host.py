@@ -140,27 +140,6 @@ def build_user_content(results: list[dict]) -> list[dict]:
     return content
 
 
-def inject_background_notifications(messages: list, save_context=None):
-    """把已完成的后台任务通知追加到对话历史。
-
-    Args:
-        messages: 当前对话历史，会在有通知时原地追加消息。
-
-    Returns:
-        ``None``。
-    """
-    try:
-        notes = scheduler.collect_background_results()
-    except OSError as exc:
-        core.terminal_print(f"[background error] Could not save results: {exc}")
-        return
-    if notes:
-        messages.append({"role": "user", "content": [
-            {"type": "text", "text": note} for note in notes]})
-        if save_context:
-            save_context()
-
-
 def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: list,
              state: recovery.RecoveryState):
     """调用模型并返回响应。
@@ -240,20 +219,21 @@ def evaluate_goal(messages: list):
 
 
 # Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
-def agent_loop(messages: list, active_request: str, save_context=None, on_usage=None):
+def agent_loop(history: list, active_request: str, save_context=None, on_usage=None):
     """执行 Agent 主循环，直到模型完成回答或本轮无法继续。
     Args:
-        messages: 当前对话历史，会被原地追加助手响应和工具结果。
+        history: 本回合的对话历史，由回合 module 持有并原地追加。
         active_request: 当前用户请求，供历史压缩和任务续做使用。
         save_context: 运行时提供的检查点回调，负责保存会话。
         on_usage: 接收 Lead 主模型用量的回调。
     Returns:
         TurnOutcome；历史和工具副作用保留在各自所属模块。
-    LeadTurn 负责本轮记录与收尾，工具批次复用权限检查与统一执行器；本循环保留
-    上下文准备、模型重试/续写、goal 判定和工具迭代的显式顺序。
+    LeadTurn 是本回合历史、展示发布、检查点、模型调用关联与定时任务交付的唯一
+    拥有者，工具批次复用权限检查与统一执行器；本循环保留上下文准备、模型重试/
+    续写、goal 判定和工具迭代的显式顺序。
     """
     # 创建本轮回合对象 LeadTurn：管理本轮所有记录、状态、会话保存、token用量回调
-    turn = LeadTurn(messages, save_context, on_usage)
+    turn = LeadTurn(history, save_context, on_usage)
     # 实例化恢复状态对象：保存本轮API重试、模型降级、上下文回滚恢复相关状态
     state = recovery.RecoveryState()
     # 手动压缩管理器，管控手动触发的工具返回内容压缩以及压缩执行时机
@@ -273,17 +253,16 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
         try:
             active_request = turn.inject_scheduled(active_request)
             # 将已完成的后台任务通知加入对话历史。
-            inject_background_notifications(messages, save_context)
+            turn.inject_background_notes()
             # 按上下文预算裁剪或压缩历史消息。
             compacted = compaction.prepare_history(
-                messages, active_request, enabled=automatic_compaction_enabled)
-            if compacted.applied:
-                turn.checkpoint()
+                turn.history, active_request, enabled=automatic_compaction_enabled)
+            turn.after_compaction(compacted)
             if compacted.reason:
                 automatic_compaction_enabled = False
                 core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
             # 根据最新消息刷新记忆、MCP 和子 agent上下文。
-            context = runtime_context.build_context(messages)
+            context = runtime_context.build_context(turn.history)
             # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
             tools, handlers = assemble_tool_pool()
             # 手动压缩完成后不再向模型提供 compact 工具。
@@ -294,7 +273,7 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             model_call_started = True
             # 重试策略和模型降级由 call_llm 内部处理。
             turn.begin_model_call()
-            response, call_id, operation_id = call_llm(messages, context, tools, state)
+            response, call_id, operation_id = call_llm(turn.history, context, tools, state)
         # 准备阶段或模型调用失败时，归还尚未确认的定时任务。
         except Exception as exc:
             if isinstance(exc, StreamStopped):
@@ -305,9 +284,8 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
                     and recovery.is_prompt_too_long_error(exc)
                     and state.claim_reactive_compaction()):
                 # 原地替换历史，保留调用方持有的列表引用。
-                compacted = compaction.reactive_compact(messages, active_request)
-                if compacted.applied:
-                    turn.checkpoint()
+                compacted = compaction.reactive_compact(turn.history, active_request)
+                turn.after_compaction(compacted)
                 if compacted.reason is None:
                     continue
                 exc = RuntimeError(f"Reactive compaction failed: {compacted.reason}")
@@ -349,13 +327,12 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             if interaction.stopped():
                 return turn.finish("stopped")
             # 通知 Stop 钩子本轮模型输出已完成。
-            hooks.trigger_hooks("Stop", messages)
+            hooks.trigger_hooks("Stop", turn.history)
             if interaction.stopped():
                 return turn.finish("stopped")
             # 检查当前目标是否允许结束。
-            decision = evaluate_goal(messages)
-            if decision is not None:
-                turn.checkpoint()
+            decision = evaluate_goal(turn.history)
+            turn.after_goal_evaluation(decision)
             if interaction.stopped():
                 return turn.finish("stopped")
             # 目标未达成时，反馈缺失条件并继续调用模型。
@@ -380,7 +357,7 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
                 # 在终端显示评估结果和原因。
                 core.terminal_print(f"  \033[35m[goal] {decision.action}: {decision.reason}\033[0m")
             # 从已完成的对话中提取并整理长期记忆。
-            remember_after_turn(messages)
+            remember_after_turn(turn.history)
             if interaction.stopped():
                 return turn.finish("stopped")
             # 释放已完成任务的 agent 分配记录。
@@ -395,5 +372,5 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
         if interaction.stopped():
             return turn.finish("stopped")
         # 如本轮请求了手动压缩，在工具结果回填后生成摘要。
-        if manual_compaction.apply_after_results(messages, active_request) is not None:
-            turn.checkpoint()
+        turn.after_manual_compaction(
+            manual_compaction.apply_after_results(turn.history, active_request))

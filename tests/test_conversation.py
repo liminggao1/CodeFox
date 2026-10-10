@@ -132,6 +132,51 @@ def test_saved_records_match_live_order_and_contain_full_tool_payload(runtime_fa
     assert not any(item["type"] in {"session_saved", "state_snapshot", "log"} for item in saved)
 
 
+def _save_trace(monkeypatch, runtime):
+    """记录每次落盘时快照里最后一条展示记录的类型。"""
+    trace = []
+    original = runtime.session.save
+
+    def counting():
+        events = runtime.session.snapshot["events"] if runtime.session.snapshot else []
+        trace.append(events[-1]["type"] if events else None)
+        return original()
+
+    monkeypatch.setattr(runtime.session, "save", counting)
+    return trace
+
+
+def test_turn_boundary_saves_terminal_fact_before_delivery(runtime_factory, monkeypatch):
+    """C4 验收：简单回合保存 4 次，且终态先落盘再交付。
+
+    保存点依次落在模型开始、助手消息接受、模型调用结束与回合终态；最后一次
+    保存已包含 turn_finished，前端读到的终态与文件一致。
+    """
+    runtime, host = runtime_factory([response("Done")])
+    trace = _save_trace(monkeypatch, runtime)
+    finished, _ = complete(runtime, "run")
+    assert trace == ["execution_status", "assistant_message", "execution_status", "turn_finished"]
+    assert finished.payload["saved"] is True
+    assert stored(runtime)["events"][-1]["type"] == "turn_finished"
+
+
+def test_tool_turn_boundary_saves_each_settled_step(runtime_factory, monkeypatch):
+    """C4 验收：带一次工具往返的回合保存 9 次，逐项结算步骤各落盘一次。"""
+    runtime, host = runtime_factory([
+        response("Before", tools=[tool("bash", command="printf hi")], stop="tool_use"),
+        response("After"),
+    ])
+    trace = _save_trace(monkeypatch, runtime)
+    submission = runtime.submit("run command")
+    request, _ = displayed_approval(runtime)
+    assert runtime.channel.respond(request.request_id, request.generation, "approve")
+    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    assert trace == ["execution_status", "tool_call", "approval_requested", "approval_decided",
+                     "tool_result", "tool_result", "assistant_message", "execution_status",
+                     "turn_finished"]
+    assert finished.payload["saved"] is True
+
+
 @pytest.mark.parametrize("once", [False, True])
 def test_approval_checkpoint_saves_request_and_background_while_waiting(runtime_factory, once):
     from agent_harness.runtime.interaction import ExecutionContext

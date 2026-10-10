@@ -14,6 +14,7 @@ import time
 import pytest
 
 import agent_harness.context.compaction as compaction
+from agent_harness.agents.lead_turn import LeadTurn
 import agent_harness.core as core
 import agent_harness.registrations as registrations
 import agent_harness.runtime.hooks as hooks
@@ -432,6 +433,6 @@ def test_notification_failure_keeps_sync_results_and_pending_batch(host_factory,
     results = [{"type": "tool_result", "tool_use_id": "sync", "content": "sync result"}]
     assert host.build_user_content(results) == results
     history = [{"role": "user", "content": "go"}]
-    host.inject_background_notifications(history)
+    LeadTurn(history).inject_background_notes()
     assert history == [{"role": "user", "content": "go"}]
     assert scheduler.has_pending_background()

@@ -1,7 +1,8 @@
-"""Lead 回合记录：已接受的历史、展示事实与结束收尾。
+"""Lead 回合记录：本回合的会话历史、展示事实与结束收尾。
 
-host 决定执行与恢复顺序。本模块维护本轮关联状态，通过运行时提供的
-检查点保存记录；不直接写会话文件，也不渲染前端。
+host 决定执行与恢复顺序，只经 ``turn.history`` 读写历史。本模块维护本轮
+关联状态与落盘时机，通过运行时提供的检查点保存记录；不直接写会话文件，
+也不渲染前端。
 """
 
 from .. import core
@@ -11,8 +12,9 @@ from ..workspace import tasks
 
 
 class LeadTurn:
-    def __init__(self, messages, checkpoint=None, on_usage=None):
-        self.messages = messages
+    def __init__(self, history, checkpoint=None, on_usage=None):
+        # 本回合唯一的历史句柄：调用方不再持有同一列表的第二个名字。
+        self.history = history
         self._checkpoint = checkpoint
         self._on_usage = on_usage
         self._model_call_id = None
@@ -28,11 +30,11 @@ class LeadTurn:
         if self._checkpoint is not None:
             self._checkpoint()
 
-    # -- 正式历史与逐项结算的工具结果 --
+    # -- 历史写入、落盘时机与逐项结算的工具结果 --
 
     def append(self, message):
         """追加模型历史，发布已接受的助手消息块，再触发保存检查点。"""
-        self.messages.append(message)
+        self.history.append(message)
         if message.get("role") == "assistant":
             identity = self._model_identity()
             for index, block in enumerate(json_value(message["content"])):
@@ -42,6 +44,32 @@ class LeadTurn:
                 elif block.get("type") == "tool_use":
                     interaction.publish("tool_call", **block, **identity)
         self.checkpoint()
+
+    def inject_background_notes(self):
+        """把已完成的后台通知写入历史；没有通知时不写历史也不保存。"""
+        try:
+            notes = scheduler.collect_background_results()
+        except OSError as exc:
+            core.terminal_print(f"[background error] Could not save results: {exc}")
+            return
+        if notes:
+            self.append({"role": "user", "content": [
+                {"type": "text", "text": note} for note in notes]})
+
+    def after_compaction(self, compacted):
+        """自动压缩真正改写了历史才落盘；未应用的结果不产生额外保存。"""
+        if compacted.applied:
+            self.checkpoint()
+
+    def after_manual_compaction(self, result):
+        """手动压缩执行完成就落盘；本轮未触发手动压缩（None）时不动。"""
+        if result is not None:
+            self.checkpoint()
+
+    def after_goal_evaluation(self, decision):
+        """目标评估产生了决定就落盘，保留评估边界。"""
+        if decision is not None:
+            self.checkpoint()
 
     def record_tool_result(self, result, status):
         """主循环追加完整结果批次前，先逐项发布和保存真实工具结果。
