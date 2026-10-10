@@ -54,7 +54,8 @@ Textual 的本机安装、启动、快捷键、审批和会话操作见
 | [workflows/](src/agent_harness/workflows/README.md) | 程序化工作流、预算与 journal 恢复 |
 | `src/agent_harness/skills/` | 技能资产（随包分发） |
 | `assets/logo/` | Logo 素材、可编辑 SVG 与导出的图片 |
-| `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
+| `scripts/debug_pass.py` | 离线端到端自检，10 项，见 `note/dev-notes.md` |
+| `scripts/arch_views.py` | 生成模块依赖图到 `docs/architecture/`，人看 `deps.md`、AI 读 `deps.mmd`；线型图例与循环依赖写在图外，只用标准库 |
 | `tests/` | 离线测试，按模块拆分（协议、任务、压缩、调度、权限、编码、技能等） |
 | `docs/` | 项目级设计与执行记录，入口见 `docs/README.md` |
 | `note/` | `env-setup.md` 安装说明；`dev-notes.md` 本机运行与调试笔记 |
@@ -130,7 +131,7 @@ python -m pytest -q
 - `tests/test_tui_integration.py`：无头界面的中文多行对话、审批、停止、恢复、窄屏和滚动；未安装 Textual 时跳过。
 - `tests/test_conversation.py`：展示记录与前端回放，含审批前保存、后台检查点、重试去重、压缩恢复续聊、CLI/TUI 详情与分段加载。
 
-离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、子 agent），说明见
+离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、子 agent、架构图），说明见
 [note/dev-notes.md](note/dev-notes.md)：
 
 ```sh

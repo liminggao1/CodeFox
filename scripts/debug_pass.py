@@ -2,11 +2,12 @@
 """agent_harness 的离线端到端调试自检。
 
 覆盖真实 host 主循环、工具检查、目标 Stop 边界、任务生命周期、
-工作流恢复、Git worktree 和子 agent 生命周期，全程不联网。
+工作流恢复、Git worktree、子 agent 生命周期和架构图生成，全程不联网。
 
   PYTHONPATH=src python scripts/debug_pass.py
 
-所有检查都在新建临时目录中运行，不影响仓库及其运行时状态。
+检查大多在新建临时目录中运行，不改动仓库及其运行时状态；架构图检查会
+按设计重新生成 `docs/architecture/`，这是自检唯一会写入仓库的产物。
 退出码等于失败检查的数量。
 """
 
@@ -331,6 +332,20 @@ def _main() -> int:
         assert "WORKTREE FLOW OK" in result.stdout
         return "create/claim/commit/complete/remove"
 
+    def t_arch_views():
+        import arch_views
+        nodes = arch_views.collect_nodes()
+        edges = arch_views.build_edges(nodes)
+        assert nodes and edges, "dependency graph is empty"
+        cycles = arch_views.find_cycles(nodes, edges)
+        assert cycles, "expected at least one import cycle to be reported"
+        count, edge_count, mmd_path, md_path = arch_views.generate(arch_views.DEFAULT_OUT_DIR)
+        assert (count, edge_count) == (len(nodes), len(edges))
+        assert "graph TD" in mmd_path.read_text(encoding="utf-8")
+        assert "```mermaid" in md_path.read_text(encoding="utf-8")
+        return "{0} nodes, {1} edges, {2} cycles -> docs/architecture/".format(
+            count, edge_count, len(cycles))
+
     check("tool pool assembled", t_tool_pool)
     check("agent loop: tool call round-trip", t_loop_toolcall)
     check("edit_file: mismatch guarded", t_edit_guard)
@@ -340,6 +355,7 @@ def _main() -> int:
     check("unified subagent lifetimes", t_subagents)
     check("workflow demo/resume offline", t_workflow)
     check("worktree git ops", t_worktree)
+    check("architecture dependency graph", t_arch_views)
 
     failures = sum(1 for status, _, _ in RESULTS if status == "FAIL")
     print("\n=== DEBUG REPORT ===")
