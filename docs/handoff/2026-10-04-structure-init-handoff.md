@@ -20,21 +20,21 @@ Remote-WSL 调试配置、以及 agent 协作约定（`AGENTS.md` + `docs/agents
 
 ## 2. 已完成（不要重做）
 
-细节见提交历史与计划文档，这里只列清单和落点。仓库共 15 个提交：`df59037`（起始快照，
-message 为 `1`，非本会话）加本会话 14 个。
+细节见提交历史与计划文档，这里只列清单和落点。本阶段历史现保留两个里程碑：
+`5f525e1` 为起始快照，`301d618` 为工程化初始化，包含下表全部交付。
 
 | 主题 | 落点 | 参考 |
 | --- | --- | --- |
-| 目录改名 + 工程化外壳 | `docs/ scripts/ pyproject.toml .editorconfig .gitattributes` | 提交 `17974b8` |
-| 迁移到 `src/agent_harness/` + console 入口 | `pyproject.toml` 的 `[project.scripts]`、`__main__.py` | 提交 `90dc110`，计划「十一」 |
-| 项目约定文档 | `AGENTS.md`（本机环境 + 不变量）、`GLOSSARY.md`（术语 + 范围）、`docs/agents/` | 提交 `2e7ded1`、`91c94b6` |
-| docs 骨架与索引 | `docs/{adr,plans,research,handoff,guides,agents}/`、`docs/README.md` | 提交 `8ac49d0`、`1664184` |
-| 离线端到端自检 | `scripts/debug_pass.py`（9 项） | 提交 `9032ac6`，说明在 `note/dev-notes.md` |
-| VS Code 调试 | `.vscode/{launch,settings,extensions}.json` | 提交 `44d6497`、`1689b31` |
-| 安装说明面向通用读者 | `note/env-setup.md` | 提交 `6c6192a` |
-| README 去来源化 + 使用者视角 | `README.md` | 提交 `1eac25f`，计划「十五」 |
-| 调试笔记二合一 | `note/dev-notes.md` | 提交 `9452975` |
-| `tmp/` 本地临时目录 | `.gitignore` 中 `tmp/` | 提交 `0a41f7e` |
+| 目录改名 + 工程化外壳 | `docs/ scripts/ pyproject.toml .editorconfig .gitattributes` | 工程化初始化 |
+| 迁移到 `src/agent_harness/` + console 入口 | `pyproject.toml` 的 `[project.scripts]`、`__main__.py` | 计划「十一」 |
+| 项目约定文档 | `AGENTS.md`（本机环境 + 不变量）、`GLOSSARY.md`（术语 + 范围）、`docs/agents/` | 本机环境、运行不变量与协作规则 |
+| docs 骨架与索引 | `docs/{adr,plans,research,handoff,guides,agents}/`、`docs/README.md` | 项目文档分类与入口 |
+| 离线端到端自检 | `scripts/debug_pass.py`（9 项） | 说明在 `note/dev-notes.md` |
+| VS Code 调试 | `.vscode/{launch,settings,extensions}.json` | Remote-WSL 调试配置 |
+| 安装说明面向通用读者 | `note/env-setup.md` | 通用环境安装教程 |
+| README 去来源化 + 使用者视角 | `README.md` | 计划「十五」 |
+| 调试笔记二合一 | `note/dev-notes.md` | 调试操作与运行路径集中记录 |
+| `tmp/` 本地临时目录 | `.gitignore` 中 `tmp/` | 本地内容不入库 |
 
 不在上表、但值得知道的几个决定：
 

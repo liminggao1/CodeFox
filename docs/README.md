@@ -4,6 +4,8 @@
 领域术语见 [GLOSSARY.md](../GLOSSARY.md)，运行方式和代码布局见 [README.md](../README.md)。
 具体模块职责和调用关系见 [源码结构说明](../src/agent_harness/README.md)，各子包维护自己的文件分工。
 
+Git 历史按功能里程碑整理。计划和交接中的提交号指向整理后的节点；阶段测试数和过程说明保留当时记录，中间状态不再对应独立提交。本地原历史备份位于 `tmp/git-history-6f805cb-before-full-squash.bundle`。
+
 项目面向可长期演进的本地 agent 运行环境，保留主循环、工具、子 agent、工作流和目标控制的完整机制。
 项目当前不做打包发布。
 当前验证包括离线模型驱动的持久子 agent、跨任务目录与历史、通信和关闭，以及两种子 agent 模式的端到端自检；真实 API 交互问答和 memory 抽取尚未实测。
