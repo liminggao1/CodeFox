@@ -53,6 +53,7 @@ Textual 的本机安装、启动、快捷键、审批和会话操作见
 | [workspace/](src/agent_harness/workspace/README.md) | 任务板、分配与 Git 工作树 |
 | [workflows/](src/agent_harness/workflows/README.md) | 程序化工作流、预算与 journal 恢复 |
 | `src/agent_harness/skills/` | 技能资产（随包分发） |
+| `assets/logo/` | Logo 素材、可编辑 SVG 与导出的图片 |
 | `scripts/debug_pass.py` | 离线端到端自检，9 项，见 `note/dev-notes.md` |
 | `tests/` | 离线测试，按模块拆分（协议、任务、压缩、调度、权限、编码、技能等） |
 | `docs/` | 项目级设计与执行记录，入口见 `docs/README.md` |

@@ -17,6 +17,7 @@
   会话上下文统一存放在 `~/.agent-harness/sessions/`；`skills/` 随包，位于
   `src/agent_harness/skills`。
 - 代码保持现有风格与分段注释：不做异步化重构，不引入 linter/formatter。
+- 重构时保留原有注释，并随实现迁移到对应模块；按新职责更新说明，不通过删除注释缩短代码。
 
 ## 正向开发
 
@@ -50,8 +51,7 @@
 - `GLOSSARY.md`：项目术语表；运行和代码布局见 `README.md`，实施进度见 `docs/README.md`。
   
 ## 项目提示
-- Git 提交是本项目的默认收尾动作：每次完成一个开发任务（代码改动 + 测试通过）后，默认直接
-  `git commit`，不需要事先询问；是否推送仍按全局规则，未经要求不推送。
+- 默认使用中文注释代码
 
 ## Agent skills
 

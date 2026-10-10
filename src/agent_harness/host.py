@@ -29,6 +29,8 @@ from .agents import subagent
 from .providers import message_content
 from .context import compaction
 from .agents import recovery
+from .agents.lead_turn import LeadTurn
+from .agents.lead_tools import execute_tool_batch
 from .runtime import scheduler
 from .tools import mcp_tools
 from . import registrations
@@ -39,7 +41,6 @@ from .agents import goal as goal_module
 from .workflows import workflow_runtime
 from .workflows import workflow_demo
 from .runtime import interaction
-from .runtime.session_store import json_value
 
 # Re-export names used by the CLI and source-level callers.
 from .core import (  # noqa: F401
@@ -296,95 +297,57 @@ def evaluate_goal(messages: list):
         return None
 
 
+def _track_tool_completion(name):
+    """跨回合保留 TODO 提醒计数，批次中途失败也保留已完成工具的计数。"""
+    global rounds_since_todo
+    # 写入 TODO 后重新开始计算提醒间隔。
+    if name == "todo_write":
+        # 清零已累计的非 TODO 工具调用次数。
+        rounds_since_todo = 0
+    # 其他工具调用会增加 TODO 提醒计数。
+    else:
+        # 记录又完成了一次非 TODO 工具调用。
+        rounds_since_todo += 1
+
+
 # Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
 def agent_loop(messages: list, active_request: str, save_context=None, on_usage=None):
     """执行 Agent 主循环，直到模型完成回答或本轮无法继续。
+
     Args:
         messages: 当前对话历史，会被原地追加助手响应和工具结果。
         active_request: 当前用户请求，供历史压缩和任务续做使用。
+        save_context: 运行时提供的检查点回调，负责保存会话。
+        on_usage: 接收 Lead 主模型用量的回调。
     Returns:
-        TurnOutcome; history and tool side effects remain with their owners.
+        TurnOutcome；历史和工具副作用保留在各自所属模块。
+
+    LeadTurn 负责本轮记录与收尾，工具批次复用 hooks；本循环保留
+    上下文准备、模型重试/续写、goal 判定和工具迭代的显式顺序。
     """
     global rounds_since_todo
-    result_states = {}
-    model_call_id = None
-    text_indices = {}
-
-    def checkpoint():
-        if save_context:
-            save_context()
-
-    def append(message, *, publish_results=True):
-        messages.append(message)
-        if message.get("role") == "assistant":
-            for index, block in enumerate(json_value(message["content"])):
-                identity = {"model_call_id": model_call_id} if model_call_id else {}
-                if block.get("type") == "text":
-                    interaction.publish("assistant_message", text=block["text"],
-                                        block_index=text_indices.get(index, index), **identity)
-                elif block.get("type") == "tool_use":
-                    interaction.publish("tool_call", **block, **identity)
-        elif publish_results and isinstance(message.get("content"), list):
-            for block in json_value(message["content"]):
-                if block.get("type") == "tool_result":
-                    interaction.publish("tool_result", **block,
-                                        status=result_states.pop(block["tool_use_id"],
-                                                                 "failed" if block.get("is_error") else "returned"))
-        checkpoint()
-
-    def stopped_result():
-        scheduler.restore_cron_jobs(unacknowledged_cron_jobs)
-        tasks.release_completed_assignment("agent")
-        return interaction.TurnOutcome("stopped", "Stop requested")
-
-    def settle(result):
-        results.append(result)
-        status = result_states.pop(result["tool_use_id"], "failed" if result.get("is_error") else "returned")
-        interaction.publish("tool_result", **json_value(result), status=status,
-                            **({"model_call_id": model_call_id} if model_call_id else {}))
-        checkpoint()
-
+    turn = LeadTurn(messages, save_context, on_usage)
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
     # 管理本轮手动压缩的工具响应和执行时机。
     manual_compaction = compaction.ManualCompaction()
     automatic_compaction_enabled = True
-    # 暂存已取出、尚未确认交付的定时任务。
-    unacknowledged_cron_jobs: list[scheduler.CronJob] = []
 
+    # -- 准备上下文并请求完整模型响应 --
     # 每次迭代完成一次模型调用，并处理它返回的文本或工具请求。
     while True:
         if interaction.stopped():
-            return stopped_result()
-        # 从队列中取出本次到期的定时任务。
-        fired = scheduler.consume_cron_queue()
-        # 调用模型成功前保留这些任务，以便失败时重新入队。
-        unacknowledged_cron_jobs.extend(fired)
+            return turn.finish("stopped")
         model_call_started = False
-        # Preparation and model failures share the same cron cleanup.
+        # 准备阶段与模型调用失败共用同一套 cron 收尾。
         try:
-            # 将每个定时任务作为一条用户消息送入对话历史。
-            for job in fired:
-                # 模型通过用户消息读取定时任务内容。
-                append({"role": "user",
-                                 "content": f"[Scheduled] {job.prompt}"})
-                # 在终端显示截短的注入提示。
-                core.terminal_print(f"  \033[35m[cron inject] {job.prompt[:60]}\033[0m")
-            # 有定时任务时也把它们纳入压缩摘要使用的当前请求。
-            if fired:
-                # 将本批定时任务合并成多行请求。
-                scheduled_requests = "\n".join(
-                    f"Run scheduled task: {job.prompt}" for job in fired)
-                # 保留原请求，并追加定时任务内容。
-                active_request = f"{active_request}\n{scheduled_requests}".strip()
+            active_request = turn.inject_scheduled(active_request)
             # 将已完成的后台任务通知加入对话历史。
             inject_background_notifications(messages, save_context)
-
             # 达到未更新 TODO 的工具轮数阈值时，提醒模型更新。
             if rounds_since_todo >= core.TODO_REMINDER_ROUNDS:
                 # 把提醒作为用户消息加入历史。
-                append({"role": "user",
-                                 "content": "<reminder>Update your todos.</reminder>"})
+                turn.append({"role": "user", "content": "<reminder>Update your todos.</reminder>"})
                 # 本次提醒后重新累计调用次数。
                 rounds_since_todo = 0
 
@@ -392,7 +355,7 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             compacted = compaction.prepare_history(
                 messages, active_request, enabled=automatic_compaction_enabled)
             if compacted.applied:
-                checkpoint()
+                turn.checkpoint()
             if compacted.reason:
                 automatic_compaction_enabled = False
                 core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
@@ -402,112 +365,86 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             tools, handlers = assemble_tool_pool()
             # 手动压缩完成后不再向模型提供 compact 工具。
             tools = manual_compaction.available_tools(tools)
-
             if interaction.stopped():
-                return stopped_result()
+                return turn.finish("stopped")
 
             model_call_started = True
             # 重试策略和模型降级由 call_llm 内部处理。
-            model_call_id = None
-            text_indices = {}
-            response, model_call_id, model_operation = call_llm(messages, context, tools, state)
-            text_indices = getattr(response, "stream_indices", {})
-        # Restore unacknowledged jobs if preparation or the model call fails.
-        except Exception as e:
-            if isinstance(e, StreamStopped):
-                return stopped_result()
+            turn.begin_model_call()
+            response, call_id, operation_id = call_llm(messages, context, tools, state)
+        # 准备阶段或模型调用失败时，归还尚未确认的定时任务。
+        except Exception as exc:
+            if isinstance(exc, StreamStopped):
+                return turn.finish("stopped")
+            # 准备阶段错误不消耗模型上下文恢复机会。
             # 首次遇到提示过长错误时压缩历史，再重新调用模型。
-            if (not interaction.stopped() and model_call_started and recovery.is_prompt_too_long_error(e)
+            if (not interaction.stopped() and model_call_started
+                    and recovery.is_prompt_too_long_error(exc)
                     and state.claim_reactive_compaction()):
                 # 原地替换历史，保留调用方持有的列表引用。
                 compacted = compaction.reactive_compact(messages, active_request)
                 if compacted.applied:
-                    checkpoint()
+                    turn.checkpoint()
                 if compacted.reason is None:
                     continue
-                e = RuntimeError(f"Reactive compaction failed: {compacted.reason}")
-            # 调用最终失败时，将未确认的定时任务重新放回队列。
-            scheduler.restore_cron_jobs(unacknowledged_cron_jobs)
-            # 将错误写入历史，供外层向用户展示。
-            append({"role": "assistant", "content": [
-                {"type": "text", "text": f"[Error] {type(e).__name__}: {e}"}]})
-            # 释放已完成任务的 agent 分配记录。
-            tasks.release_completed_assignment("agent")
+                exc = RuntimeError(f"Reactive compaction failed: {compacted.reason}")
             # 结束本轮交互，不继续执行工具。
-            return interaction.TurnOutcome("failed", f"{type(e).__name__}: {e}")
+            return turn.finish("failed", f"{type(exc).__name__}: {exc}")
 
         # 模型已成功响应，确认本批定时任务已交付。
-        try:
-            # 将已消费的任务从持久化记录中确认移除。
-            scheduler.acknowledge_cron_jobs(unacknowledged_cron_jobs)
-        # 确认写入失败不阻止处理模型响应。
-        except OSError as exc:
-            # 在终端报告确认失败。
-            core.terminal_print(f"[cron error] Delivery confirmation failed: {exc}")
-        # 清空本轮待确认清单。
-        unacknowledged_cron_jobs.clear()
+        turn.acknowledge_scheduled()
+        action = turn.accept_response(response, call_id, operation_id, state)
 
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            usage = json_value(usage)
-            if on_usage is not None:
-                on_usage(usage)
-            interaction.publish("lead_usage", usage=usage)
-
-        action = state.accept_response(response.stop_reason)
-        if model_call_id:
-            interaction.operation_status("model", "请求模型", "discarded" if action == "retry" else
-                                         "truncated" if action in {"continue", "stop"} else "completed",
-                                         operation_id=model_operation, model_call_id=model_call_id)
+        # -- 接受工具请求前，先处理输出截断的重试与续写 --
         if interaction.stopped() and action in {"retry", "continue", "stop"}:
-            # Truncated tool requests remain unsafe to execute or persist.
+            # 截断的工具请求不能执行或保存，只保留可用文本。
             text = message_content.extract_text(response.content)
             if text:
-                append({"role": "assistant", "content": [{"type": "text", "text": text}]})
-            return stopped_result()
+                turn.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+            return turn.finish("stopped")
         if action == "retry":
             core.terminal_print(f"  \033[33m[max_tokens] retry with {state.max_tokens}\033[0m")
             continue
         if action in {"continue", "stop"}:
-            # Preserve partial text only after the upgraded call has returned.
-            append({"role": "assistant", "content": response.content})
+            # 输出额度升级的请求返回后，才保留可续写的部分文本。
+            turn.append({"role": "assistant", "content": response.content})
             if action == "continue":
                 # 添加续写提示，作为下一次模型调用的用户消息。
-                append({"role": "user", "content": core.CONTINUATION_PROMPT})
+                turn.append({"role": "user", "content": core.CONTINUATION_PROMPT})
                 # 返回循环顶部继续调用模型。
                 continue
             # 续写机会耗尽时释放已完成的分配记录。
-            tasks.release_completed_assignment("agent")
             # 停止本轮交互。
-            return interaction.TurnOutcome("truncated", "Output continuation limit reached")
+            return turn.finish("truncated", "Output continuation limit reached")
 
         # 保存模型响应，供工具结果和后续调用引用。
-        append({"role": "assistant", "content": response.content})
+        turn.append({"role": "assistant", "content": response.content})
+
+        # -- 判断目标是否允许本轮回答结束 --
         # 没有工具请求时，模型已完成当前一轮回答。
         if not message_content.has_tool_use(response.content):
             if interaction.stopped():
-                return stopped_result()
+                return turn.finish("stopped")
             # 通知 Stop 钩子本轮模型输出已完成。
             hooks.trigger_hooks("Stop", messages)
             if interaction.stopped():
-                return stopped_result()
+                return turn.finish("stopped")
             # 检查当前目标是否允许结束。
             decision = evaluate_goal(messages)
             if decision is not None:
-                checkpoint()
+                turn.checkpoint()
             if interaction.stopped():
-                return stopped_result()
+                return turn.finish("stopped")
             # 目标未达成时，反馈缺失条件并继续调用模型。
             if decision is not None and decision.action == "block":
                 # 读取仍在生效的目标条件。
                 condition = GOAL.active.condition if GOAL.active else ""
                 # 在终端显示要求继续的原因。
-                core.terminal_print(f"  \033[35m[goal] continue: "
-                      f"{decision.reason[:80]}\033[0m")
+                core.terminal_print(f"  \033[35m[goal] continue: {decision.reason[:80]}\033[0m")
                 # 将目标条件和评估结果写回历史。
                 if interaction.stopped():
-                    return stopped_result()
-                append({"role": "user", "content": (
+                    return turn.finish("stopped")
+                turn.append({"role": "user", "content": (
                     "[Goal still active]\n"
                     f"Condition: {condition}\n"
                     f"Evaluator: {decision.reason}\n"
@@ -518,111 +455,22 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             # 对非 allow 的其他评估结果仅输出提示。
             if decision is not None and decision.action != "allow":
                 # 在终端显示评估结果和原因。
-                core.terminal_print(f"  \033[35m[goal] {decision.action}: "
-                      f"{decision.reason}\033[0m")
+                core.terminal_print(f"  \033[35m[goal] {decision.action}: {decision.reason}\033[0m")
             # 从已完成的对话中提取并整理长期记忆。
             remember_after_turn(messages)
             if interaction.stopped():
-                return stopped_result()
+                return turn.finish("stopped")
             # 释放已完成任务的 agent 分配记录。
-            tasks.release_completed_assignment("agent")
             # 本轮回答结束。
-            return interaction.TurnOutcome("completed")
+            return turn.finish("completed")
 
-        # 本次响应包含工具调用，准备收集工具执行结果。
-        results = []
-        # 按模型返回顺序处理每个内容块。
-        for block in response.content:
-            # 非工具块保留在助手消息中，无需执行。
-            if block.type != "tool_use":
-                # 跳过文本等非工具内容。
-                continue
-            if interaction.stopped():
-                result_states[block.id] = "stopped"
-                settle({"type": "tool_result", "tool_use_id": block.id,
-                                "content": "Interrupted before execution", "is_error": True})
-                continue
-            # 在终端显示当前工具名称。
-            if interaction.current_context() is None:
-                print(f"\033[36m> {block.name}\033[0m")
-
-            # 将手动压缩请求交给压缩模块处理。
-            compact_result = manual_compaction.handle_tool_use(block)
-            # compact 不经过普通工具钩子和执行器。
-            if compact_result is not None:
-                # 保留与模型工具调用对应的结果。
-                settle(compact_result)
-                # 其他工具继续按原有路径执行。
-                continue
-
-            with interaction.operation_context(model_call_id=model_call_id):
-                check = hooks.check_tool_use(block, stopped=interaction.stopped)
-            if check.status != "allowed":
-                result_states[block.id] = check.status
-                rejected = {"type": "tool_result", "tool_use_id": block.id,
-                            "content": check.text}
-                if check.status == "stopped":
-                    rejected["is_error"] = True
-                settle(rejected)
-                continue
-
-            # 可后台执行的工具不阻塞当前模型轮次。
-            if scheduler.should_run_background(block.name, block.input):
-                if interaction.stopped():
-                    result_states[block.id] = "stopped"
-                    settle({"type": "tool_result", "tool_use_id": block.id,
-                                    "content": "Interrupted before execution", "is_error": True})
-                    continue
-                # 启动后台任务；失败时也要返回工具结果。
-                try:
-                    # 将工具调用交给后台任务调度器。
-                    with interaction.operation_context(model_call_id=model_call_id, tool_call_id=block.id):
-                        bg_id = scheduler.start_background_task(block, handlers)
-                    result_states[block.id] = "started"
-                    # 告知模型结果稍后通过任务通知送达。
-                    output = (f"[Background task {bg_id} started] "
-                              "Result will arrive as a task_notification.")
-                # 将启动异常转换成模型可读的结果。
-                except Exception as exc:
-                    result_states[block.id] = "failed"
-                    # 保留异常类型和信息，便于模型判断失败原因。
-                    output = (f"Error: Failed to start background task: "
-                              f"{type(exc).__name__}: {exc}")
-                # 为本次后台工具调用登记返回内容。
-                settle({"type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": output})
-                # 后台工具不再进入同步执行路径。
-                continue
-
-            # 根据工具名查找同步处理函数。
-            handler = handlers.get(block.name)
-            # 执行工具，并把未知工具或执行异常转成结果文本。
-            with interaction.operation_context(model_call_id=model_call_id):
-                output = hooks.execute_tool(
-                    block, handler,
-                    on_status=lambda status: result_states.update({block.id: status}))
-            # 在终端显示截短的执行结果。
-            if interaction.current_context() is None:
-                print(str(output)[:300])
-
-            # 写入 TODO 后重新开始计算提醒间隔。
-            if block.name == "todo_write":
-                # 清零已累计的非 TODO 工具调用次数。
-                rounds_since_todo = 0
-            # 其他工具调用会增加 TODO 提醒计数。
-            else:
-                # 记录又完成了一次非 TODO 工具调用。
-                rounds_since_todo += 1
-
-            # 将同步工具输出与原调用 ID 配对。
-            settle({"type": "tool_result",
-                            "tool_use_id": block.id, "content": output})
-
+        # -- 逐项结算工具，再将完整结果批次交给模型 --
+        results = execute_tool_batch(
+            response.content, handlers, manual_compaction, turn, _track_tool_completion)
         # 把所有工具结果及已完成的后台通知写入历史。
-        append({"role": "user", "content": build_user_content(results)}, publish_results=False)
+        turn.append({"role": "user", "content": build_user_content(results)})
         if interaction.stopped():
-            return stopped_result()
+            return turn.finish("stopped")
         # 如本轮请求了手动压缩，在工具结果回填后生成摘要。
         if manual_compaction.apply_after_results(messages, active_request) is not None:
-            checkpoint()
+            turn.checkpoint()
