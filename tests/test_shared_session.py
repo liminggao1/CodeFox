@@ -9,14 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_harness.agents.subagent_session import SubagentSession
-
-
-def response(*blocks, stop_reason="end_turn"):
-    return SimpleNamespace(content=list(blocks), stop_reason=stop_reason)
-
-
-def text_block(text):
-    return SimpleNamespace(type="text", text=text)
+from support.fakes import blocks, text_block
 
 
 @pytest.mark.parametrize("mode", ["once", "persistent"])
@@ -25,7 +18,7 @@ def test_truncated_tool_never_writes_or_appends(host_factory, mode):
     block = SimpleNamespace(type="tool_use", id="write", name="write_file",
                             input={"path": "partial.txt", "content": "partial"})
     client = SimpleNamespace(messages=SimpleNamespace(
-        create=lambda **kwargs: response(block, stop_reason="max_tokens")))
+        create=lambda **kwargs: blocks(block, stop_reason="max_tokens")))
     session = SubagentSession("child", client, "test", "", mode=mode)
     messages = [{"role": "user", "content": "Write"}]
     with pytest.raises(RuntimeError, match="truncated"):
@@ -54,7 +47,7 @@ def test_child_compaction_uses_injected_client_and_keeps_recent_tool_pair(
     calls = []
     def create(**kwargs):
         calls.append(kwargs)
-        return response(text_block("facts"))
+        return blocks(text_block("facts"))
     client = SimpleNamespace(messages=SimpleNamespace(create=create))
     messages = [{"role": "user", "content": "Old completed task " * 10},
                 {"role": "assistant", "content": [{"type": "tool_use", "id": "read",
@@ -80,10 +73,10 @@ def test_context_recovery_is_once_per_delegation(host_factory, monkeypatch):
     def create(**kwargs):
         calls.append(kwargs)
         if "tools" not in kwargs:
-            return response(text_block("Earlier findings"))
+            return blocks(text_block("Earlier findings"))
         if len(calls) in {1, 4}:
             raise ValueError("context_length_exceeded")
-        return response(text_block("Done"))
+        return blocks(text_block("Done"))
     client = SimpleNamespace(messages=SimpleNamespace(create=create))
     session = SubagentSession("child", client, "test", "", mode="once")
     session.begin_work("Investigate B")
@@ -121,7 +114,7 @@ def test_current_delegation_survives_middle_history_archive(host_factory, mode):
 
     def create(**kwargs):
         calls.append(kwargs)
-        return response(text_block("Current work complete"))
+        return blocks(text_block("Current work complete"))
 
     client = SimpleNamespace(messages=SimpleNamespace(create=create))
     session = SubagentSession("child", client, "test", "Child rules", mode=mode)

@@ -16,29 +16,15 @@ import time
 
 import pytest
 
-from test_interactive_runtime import (
-    displayed_approval, response, runtime_factory, tool, until,
+from support.fakes import blocking_client, response, tool
+from support.helpers import (
+    complete,
+    displayed_approval,
+    records,
+    stored,
+    until,
+    wait_stored,
 )
-
-
-def stored(runtime, session_id=None):
-    path = runtime.session.store.path(session_id or runtime.session.session_id)
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def records(snapshot, event_type=None):
-    values = [item for item in snapshot["events"] if item.get("kind") == "display"]
-    return values if event_type is None else [item for item in values if item["type"] == event_type]
-
-
-def wait_stored(runtime, predicate, timeout=3):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = stored(runtime)
-        if predicate(value):
-            return value
-        time.sleep(0.02)
-    raise AssertionError(f"Conversation record not saved: {stored(runtime)}")
 
 
 def test_historical_running_operations_are_marked_interrupted(runtime_factory):
@@ -72,12 +58,6 @@ def test_historical_idle_subagent_is_not_marked_interrupted(runtime_factory):
     historical = runtime.session.display_records(historical=True)
     assert historical[0]["payload"]["status"] == "working"
     assert historical[1]["payload"]["status"] == "idle"
-
-
-def complete(runtime, text):
-    submission = runtime.submit(text)
-    assert submission.status == "accepted"
-    return until(runtime, "turn_finished", submission_id=submission.submission_id)
 
 
 def test_full_conversation_exit_resume_and_continue(runtime_factory):
@@ -569,11 +549,7 @@ def test_background_fact_is_visible_before_blocked_lead_checkpoint(runtime_facto
     from agent_harness.runtime.interaction import ExecutionContext
 
     started, release = threading.Event(), threading.Event()
-    def create(**kwargs):
-        started.set()
-        assert release.wait(10)
-        return response("done")
-    runtime, _ = runtime_factory(client=create)
+    runtime, _ = runtime_factory(client=blocking_client(started, release))
     submission = runtime.submit("work")
     try:
         assert started.wait(2)

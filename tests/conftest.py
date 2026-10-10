@@ -9,6 +9,7 @@ import sys
 import threading
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
 
 # 即使没有本地 .env，也保证导入过程离线且确定。
 os.environ.setdefault("MODEL_ID", "test-model")
@@ -82,6 +86,49 @@ def workflow_module():
     from agent_harness.workflows import workflow_runtime as workflow
 
     return workflow
+
+
+@pytest.fixture
+def runtime_factory(host_factory, monkeypatch):
+    """通过真实共享驱动启动离线运行时，测试结束统一关闭并核对收尾。"""
+    import agent_harness.core as core
+    import agent_harness.runtime.scheduler as scheduler
+    import agent_harness.agents.subagent as subagent_runtime
+    from agent_harness.runtime import interactive_runtime
+    from agent_harness.runtime.lead_context import lead_context_scope
+    from support.fakes import fake_stream_for, response
+    from support.helpers import until
+
+    host = host_factory(enable_memory=True)
+    remember = host.remember_after_turn
+    monkeypatch.setattr(interactive_runtime, "host", host)
+    monkeypatch.setattr(core, "ASYNC_EVENT_POLL_SECONDS", 0.01)
+    runtimes = []
+    contexts = ExitStack()
+
+    def create(responses=None, client=None, enable_memory=False, stream=None):
+        monkeypatch.setattr(host, "remember_after_turn", remember if enable_memory else lambda messages: None)
+        if client is None:
+            values = iter(responses or [response()])
+            client = lambda **kwargs: next(values)
+        messages = SimpleNamespace(create=client)
+        messages.stream = stream or fake_stream_for(lambda **kwargs: messages.create(**kwargs))
+        monkeypatch.setattr(core, "client", SimpleNamespace(messages=messages))
+        runtime = interactive_runtime.InteractiveRuntime()
+        contexts.enter_context(lead_context_scope(runtime.lead_context))
+        runtimes.append(runtime)
+        runtime.start()
+        until(runtime, "state_snapshot")
+        return runtime, host
+
+    yield create
+    for runtime in runtimes:
+        runtime.close()
+        runtime._thread.join(timeout=5)
+        assert not runtime._thread.is_alive()
+    assert scheduler._runtime_thread is None
+    assert not subagent_runtime.active_subagents
+    contexts.close()
 
 
 @pytest.fixture

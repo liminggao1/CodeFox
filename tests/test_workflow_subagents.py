@@ -18,7 +18,8 @@ OK_SCHEMA = {"type": "object", "required": ["ok"],
              "properties": {"ok": {"type": "boolean"}}}
 
 
-def reply(value="done", tokens=5, block=None, stop="end_turn"):
+def workflow_reply(value="done", tokens=5, block=None, stop="end_turn"):
+    """工作流子 agent 用例使用的响应；value 为字典时序列化为 JSON 文本。"""
     return S(content=[block or S(type="text", text=value if isinstance(value, str) else json.dumps(value))],
              stop_reason=stop, usage=S(input_tokens=tokens - 1, output_tokens=1))
 
@@ -34,8 +35,8 @@ def test_actual_workflow_tool_executes_child_tools_and_replays(host_factory, mon
     host = host_factory()
     globals_before = (core.client, core.MODEL, core.DEFAULT_MAX_TOKENS)
     calls = []
-    responses = iter([reply(tokens=7, block=S(type="tool_use", id="w", name="write_file",
-                          input={"path": "workflow.txt", "content": "saved"})), reply(tokens=11)])
+    responses = iter([workflow_reply(tokens=7, block=S(type="tool_use", id="w", name="write_file",
+                          input={"path": "workflow.txt", "content": "saved"})), workflow_reply(tokens=11)])
     def create(**kw):
         assert len(subagent_runtime.active_subagents) == 1
         record = next(iter(subagent_runtime.active_subagents.values()))
@@ -67,8 +68,8 @@ def test_workflow_tool_restriction_blocks_unavailable_writes(host_factory, monke
     calls = []
     def create(**kw):
         calls.append(kw)
-        return reply(block=S(type="tool_use", id="w", name="write_file",
-                            input={"path": "forbidden.txt", "content": "no"})) if len(calls) == 1 else reply()
+        return workflow_reply(block=S(type="tool_use", id="w", name="write_file",
+                            input={"path": "forbidden.txt", "content": "no"})) if len(calls) == 1 else workflow_reply()
     wf = install(host, monkeypatch, create)
     async def step(ctx, args):
         return await ctx.agent("Analyze", tools=tools)
@@ -82,9 +83,9 @@ def test_workflow_tool_restriction_blocks_unavailable_writes(host_factory, monke
 def test_format_repair_does_not_repeat_file_operations(host_factory, monkeypatch):
     host = host_factory()
     calls = []
-    responses = iter([reply(tokens=3, block=S(type="tool_use", id="w", name="write_file",
+    responses = iter([workflow_reply(tokens=3, block=S(type="tool_use", id="w", name="write_file",
                           input={"path": "once.txt", "content": "saved"})),
-                      reply("invalid result", tokens=5), reply({"ok": True}, tokens=7)])
+                      workflow_reply("invalid result", tokens=5), workflow_reply({"ok": True}, tokens=7)])
     def create(**kw):
         calls.append(kw)
         return next(responses)
@@ -109,9 +110,9 @@ def test_failed_step_is_billed_without_cache_and_resume_keeps_usage(host_factory
         calls.append(kw)
         if failure == "exception":
             if len(calls) == 1:
-                return reply(tokens=5, block=S(type="tool_use", id="r", name="glob", input={"pattern": "*"}))
+                return workflow_reply(tokens=5, block=S(type="tool_use", id="r", name="glob", input={"pattern": "*"}))
             raise RuntimeError("model unavailable")
-        return reply("invalid result", tokens=5, stop="max_tokens" if failure == "truncated" else "end_turn")
+        return workflow_reply("invalid result", tokens=5, stop="max_tokens" if failure == "truncated" else "end_turn")
     wf = install(host, monkeypatch, create)
     async def step(ctx, args):
         return await ctx.agent("Perform", schema=OK_SCHEMA)
@@ -135,7 +136,7 @@ def test_tools_are_part_of_the_cache_identity(host_factory, monkeypatch):
     calls = []
     def create(**kw):
         calls.append(kw)
-        return reply()
+        return workflow_reply()
     wf = install(host, monkeypatch, create)
     tools = None
     async def step(ctx, args):
@@ -167,7 +168,7 @@ def test_parallel_format_retries_respect_concurrency_and_unique_names(host_facto
             names.add(name)
         try:
             barrier.wait(timeout=5)
-            return reply({"ok": True} if "tools" not in kw else "invalid result")
+            return workflow_reply({"ok": True} if "tools" not in kw else "invalid result")
         finally:
             with lock:
                 active -= 1
@@ -189,7 +190,7 @@ def test_overspend_or_exhaustion_blocks_format_retry_and_records_consumption(hos
     calls = []
     def create(**kw):
         calls.append(kw)
-        return reply("invalid result", tokens=5)
+        return workflow_reply("invalid result", tokens=5)
     wf = install(host, monkeypatch, create)
     async def step(ctx, args):
         return await ctx.agent("Analyze", schema=OK_SCHEMA)
@@ -225,8 +226,8 @@ def test_workflow_write_rejection_does_not_execute_or_run_post_hook(host_factory
                 return "Denied by test hook"
         return original_hooks(event, block, *args)
     monkeypatch.setattr(hooks, "trigger_hooks", traced_hooks)
-    responses = iter([reply(block=S(type="tool_use", id="w", name="write_file",
-                                  input={"path": "denied.txt", "content": "no"})), reply()])
+    responses = iter([workflow_reply(block=S(type="tool_use", id="w", name="write_file",
+                                  input={"path": "denied.txt", "content": "no"})), workflow_reply()])
     calls = []
     def create(**kw):
         calls.append(kw)

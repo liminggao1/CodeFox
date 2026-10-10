@@ -10,7 +10,8 @@ from types import SimpleNamespace as S
 import pytest
 
 
-def reply(text="done", tokens=7, stop="end_turn", block=None):
+def optioned_reply(text="done", tokens=7, stop="end_turn", block=None):
+    """子 agent 创建用例使用的响应，按 tokens 折算 input/output 用量。"""
     return S(content=[block or S(type="text", text=text)], stop_reason=stop,
              usage=S(input_tokens=tokens - 2, output_tokens=2))
 
@@ -32,9 +33,9 @@ def test_invalid_tools_do_not_claim_or_request(host_factory, tools):
 def test_injected_client_tools_and_usage_cover_multiple_rounds(host_factory):
     host = host_factory()
     requests = []
-    responses = iter([reply(block=S(type="tool_use", name="write_file", id="write",
+    responses = iter([optioned_reply(block=S(type="tool_use", name="write_file", id="write",
                                   input={"path": "result.txt", "content": "result"})),
-                      reply(tokens=11)])
+                      optioned_reply(tokens=11)])
     def create(**kw):
         assert "child" in subagent_runtime.active_subagents
         requests.append(kw)
@@ -58,7 +59,7 @@ def test_empty_tools_never_execute_hallucinated_call(host_factory, stop):
               input={"path": "forbidden.txt", "content": "no"})
     def create(**kw):
         calls.append(kw)
-        return reply(block=block, stop=stop) if len(calls) == 1 else reply()
+        return optioned_reply(block=block, stop=stop) if len(calls) == 1 else optioned_reply()
     result = subagent_runtime.spawn_subagent("child", "Read text", "once", tools=[],
                                          client=S(messages=S(create=create)))
     assert not calls[0].get("tools")
@@ -76,7 +77,7 @@ def test_usage_includes_summary_and_failed_request(host_factory, monkeypatch):
     def create(**kw):
         requests.append(kw)
         if "tools" not in kw:
-            return reply("summary", tokens=9)
+            return optioned_reply("summary", tokens=9)
         raise RuntimeError("execution unavailable")
     result = subagent_runtime.spawn_subagent("child", "Long instruction " * 20, "once",
                                          client=S(messages=S(create=create)), model="injected",

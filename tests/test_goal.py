@@ -50,7 +50,8 @@ class FakeClient:
         self.messages = FakeMessages(self)
 
 
-def text_response(text: str):
+def goal_reply(text: str):
+    """目标用例使用的文本响应，带固定 usage。"""
     return SimpleNamespace(
         content=[SimpleNamespace(type="text", text=text)],
         stop_reason="end_turn",
@@ -58,7 +59,8 @@ def text_response(text: str):
     )
 
 
-def tool_response(name: str, arguments: dict, tool_use_id: str = "tool-1"):
+def goal_tool_reply(name: str, arguments: dict, tool_use_id: str = "tool-1"):
+    """目标用例使用的工具调用响应，带固定 usage。"""
     return SimpleNamespace(
         content=[SimpleNamespace(
             type="tool_use", id=tool_use_id, name=name, input=arguments
@@ -234,7 +236,7 @@ def test_transcript_trims_the_middle_of_one_oversized_message():
 def test_unmet_goal_continues_automatically_until_achieved(host_factory):
     host, client, evaluator, messages = run_host_turn(
         host_factory,
-        responses=[text_response("step 1"), text_response("step 2")],
+        responses=[goal_reply("step 1"), goal_reply("step 2")],
         evaluations=[
             goal_module.GoalEvaluation(False, "no evidence yet"),
             goal_module.GoalEvaluation(True, "verified by pytest"),
@@ -255,10 +257,10 @@ def test_worker_tool_result_reaches_the_goal_evaluator(host_factory):
     _, client, evaluator, _ = run_host_turn(
         host_factory,
         responses=[
-            tool_response("todo_write", {"todos": [
+            goal_tool_reply("todo_write", {"todos": [
                 {"content": "write the test", "status": "pending"},
             ]}),
-            text_response("test written"),
+            goal_reply("test written"),
         ],
         evaluations=[goal_module.GoalEvaluation(True, "todo recorded")],
     )
@@ -271,7 +273,7 @@ def test_worker_tool_result_reaches_the_goal_evaluator(host_factory):
 
 def test_goal_is_not_consulted_without_an_active_condition(host_factory):
     host = host_factory()
-    client = FakeClient([text_response("done")])
+    client = FakeClient([goal_reply("done")])
     core.client = client
     evaluator = ScriptedEvaluator([])
     host.GOAL = goal_module.GoalController(evaluator=evaluator)

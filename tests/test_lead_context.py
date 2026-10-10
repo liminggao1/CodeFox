@@ -1,7 +1,7 @@
 """通过会话输入和保存验证 Lead 状态拥有者。"""
 
-from test_interactive_runtime import runtime_factory, response, tool, until
-from test_conversation_records import stored
+from support.fakes import response, tool
+from support.helpers import stored, until
 
 
 def test_todo_input_and_snapshot_cannot_mutate_runtime_state(runtime_factory):

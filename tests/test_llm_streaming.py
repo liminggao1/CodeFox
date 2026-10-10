@@ -67,7 +67,8 @@ def server_for(chunks, *, pause_after=None, release=None):
         thread.join(2)
 
 
-def client_for(protocol, url):
+def live_client(protocol, url):
+    """按协议构造指向本地测试服务器的真实客户端。"""
     if protocol == "responses":
         return llm_client.ResponsesClient(base_url=url, api_key="offline", timeout=3)
     import anthropic
@@ -84,7 +85,7 @@ def test_first_text_arrives_before_complete_response(protocol):
     with server_for(frames(protocol), pause_after=0 if protocol == "responses" else 2, release=release) as (url, received):
         def run():
             try:
-                results.append(llm_client.stream_message(client_for(protocol, url), on_text=on_text, stopped=lambda: False,
+                results.append(llm_client.stream_message(live_client(protocol, url), on_text=on_text, stopped=lambda: False,
                                model="test", messages=[{"role": "user", "content": "go"}], max_tokens=100))
             except Exception as exc:
                 failures.append(exc)
@@ -130,7 +131,7 @@ def test_streamed_native_tools_have_parsed_arguments_and_matching_results(protoc
             frame({"type": "message_stop"}),
         ])
     with server_for(chunks) as (url, received):
-        client = client_for(protocol, url)
+        client = live_client(protocol, url)
         message = llm_client.stream_message(
             client, on_text=lambda *args: pytest.fail("工具参数不能作为正文展示"),
             stopped=lambda: False, model="test", messages=[], max_tokens=100)
@@ -155,7 +156,7 @@ def test_eof_after_partial_text_is_not_a_completed_message(protocol):
     with server_for(frames(protocol, final=False)) as (url, _):
         parts = []
         with pytest.raises(llm_client.ProtocolResponseError):
-            llm_client.stream_message(client_for(protocol, url), on_text=lambda i, t: parts.append(t),
+            llm_client.stream_message(live_client(protocol, url), on_text=lambda i, t: parts.append(t),
                                       stopped=lambda: False, model="test", messages=[], max_tokens=100)
         assert parts == ["你好"]
 @pytest.mark.parametrize("final", [
@@ -167,7 +168,7 @@ def test_eof_after_partial_text_is_not_a_completed_message(protocol):
 def test_responses_failed_or_partial_tool_response_is_rejected(final):
     with server_for(frames("responses", final=False) + [frame(final)]) as (url, _):
         with pytest.raises(llm_client.ProtocolResponseError):
-            llm_client.stream_message(client_for("responses", url), on_text=lambda *args: None,
+            llm_client.stream_message(live_client("responses", url), on_text=lambda *args: None,
                                       stopped=lambda: False, model="test", messages=[], max_tokens=100)
 
 
@@ -181,5 +182,5 @@ def test_anthropic_partial_tool_json_is_rejected(ending):
                frame({"type": "message_stop"})]
     with server_for(chunks) as (url, _):
         with pytest.raises(llm_client.ProtocolResponseError):
-            llm_client.stream_message(client_for("anthropic", url), on_text=lambda *args: pytest.fail("tool arguments shown as text"),
+            llm_client.stream_message(live_client("anthropic", url), on_text=lambda *args: pytest.fail("tool arguments shown as text"),
                                       stopped=lambda: False, model="test", messages=[], max_tokens=100)

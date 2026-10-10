@@ -17,18 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-
-def text(value):
-    return SimpleNamespace(type="text", text=value)
-
-
-def tool(name, **arguments):
-    return SimpleNamespace(type="tool_use", id=f"{name}-{time.monotonic_ns()}",
-                           name=name, input=arguments)
-
-
-def response(*blocks):
-    return SimpleNamespace(content=list(blocks), stop_reason="end_turn")
+from support.fakes import blocks, text_block, tool_call
 
 
 @pytest.fixture
@@ -108,13 +97,13 @@ def test_single_creation_tool_and_missing_mode(runtime):
 def test_once_round_limit_and_unfinished_task_are_failures(runtime, monkeypatch):
     host = runtime
     task = task_state.create_task("Unfinished")
-    client(host, lambda **kwargs: response(text("Not finished")))
+    client(host, lambda **kwargs: blocks(text_block("Not finished")))
     result = spawn(host, task_id=task.id)
     assert result["status"] == "failed" and "unfinished" in result["text"]
     assert task_state.load_task(task.id).status == "pending"
     assert task_state.assignments == {} and subagent_runtime.active_subagents == {}
     monkeypatch.setattr(core, "SUBAGENT_MAX_ROUNDS", 1)
-    client(host, lambda **kwargs: response(tool("read_file", path="missing.txt")))
+    client(host, lambda **kwargs: blocks(tool_call("read_file", path="missing.txt")))
     result = spawn(host)
     assert result["status"] == "failed" and "round limit" in result["text"]
     assert subagent_runtime.active_subagents == {}
@@ -150,9 +139,9 @@ def test_once_uses_task_directory_until_final_answer(runtime, monkeypatch):
     task.worktree = "once"
     task_state.save_task(task)
     responses = iter([
-        response(tool("complete_task", task_id=task.id),
-                 tool("write_file", path="once.txt", content="task result")),
-        response(text("Completed")),
+        blocks(tool_call("complete_task", task_id=task.id),
+                 tool_call("write_file", path="once.txt", content="task result")),
+        blocks(text_block("Completed")),
     ])
     client(host, lambda **kwargs: next(responses))
     result = spawn(host, task_id=task.id)
@@ -175,7 +164,7 @@ def test_persistent_without_task_keeps_history_and_never_auto_claims(runtime, mo
     monkeypatch.setattr(subagent_runtime.BUS, "wait_for_messages", wait)
     def create(**kwargs):
         calls.append((id(kwargs["messages"]), list(kwargs["messages"])))
-        return response(text(f"Result {len(calls)}"))
+        return blocks(text_block(f"Result {len(calls)}"))
     client(host, create)
     assert spawn(host, mode="persistent")["status"] == "started"
     wait_event(host, "idle_notification")
@@ -212,14 +201,14 @@ def test_persistent_switches_tasks_only_after_final_answer(runtime, monkeypatch)
                         lambda name: (directories[name], None))
     a, b = tasks
     responses = iter([
-        response(tool("complete_task", task_id=a.id),
-                 tool("write_file", path="same-batch.txt", content="a")),
-        response(tool("write_file", path="next-round.txt", content="a")),
-        response(text("A done")),
-        response(tool("claim_task", task_id=b.id),
-                 tool("write_file", path="b.txt", content="b"),
-                 tool("complete_task", task_id=b.id)),
-        response(text("B done")),
+        blocks(tool_call("complete_task", task_id=a.id),
+                 tool_call("write_file", path="same-batch.txt", content="a")),
+        blocks(tool_call("write_file", path="next-round.txt", content="a")),
+        blocks(text_block("A done")),
+        blocks(tool_call("claim_task", task_id=b.id),
+                 tool_call("write_file", path="b.txt", content="b"),
+                 tool_call("complete_task", task_id=b.id)),
+        blocks(text_block("B done")),
     ])
     histories = []
     def create(**kwargs):
@@ -244,10 +233,10 @@ def test_persistent_unfinished_task_retains_owner_until_guidance(runtime):
     host = runtime
     a, b = task_state.create_task("A"), task_state.create_task("B")
     calls = []
-    responses = iter([response(text("Need guidance")),
-                      response(tool("claim_task", task_id=b.id)),
-                      response(tool("complete_task", task_id=a.id)),
-                      response(text("A complete"))])
+    responses = iter([blocks(text_block("Need guidance")),
+                      blocks(tool_call("claim_task", task_id=b.id)),
+                      blocks(tool_call("complete_task", task_id=a.id)),
+                      blocks(text_block("A complete"))])
     def create(**kwargs):
         calls.append(list(kwargs["messages"]))
         return next(responses)
@@ -266,9 +255,9 @@ def test_persistent_unfinished_task_retains_owner_until_guidance(runtime):
 def test_plan_approval_and_work_messages_use_real_protocol(runtime):
     host = runtime
     calls = []
-    responses = iter([response(tool("submit_plan", plan="Read then write")),
-                      response(tool("write_file", path="approved.txt", content="ok")),
-                      response(text("Done"))])
+    responses = iter([blocks(tool_call("submit_plan", plan="Read then write")),
+                      blocks(tool_call("write_file", path="approved.txt", content="ok")),
+                      blocks(text_block("Done"))])
     def create(**kwargs):
         calls.append(list(kwargs["messages"]))
         return next(responses)
@@ -293,12 +282,12 @@ def test_messages_during_work_and_between_children_are_model_selected(runtime):
         counts[identity] = counts.get(identity, 0) + 1
         calls.append((identity, list(kwargs["messages"])))
         if identity == "receiver":
-            return response(text("Receiver ready" if counts[identity] == 1 else "Peer result"))
+            return blocks(text_block("Receiver ready" if counts[identity] == 1 else "Peer result"))
         if counts[identity] == 1:
             registrations.run_send_message("sender", "Additional evidence").content
-            return response(tool("send_message", to="receiver", content="Peer investigation"),
-                            tool("send_message", to="lead", content="Progress"))
-        return response(text("Sender done"))
+            return blocks(tool_call("send_message", to="receiver", content="Peer investigation"),
+                            tool_call("send_message", to="lead", content="Progress"))
+        return blocks(text_block("Sender done"))
     client(host, create)
     spawn(host, name="receiver", mode="persistent")
     wait_event(host, "idle_notification")
@@ -318,7 +307,7 @@ def test_pending_plan_can_shutdown_without_another_model_call(runtime, runtime_t
 
     def create(**kwargs):
         calls.append(kwargs)
-        return response(tool("submit_plan", plan="Read then change"))
+        return blocks(tool_call("submit_plan", plan="Read then change"))
 
     client(host, create)
     spawn(host, mode="persistent", require_plan=True)
@@ -357,8 +346,8 @@ def test_stale_protocol_does_not_wake_idle_model(runtime, monkeypatch, replay_ap
     def create(**kwargs):
         histories.append(list(kwargs["messages"]))
         if replay_approval and len(histories) == 1:
-            return response(tool("submit_plan", plan="Read first"))
-        return response(text("Done"))
+            return blocks(tool_call("submit_plan", plan="Read first"))
+        return blocks(text_block("Done"))
 
     client(host, create)
     spawn(host, mode="persistent", require_plan=replay_approval)

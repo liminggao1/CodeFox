@@ -11,11 +11,13 @@ from types import SimpleNamespace
 import pytest
 
 
-def text_response(text="done", stop_reason="end_turn"):
+def compaction_reply(text="done", stop_reason="end_turn"):
+    """压缩失败用例使用的纯文本响应，不带 usage。"""
     return SimpleNamespace(stop_reason=stop_reason, content=[SimpleNamespace(type="text", text=text)])
 
 
-def tool_response(*calls):
+def compaction_tools(*calls):
+    """构造只含工具调用、没有文本块的响应；参数为 (调用 ID, 工具名, 参数)。"""
     return SimpleNamespace(stop_reason="tool_use", content=[
         SimpleNamespace(type="tool_use", id=call_id, name=name, input=args)
         for call_id, name, args in calls
@@ -39,8 +41,8 @@ def test_automatic_failure_allows_main_call_without_repeat(host_factory, monkeyp
             assert kwargs["messages"] == original
             if context_error:
                 raise RuntimeError("context_length_exceeded")
-            return tool_response(("read", "read_file", {"path": "missing.txt"}))
-        return text_response()
+            return compaction_tools(("read", "read_file", {"path": "missing.txt"}))
+        return compaction_reply()
 
     monkeypatch.setattr(compaction, "summarize_history", fail_summary)
     monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
@@ -80,9 +82,9 @@ def test_failed_candidate_preserves_nested_blocks_and_list_identity(host_factory
 def test_manual_failure_preserves_other_results_and_never_reruns_tools(host_factory, monkeypatch):
     host = host_factory()
     calls, summaries = [], []
-    responses = [tool_response(
+    responses = [compaction_tools(
         ("write", "write_file", {"path": "once.txt", "content": "written"}),
-        ("compact", "compact", {})), text_response()]
+        ("compact", "compact", {})), compaction_reply()]
 
     def create(**kwargs):
         calls.append(copy.deepcopy(kwargs))
@@ -125,8 +127,8 @@ def test_reactive_archive_failure_ends_with_cron_restored(host_factory, monkeypa
     assert history[0]["content"] == "go"
 
 
-@pytest.mark.parametrize("response", [text_response(""), text_response("partial", "max_tokens"),
-                                    tool_response(("tool", "read_file", {"path": "x"}))])
+@pytest.mark.parametrize("response", [compaction_reply(""), compaction_reply("partial", "max_tokens"),
+                                    compaction_tools(("tool", "read_file", {"path": "x"}))])
 def test_summary_requires_complete_nonempty_text(host_factory, monkeypatch, response):
     host = host_factory()
     monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: response)))

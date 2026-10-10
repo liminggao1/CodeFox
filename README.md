@@ -114,6 +114,8 @@ python -m pytest -q
 
 全部离线，不消耗 API：
 
+共用设施放在 `tests/support/`：`fakes.py` 提供假模型响应构造器，`helpers.py` 提供运行时事件和会话文件工具；`conftest.py` 提供 host 与运行时工厂。
+
 - `tests/test_goal.py`：控制器用例，以及用脚本化 client 驱动 `agent_loop` 的会话级用例。
 - `tests/test_workflow.py`：覆盖 journal 回放、预算与 runner 接线。
 - `tests/test_workflow_subagents.py`：实际 Workflow 工具、子 agent 文件操作、权限、格式重试和失败消费的恢复。

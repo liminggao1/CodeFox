@@ -20,7 +20,7 @@ from textual.containers import VerticalScroll
 from agent_harness.frontends.tui.app import HarnessApp
 from agent_harness.frontends.tui.widgets import ApprovalCard, CommandCandidates, SessionScreen
 from agent_harness.runtime.interaction import ExecutionContext
-from test_interactive_runtime import response, tool, runtime_factory
+from support.fakes import blocking_client, response, tool
 
 
 async def wait_for(pilot, predicate):
@@ -570,11 +570,7 @@ def test_tui_narrow_layout_input_and_conversation_scroll(runtime_factory):
     asyncio.run(exercise())
 def test_pure_conversation_shows_accepted_input_while_model_is_blocked(runtime_factory):
     started, release = threading.Event(), threading.Event()
-    def create(**kwargs):
-        started.set()
-        assert release.wait(10)
-        return response("done")
-    runtime, _ = runtime_factory(client=create)
+    runtime, _ = runtime_factory(client=blocking_client(started, release))
     app = HarnessApp(runtime)
     async def exercise():
         async with app.run_test(size=(100, 30)) as pilot:

@@ -206,7 +206,7 @@ def test_stop_after_pre_hook_takes_priority_over_denial(host_factory, monkeypatc
                            else {"path": "must-not-exist", "content": "effect"})
     monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(
         create=lambda **kwargs: SimpleNamespace(stop_reason="tool_use", content=[call]))))
-    from test_interactive_runtime import fake_stream_for
+    from support.fakes import fake_stream_for
     core.client.messages.stream = fake_stream_for(core.client.messages.create)
     messages = [{"role": "user", "content": "work"}]
     with execution_context(context):
@@ -253,7 +253,7 @@ def test_tool_hook_exceptions_keep_existing_propagation(host_factory, monkeypatc
 
 def test_background_call_checks_once_and_posts_once_on_completion(host_factory, monkeypatch, tmp_path):
     host = host_factory()
-    from test_interactive_runtime import response, tool
+    from support.fakes import response, tool
     seen = []
     monkeypatch.setitem(hooks.HOOKS, "PreToolUse", [lambda call: seen.append("pre")])
     monkeypatch.setitem(hooks.HOOKS, "PostToolUse", [lambda call, output: seen.append("post")])
@@ -268,7 +268,7 @@ def test_background_call_checks_once_and_posts_once_on_completion(host_factory, 
 
 def test_background_dispatch_rechecks_stop_after_selection(host_factory, monkeypatch, tmp_path):
     host = host_factory()
-    from test_interactive_runtime import response, tool
+    from support.fakes import response, tool
     from agent_harness.runtime.interaction import ExecutionContext, InteractionChannel, execution_context
     stop = threading.Event()
     context = ExecutionContext(InteractionChannel(), "session", 1, "turn", stop_event=stop)
@@ -281,7 +281,7 @@ def test_background_dispatch_rechecks_stop_after_selection(host_factory, monkeyp
     monkeypatch.setattr(scheduler, "should_run_background", select)
     monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(
         create=lambda **kw: response(tools=[tool("bash", command="touch not-started", background=True)], stop="tool_use"))))
-    from test_interactive_runtime import fake_stream_for
+    from support.fakes import fake_stream_for
     core.client.messages.stream = fake_stream_for(core.client.messages.create)
     messages = [{"role": "user", "content": "run"}]
     with execution_context(context):

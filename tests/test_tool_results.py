@@ -3,8 +3,8 @@
 from agent_harness.tools import file_tools, shared_tools
 from agent_harness.workspace import tasks
 from agent_harness.runtime import hooks
-from test_interactive_runtime import runtime_factory, response, tool, until
-from test_conversation_records import stored, records
+from support.fakes import response, tool
+from support.helpers import records, stored, until
 
 
 def test_post_hook_failure_saves_real_result_and_pairs_unexecuted_calls(runtime_factory, monkeypatch):

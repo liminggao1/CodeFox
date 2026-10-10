@@ -19,40 +19,13 @@ import time
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from contextlib import contextmanager, ExitStack
+from contextlib import ExitStack
 from agent_harness.runtime.lead_context import lead_context_scope
 
 import pytest
 
-
-def response(text="Done", *, tools=(), stop="end_turn"):
-    return SimpleNamespace(stop_reason=stop, content=[SimpleNamespace(type="text", text=text), *tools],
-                           usage=SimpleNamespace(input_tokens=10, output_tokens=3))
-
-
-def tool(tool_name, call_id="call", **arguments):
-    return SimpleNamespace(type="tool_use", name=tool_name, id=call_id, input=arguments)
-
-
-def fake_stream_for(client):
-    @contextmanager
-    def stream(**kwargs):
-        value = client(**kwargs)
-        events = []
-        for index, block in enumerate(value.content):
-            if block.type == "text":
-                events.extend([SimpleNamespace(type="content_block_start", index=index, content_block=block),
-                               SimpleNamespace(type="content_block_delta", index=index,
-                                               delta=SimpleNamespace(type="text_delta", text=block.text)),
-                               SimpleNamespace(type="content_block_stop", index=index)])
-        events.append(SimpleNamespace(type="message_stop"))
-        class Stream:
-            def __iter__(self):
-                return iter(events)
-            def get_final_message(self):
-                return value
-        yield Stream()
-    return stream
+from support.fakes import fake_stream_for, response, tool
+from support.helpers import displayed_approval, until
 
 
 def add_display_messages(snapshot):
@@ -63,67 +36,13 @@ def add_display_messages(snapshot):
                                   "payload": {"text": message["content"]}})
 
 
-def until(runtime, event_type, *, submission_id=None, timeout=5):
-    events = []
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        event = runtime.channel.next_event(timeout=0.05)
-        if event is not None:
-            events.append(event)
-            runtime.channel.acknowledge_event(event.sequence)
-            if event.type == event_type and (submission_id is None or event.payload.get("submission_id") == submission_id):
-                return event, events
-    raise AssertionError(f"Missing {event_type}: {events}")
-
-
-def displayed_approval(runtime, timeout=3):
-    """Offline adapter displays preceding notifications before reading a request."""
-    events = []
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        event = runtime.channel.next_event(timeout=0.01)
-        if event is not None:
-            events.append(event)
-            runtime.channel.acknowledge_event(event.sequence)
-        request = runtime.channel.next_approval()
-        if request is not None:
-            return request, events
-    raise AssertionError(f"Missing approval: {events}")
-
-
-@pytest.fixture
-def runtime_factory(host_factory, monkeypatch):
-    from agent_harness.runtime import interactive_runtime
-    host = host_factory(enable_memory=True)
-    remember = host.remember_after_turn
-    monkeypatch.setattr(interactive_runtime, "host", host)
-    monkeypatch.setattr(core, "ASYNC_EVENT_POLL_SECONDS", 0.01)
-    runtimes = []
-    contexts = ExitStack()
-
-    def create(responses=None, client=None, enable_memory=False, stream=None):
-        monkeypatch.setattr(host, "remember_after_turn", remember if enable_memory else lambda messages: None)
-        if client is None:
-            values = iter(responses or [response()])
-            client = lambda **kwargs: next(values)
-        messages = SimpleNamespace(create=client)
-        messages.stream = stream or fake_stream_for(lambda **kwargs: messages.create(**kwargs))
-        monkeypatch.setattr(core, "client", SimpleNamespace(messages=messages))
-        runtime = interactive_runtime.InteractiveRuntime()
-        contexts.enter_context(lead_context_scope(runtime.lead_context))
-        runtimes.append(runtime)
-        runtime.start()
-        until(runtime, "state_snapshot")
-        return runtime, host
-
-    yield create
-    for runtime in runtimes:
-        runtime.close()
-        runtime._thread.join(timeout=5)
-        assert not runtime._thread.is_alive()
-    assert scheduler._runtime_thread is None
-    assert not subagent_runtime.active_subagents
-    contexts.close()
+def stop_running_turn(runtime, started, release, submission):
+    """等模型进入阻塞后请求停止当前回合，返回回合结束事件。"""
+    assert started.wait(2)
+    started_event, _ = until(runtime, "turn_started")
+    assert runtime.request_stop(started_event.turn_id)
+    release.set()
+    return until(runtime, "turn_finished", submission_id=submission.submission_id)
 
 
 def test_serial_submission_history_events_and_usage(runtime_factory):
@@ -285,11 +204,7 @@ def test_stop_after_model_does_not_start_goal_or_memory(runtime_factory, monkeyp
     monkeypatch.setattr(host, "evaluate_goal", lambda messages: calls.append("goal"))
     monkeypatch.setattr(host, "remember_after_turn", lambda messages: calls.append("memory"))
     submission = runtime.submit("run")
-    assert started.wait(2)
-    started_event, _ = until(runtime, "turn_started")
-    assert runtime.request_stop(started_event.turn_id)
-    release.set()
-    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    finished, _ = stop_running_turn(runtime, started, release, submission)
     assert finished.payload["outcome"]["status"] == "stopped"
     assert not calls
 
@@ -340,11 +255,7 @@ def test_stop_during_closeout_blocks_subsequent_work(runtime_factory, monkeypatc
     monkeypatch.setattr(host, "evaluate_goal", block if boundary == "goal" else lambda messages: None)
     monkeypatch.setattr(host, "remember_after_turn", block if boundary == "memory" else lambda messages: calls.append("memory"))
     submission = runtime.submit("run")
-    assert started.wait(2)
-    started_event, _ = until(runtime, "turn_started")
-    assert runtime.request_stop(started_event.turn_id)
-    release.set()
-    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    finished, _ = stop_running_turn(runtime, started, release, submission)
     assert finished.payload["outcome"]["status"] == "stopped"
     assert calls == [boundary]
     assert "[Goal still active]" not in str(runtime.session.history)
@@ -365,11 +276,7 @@ def test_stop_during_real_memory_extraction_preserves_writes_without_consolidati
     consolidated = []
     monkeypatch.setattr(memory_runtime, "consolidate_memories", lambda: consolidated.append(True))
     submission = runtime.submit("Please remember to use Chinese in future sessions")
-    assert started.wait(2)
-    started_event, _ = until(runtime, "turn_started")
-    assert runtime.request_stop(started_event.turn_id)
-    release.set()
-    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    finished, _ = stop_running_turn(runtime, started, release, submission)
     assert finished.payload["outcome"]["status"] == "stopped"
     assert len(calls) == 2
     assert not consolidated
@@ -396,11 +303,7 @@ def test_stop_cron_delivery_boundary(runtime_factory, monkeypatch, boundary):
     job = scheduler.schedule_job("0 0 1 1 *", "deliver once", recurring=False)
     scheduler._enqueue_due_job(job)
     submission = runtime.submit("run")
-    assert started.wait(2)
-    started_event, _ = until(runtime, "turn_started")
-    assert runtime.request_stop(started_event.turn_id)
-    release.set()
-    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    finished, _ = stop_running_turn(runtime, started, release, submission)
     assert finished.payload["outcome"]["status"] == "stopped"
     assert runtime._background_paused
     # A cancelled stream has no accepted response to confirm cron delivery.

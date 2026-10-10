@@ -29,6 +29,12 @@ from agent_harness.workflows import workflow_runtime as workflow  # noqa: E402
 from agent_harness.workflows import workflow_demo
 
 
+async def yield_to_loop():
+    """让出事件循环若干次，使已排队的协程推进到工作流边界。"""
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
 @pytest.fixture(autouse=True)
 def deterministic_runner(monkeypatch):
     """Explicitly register the sample and select its offline runner."""
@@ -555,8 +561,7 @@ def test_failed_parallel_waits_for_running_sibling_and_replays_success(tmp_path,
         try:
             assert await asyncio.to_thread(failed.wait, 5)
             # A loop barrier lets the failed branch reach the workflow boundary.
-            for _ in range(10):
-                await asyncio.sleep(0)
+            await yield_to_loop()
             assert not pending.done()
         finally:
             release.set()
@@ -643,8 +648,7 @@ def test_script_exit_settles_registered_pipeline_including_later_stages(tmp_path
             {"name": "early-exit", "description": "test"}, script))
         try:
             assert await asyncio.to_thread(started.wait, 5)
-            for _ in range(10):
-                await asyncio.sleep(0)
+            await yield_to_loop()
             assert not pending.done()
         finally:
             release.set()
@@ -684,11 +688,9 @@ def test_cancel_settles_running_call_saves_failure_and_rethrows(tmp_path, monkey
         try:
             assert await asyncio.to_thread(started.wait, 5)
             pending.cancel("user stopped workflow")
-            for _ in range(10):
-                await asyncio.sleep(0)
+            await yield_to_loop()
             pending.cancel()
-            for _ in range(10):
-                await asyncio.sleep(0)
+            await yield_to_loop()
             assert not pending.done()
             with pytest.raises(workflow.WorkflowInputError, match="already active"):
                 await workflow.WorkflowTool().call(meta, script, resume_from_run_id=run_id)
@@ -746,12 +748,10 @@ def test_exit_tracks_steps_waiting_for_slot_or_key(tmp_path, monkeypatch, cancel
             {"name": "waiters", "description": "test"}, script))
         try:
             await asyncio.wait_for(waiting.wait(), 5)
-            for _ in range(10):
-                await asyncio.sleep(0)
+            await yield_to_loop()
             if cancel:
                 pending.cancel()
-                for _ in range(10):
-                    await asyncio.sleep(0)
+                await yield_to_loop()
             assert not pending.done()
         finally:
             release.set()
@@ -832,8 +832,7 @@ def test_nested_group_finishes_during_close_and_independent_new_work_is_rejected
             {"name": "parent", "description": "test"}, script))
         try:
             assert await asyncio.to_thread(started.wait, 5)
-            for _ in range(10):
-                await asyncio.sleep(0)
+            await yield_to_loop()
             ctx = contexts[0]
             for operation in [ctx.agent("new"), ctx.parallel([]), ctx.pipeline([])]:
                 with pytest.raises(workflow.WorkflowInputError, match="closing"):
@@ -942,8 +941,7 @@ def test_pipeline_failure_keeps_other_item_running_and_preserves_first_error(tmp
         pending = asyncio.create_task(workflow.WorkflowTool().call(meta, script, {"budget": budget}))
         try:
             assert await asyncio.to_thread(failed.wait, 5)
-            for _ in range(10):
-                await asyncio.sleep(0)
+            await yield_to_loop()
             assert not pending.done()
         finally:
             release.set()

@@ -16,11 +16,13 @@ from agent_harness.providers import llm_client
 from agent_harness.agents import recovery
 
 
-def tool(arguments="{}", name="read_file", call_id="call-1"):
+def responses_tool(arguments="{}", name="read_file", call_id="call-1"):
+    """Responses 协议输出里的工具调用条目，参数保持原始 JSON 字符串。"""
     return {"type": "function_call", "name": name, "call_id": call_id, "arguments": arguments}
 
 
-def client_for(monkeypatch, response):
+def stubbed_client(monkeypatch, response):
+    """构造 ResponsesClient，并把网络层替换成给定响应。"""
     client = llm_client.ResponsesClient(api_key="fake")
     monkeypatch.setattr(client, "_post", lambda payload: response)
     return client
@@ -52,9 +54,9 @@ def test_failed_tool_result_uses_supported_responses_output(monkeypatch):
 def test_completed_text_tool_and_usage(monkeypatch):
     response = {"status": "completed", "output": [
         {"type": "message", "content": [{"type": "output_text", "text": "hello"}]},
-        tool('{"path":"你好.txt"}'), tool({}, name="list_tasks", call_id="call-2"),
+        responses_tool('{"path":"你好.txt"}'), responses_tool({}, name="list_tasks", call_id="call-2"),
     ], "usage": {"input_tokens": 12, "output_tokens": 4}}
-    message = create(client_for(monkeypatch, response))
+    message = create(stubbed_client(monkeypatch, response))
     assert message.stop_reason == "tool_use"
     assert message.content[0].text == "hello"
     assert message.content[1].input == {"path": "你好.txt"}
@@ -65,7 +67,7 @@ def test_completed_text_tool_and_usage(monkeypatch):
 def test_plain_json_text_is_not_executed_as_a_tool(host_factory, monkeypatch):
     host = host_factory()
     text = '{"name":"write_file","input":{"path":"unwanted.txt","content":"must not run"}}'
-    client = client_for(monkeypatch, {"status": "completed", "output": [
+    client = stubbed_client(monkeypatch, {"status": "completed", "output": [
         {"type": "message", "content": [{"type": "output_text", "text": text}]},
     ]})
     monkeypatch.setattr(core, "client", client)
@@ -79,51 +81,51 @@ def test_plain_json_text_is_not_executed_as_a_tool(host_factory, monkeypatch):
 @pytest.mark.parametrize("status", ["failed", "cancelled", "queued", "in_progress", None, "unknown", []])
 def test_invalid_status_is_not_normal_completion(monkeypatch, status):
     with pytest.raises(llm_client.ProtocolResponseError):
-        create(client_for(monkeypatch, {"status": status, "output": []}))
+        create(stubbed_client(monkeypatch, {"status": status, "output": []}))
 
 
 @pytest.mark.parametrize("arguments", [None, "", " ", '{"path":', "[]", "true", "1", '"path"', []])
 def test_invalid_arguments_fail_the_entire_tool_batch(monkeypatch, arguments):
-    client = client_for(monkeypatch, {"status": "completed", "output": [tool(), tool(arguments)]})
+    client = stubbed_client(monkeypatch, {"status": "completed", "output": [responses_tool(), responses_tool(arguments)]})
     with pytest.raises(llm_client.ProtocolResponseError) as error:
         create(client)
     assert error.value.tool_name == "read_file"
 
 
-@pytest.mark.parametrize("item", [tool(name=None), tool(name=" "), tool(call_id=None), tool(call_id=" ")])
+@pytest.mark.parametrize("item", [responses_tool(name=None), responses_tool(name=" "), responses_tool(call_id=None), responses_tool(call_id=" ")])
 def test_missing_tool_identity(monkeypatch, item):
     with pytest.raises(llm_client.ProtocolResponseError):
-        create(client_for(monkeypatch, {"status": "completed", "output": [item]}))
+        create(stubbed_client(monkeypatch, {"status": "completed", "output": [item]}))
 
 
 def test_valid_id_is_used_when_call_id_is_unusable(monkeypatch):
     for call_id in (None, "", " ", 1):
-        item = dict(tool(call_id=call_id), id="fallback-id")
-        message = create(client_for(monkeypatch, {"status": "completed", "output": [item]}))
+        item = dict(responses_tool(call_id=call_id), id="fallback-id")
+        message = create(stubbed_client(monkeypatch, {"status": "completed", "output": [item]}))
         assert message.content[0].id == "fallback-id"
 
 
 def test_incomplete_text_can_continue_but_incomplete_tools_cannot(monkeypatch):
     response = {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
                 "output": [{"type": "message", "content": [{"type": "output_text", "text": "partial"}]}]}
-    message = create(client_for(monkeypatch, response))
+    message = create(stubbed_client(monkeypatch, response))
     assert message.stop_reason == "max_tokens"
     assert message.content[0].text == "partial"
-    response["output"].append(tool())
+    response["output"].append(responses_tool())
     with pytest.raises(llm_client.ProtocolResponseError):
-        create(client_for(monkeypatch, response))
+        create(stubbed_client(monkeypatch, response))
 
 
 @pytest.mark.parametrize("response", [None, [], {}, {"status": "incomplete"},
     {"status": "incomplete", "incomplete_details": {"reason": "content_filter"}}])
 def test_missing_status_or_unknown_incomplete_reason(monkeypatch, response):
     with pytest.raises(llm_client.ProtocolResponseError):
-        create(client_for(monkeypatch, response))
+        create(stubbed_client(monkeypatch, response))
 
 
 def test_completed_empty_and_zero_argument_calls_are_valid(monkeypatch):
-    assert create(client_for(monkeypatch, {"status": "completed", "output": []})).content == []
-    assert create(client_for(monkeypatch, {"status": "completed", "output": [tool()]})).content[0].input == {}
+    assert create(stubbed_client(monkeypatch, {"status": "completed", "output": []})).content == []
+    assert create(stubbed_client(monkeypatch, {"status": "completed", "output": [responses_tool()]})).content[0].input == {}
 
 
 def test_protocol_error_is_not_retried_or_recovered(monkeypatch):
@@ -143,9 +145,9 @@ def test_protocol_error_is_not_retried_or_recovered(monkeypatch):
 
 def test_lead_protocol_failure_executes_no_tools_or_stop_and_restores_cron(host_factory, monkeypatch):
     host = host_factory()
-    client = client_for(monkeypatch, {"status": "incomplete",
+    client = stubbed_client(monkeypatch, {"status": "incomplete",
         "incomplete_details": {"reason": "max_output_tokens"},
-        "output": [tool('{"path":"bad.txt","content":"must not run"}', "write_file")]})
+        "output": [responses_tool('{"path":"bad.txt","content":"must not run"}', "write_file")]})
     monkeypatch.setattr(core, "client", client)
     stops = []
     monkeypatch.setattr(hooks, "trigger_hooks", lambda event, *args: stops.append(event))
@@ -162,7 +164,7 @@ def test_lead_protocol_failure_executes_no_tools_or_stop_and_restores_cron(host_
 
 def test_workflow_protocol_failure_writes_no_successful_agent_journal(host_factory, monkeypatch):
     host = host_factory()
-    client = client_for(monkeypatch, {"status": "failed", "output": []})
+    client = stubbed_client(monkeypatch, {"status": "failed", "output": []})
     runtime = workflow_runtime
     monkeypatch.setattr(runtime, "RUNNER_FACTORY", lambda: runtime.SubagentRunner(client, "test"))
 
@@ -179,7 +181,7 @@ def test_workflow_protocol_failure_writes_no_successful_agent_journal(host_facto
 
 def test_goal_protocol_failure_preserves_active_condition(host_factory, monkeypatch):
     host = host_factory()
-    client = client_for(monkeypatch, {"status": "failed", "output": []})
+    client = stubbed_client(monkeypatch, {"status": "failed", "output": []})
     evaluator = goal_module.PromptGoalEvaluator(client=client, model="test")
     goal = goal_module.GoalController(evaluator=evaluator)
     goal.set_goal("tests pass")
