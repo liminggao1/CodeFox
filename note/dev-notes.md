@@ -25,28 +25,6 @@ $PY scripts/debug_chat.py                 # 模拟 API 交互：输入“你好�
 
 `pytest` 和自检不需要 `PYTHONPATH`（前者由 `tests/conftest.py` 注入 `src`，后者自己插入）。
 
-直接在脚本中调用 host 的主循环或工具池时，先显式初始化。初始化不请求模型或启动服务，也不覆盖已注入的 workflow runner；CLI/TUI 由 `InteractiveRuntime.start()` 自动调用。
-
-```python
-from agent_harness import host
-
-host.initialize_runtime()
-tools, handlers = host.assemble_tool_pool()
-
-# 单独使用工具时，直接导入所属模块。
-from agent_harness.tools import file_tools
-from agent_harness.workspace import tasks
-from agent_harness.runtime.lead_context import LeadContext, lead_context_scope
-
-# 直接调用主循环或按 Lead 身份执行工具，需要显式提供状态。
-# 该作用域不创建交互通道，仍使用同步模型接口。
-with lead_context_scope(LeadContext(tasks.task_lock)):
-    result = file_tools.run_agent_write("example.txt", "内容")
-    print(result.status, result.content)
-```
-
-导入 host 时 `GOAL` 尚未创建。需要自定义目标评估器时先 `host.configure_goal(...)`，随后初始化会保留它；初始化失败后修正配置可重试。workflow demo 路由独立注册示例并选择离线 runner。
-
 ### 两者的分工
 
 |      | `pytest`                                                      | `scripts/debug_pass.py`                                           |
