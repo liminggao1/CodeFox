@@ -6,7 +6,7 @@
 | --- | --- |
 | [cli.py](cli.py) | `main` 路由 CLI、TUI 和离线工作流；`CLIAdapter` 读取输入、显示事件和收集审批答案 |
 | [presentation.py](presentation.py) | 两前端共用的纯参数摘要、短结果、生命周期文案和操作关联 |
-| [tui/](tui/README.md) | Textual 应用、输入补全、事件展示及审批/会话弹窗 |
+| [tui/](tui/README.md) | CodeFox Textual 工作台、输入补全、事件展示及审批/会话弹窗 |
 
 CLI 和 TUI 都调用 [InteractiveRuntime](../runtime/interactive_runtime.py)。
 CLI 的输入线程是唯一标准输入读取者；输出线程只展示事件，并在展示成功后确认事件。

@@ -97,6 +97,33 @@ def test_tui_record_window_expansion_history_and_dedup():
     asyncio.run(exercise())
 
 
+def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import BrandBar, SessionStatePanel
+    from textual.widgets import Button, Static
+
+    app = HarnessApp(DisplayRuntime())
+    async def exercise():
+        async with app.run_test(size=(110, 30)) as pilot:
+            assert app.query_one(BrandBar)
+            assert app.query_one(SessionStatePanel)
+            assert app.query_one("#send", Button).label == "发送"
+            assert not app.query("#stop")
+            await app._event(event("state_snapshot", {
+                "history": [{"role": "user", "content": "hello"}],
+                "goal": None, "todos": [], "subagents": [], "model": "test-model",
+                "busy": True, "closing": False,
+                "lead_main_model_usage": {"model_calls": 1, "input_tokens": 2, "output_tokens": 3},
+                "workdir": "/tmp/project", "task_id": "task_1", "worktree": "feature",
+            }))
+            await pilot.pause()
+            assert app.query_one("#send", Button).label == "停止"
+            state = str(app.query_one(SessionStatePanel).query_one(".state-body", Static).content)
+            assert "test-model" in state and "/tmp/project" in state and "feature" in state
+    import asyncio
+    asyncio.run(exercise())
+
+
 def test_tui_inline_approval_only_enables_delivered_request(monkeypatch):
     pytest.importorskip("textual")
     from textual.widgets import Button
@@ -151,6 +178,28 @@ def test_tool_summary_is_visible_before_expanding_details():
             text = "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
             assert "说明.md" in text and "读取成功" in text
             assert all(item.collapsed for item in app.query(Collapsible))
+    asyncio.run(exercise())
+
+
+def test_operation_summary_keeps_confirmed_elapsed_time():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import OperationEntry
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    app = HarnessApp(DisplayRuntime())
+    async def exercise():
+        async with app.run_test(size=(85, 30)) as pilot:
+            entry = OperationEntry(record(1, "execution_status", {
+                "operation_id": "op", "phase": "tool", "name": "读取 README.md",
+                "state": "completed", "elapsed_seconds": 3.0,
+            }))
+            await app.query_one("#chat", VerticalScroll).mount(entry)
+            entry.apply(entry.record)
+            await pilot.pause()
+            text = str(entry.query_one(".operation-summary", Static).content)
+            assert "耗时 3.0s" in text
+    import asyncio
     asyncio.run(exercise())
 def test_many_tools_share_scrollable_group_and_update_in_place():
     from agent_harness.frontends.tui.app import HarnessApp

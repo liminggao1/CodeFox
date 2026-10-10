@@ -14,8 +14,10 @@ from textual.widgets import Button, Collapsible, Static, TextArea
 
 from ...runtime.interactive_runtime import InteractiveRuntime
 from ...runtime.local_commands import LOCAL_COMMANDS, find_command
-from .widgets import ApprovalCard, CommandCandidates, ConversationRecord, DetailScroll, OperationEntry, ProcessGroup, SessionScreen, StreamingText
-from ..presentation import operation_key
+from .widgets import (ApprovalCard, BrandBar, CommandCandidates, ConversationRecord, DetailScroll,
+                      OperationEntry, ProcessGroup, SessionInfoScreen, SessionScreen, SessionStatePanel,
+                      StreamingText)
+from ..presentation import operation_key, session_title, session_status_label
 
 
 class HarnessApp(App):
@@ -25,7 +27,7 @@ class HarnessApp(App):
         Binding("up", "command_up", show=False, priority=True),
         Binding("down", "command_down", show=False, priority=True),
         Binding("tab", "command_fill", show=False, priority=True),
-        Binding("enter", "command_enter", show=False, priority=True),
+        Binding("enter", "submit_input", show=False, priority=True),
         Binding("escape", "command_hide", show=False, priority=True),
         Binding("ctrl+enter", "send", "发送", priority=True),
         Binding("ctrl+l", "clear_input", "清空", priority=True),
@@ -35,18 +37,30 @@ class HarnessApp(App):
     ]
     CSS = """
     Screen { background: #151719; color: #e1e3e5; }
-    #conversation { height: 1fr; padding: 0 1; }
+    #workspace { height: 1fr; }
+    #conversation { width: 1fr; height: 1fr; padding: 0 1; }
     #chat { height: 1fr; }
     #earlier { height: 3; display: none; }
     Markdown { padding: 0 1; margin: 0; background: transparent; }
     .activity { height: auto; color: #999fa5; margin: 1 0; }
     .diagnostic { height: auto; padding: 0; }
-    #input { height: 5; margin-top: 1; border: solid #55595d; }
+    #input { height: 5; margin-top: 1; border: solid #55595d; background: #202326; }
     #command-hint { display: none; height: 1; color: #80cbc4; }
     #actions { height: 3; align-horizontal: right; }
     #actions Button { min-width: 8; margin-left: 1; }
+    #input-footer { height: 1; color: #999fa5; }
+    #permission { width: 1fr; color: #b3a35a; }
+    #bottom-status { width: auto; color: #999fa5; }
     .short #input { height: 3; margin-top: 0; }
     .short #actions { display: none; }
+    .short #input-footer { display: none; }
+    .short BrandBar { height: 1; }
+    .short BrandBar .brand, .short BrandBar .session-title { height: 1; padding: 0; }
+    .short BrandBar #top-actions { width: 6; }
+    .short BrandBar #top-actions Button { display: none; }
+    .short BrandBar #top-actions #state { display: block; min-width: 5; margin-left: 0; }
+    .narrow #session-status { display: none; }
+    .narrow #conversation { width: 1fr; }
     """
 
     def __init__(self, runtime=None):
@@ -56,6 +70,7 @@ class HarnessApp(App):
         self.sequence = 0
         self.turn_id = None
         self.busy = False
+        self.stopping = False
         self.closing = False
         self.runtime_closed = False
         self.approval = None
@@ -66,6 +81,7 @@ class HarnessApp(App):
         self._record_start = 0
         self._tool_names = {}
         self._consume_timer = None
+        self._clock_timer = None
         self._activity = None
         self._pending_inputs = {}
         self._diagnostics = []
@@ -75,26 +91,37 @@ class HarnessApp(App):
         self._streams = {}
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="conversation"):
-            yield Button("加载更早记录", id="earlier")
-            yield VerticalScroll(id="chat")
-            yield CommandCandidates(id="commands")
-            yield Static(id="command-hint", markup=False)
-            yield TextArea(id="input", soft_wrap=True, placeholder="消息或 / 命令 · Ctrl+Enter 发送")
-            with Horizontal(id="actions"):
-                yield Button("停止", id="stop", disabled=True)
-                yield Button("发送", id="send", variant="primary")
+        yield BrandBar()
+        with Horizontal(id="workspace"):
+            with Vertical(id="conversation"):
+                yield Button("加载更早记录", id="earlier")
+                yield VerticalScroll(id="chat")
+                yield CommandCandidates(id="commands")
+                yield Static(id="command-hint", markup=False)
+                yield TextArea(id="input", soft_wrap=True, placeholder="消息或 / 命令 · Enter 发送 · Shift+Enter 换行")
+                with Horizontal(id="actions"):
+                    yield Button("发送", id="send", variant="primary")
+                with Horizontal(id="input-footer"):
+                    yield Static("权限：按工具策略", id="permission", markup=False)
+                    yield Static("模型：未开始 · 状态：就绪", id="bottom-status", markup=False)
+            yield SessionStatePanel(id="session-status")
 
     def on_mount(self):
         self.runtime.start()
         self._consume_timer = self.set_interval(0.05, self.consume)
+        self._clock_timer = self.set_interval(0.25, self._refresh_operation_elapsed)
         self.query_one("#input", TextArea).focus()
 
     def on_resize(self, event):
         self.set_class(event.size.height < 16, "short")
+        self.set_class(event.size.width < 90, "narrow")
 
     def on_key(self, event):
         """Keep Home/End deterministic when the conversation itself has focus."""
+        if event.key == "shift+enter" and self.focused is self.query_one("#input", TextArea):
+            self.query_one("#input", TextArea).insert("\n")
+            event.stop()
+            return
         if event.key not in {"home", "end"}:
             return
         chat = self.query_one("#chat", VerticalScroll)
@@ -104,9 +131,36 @@ class HarnessApp(App):
         event.stop()
 
     def _controls(self):
-        self.query_one("#send", Button).disabled = self.busy or self.closing
-        self.query_one("#stop", Button).disabled = self.turn_id is None or self.closing
+        button = self.query_one("#send", Button)
+        if self.closing:
+            button.label = "停止中"
+            button.disabled = True
+        elif self.stopping:
+            button.label = "停止中"
+            button.disabled = True
+        elif self.busy:
+            button.label = "停止"
+            button.disabled = self.turn_id is None
+        else:
+            button.label = "发送"
+            button.disabled = False
+        status = session_status_label({"busy": self.busy, "closing": self.closing})
+        self.query_one("#bottom-status", Static).update(
+            f"模型：{self.snapshot.get('model') or '未开始'} · 状态：{status} · 消息：{len(self.records)}")
+        self.query_one(SessionStatePanel).update_snapshot(self.snapshot, self.records)
+        self.query_one(BrandBar).update_title(session_title(self.snapshot, self.records))
         self._refresh_commands()
+
+    def _set_permission(self, text):
+        self.query_one("#permission", Static).update("权限：" + text)
+
+    def _refresh_operation_elapsed(self):
+        if not self.is_running:
+            return
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        for entry in self.query(OperationEntry):
+            entry.refresh_elapsed(now)
 
     # Command input decisions are local; the runtime remains the execution authority.
     def _command_context(self):
@@ -167,6 +221,8 @@ class HarnessApp(App):
         self.call_after_refresh(self._refresh_commands)
 
     def check_action(self, action, parameters):
+        if action == "submit_input" and len(self.screen_stack) != 1:
+            return False
         if not action.startswith("command_"):
             return True
         self._refresh_commands()
@@ -258,6 +314,16 @@ class HarnessApp(App):
             return
         self._send_draft()
 
+    def action_submit_input(self):
+        """Enter sends ordinary text and retains the command completion rules."""
+        if len(self.screen_stack) != 1:
+            return
+        context = self._command_context()
+        if context is not None:
+            self.action_command_enter()
+        elif not self.busy:
+            self._send_draft()
+
     def _submit(self, text):
         if not text or not text.strip():
             return False
@@ -290,11 +356,14 @@ class HarnessApp(App):
 
     def action_stop_turn(self):
         if self.turn_id and self.runtime.request_stop(self.turn_id):
+            self.stopping = True
+            self._controls()
             self._status("正在停止")
             self._dismiss_approval()
 
     def action_close_runtime(self):
         self.closing = True
+        self.stopping = False
         self.runtime.close()
         self._dismiss_approval()
         self._controls()
@@ -302,11 +371,22 @@ class HarnessApp(App):
 
     async def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "send":
-            self.action_send()
-        elif event.button.id == "stop":
-            self.action_stop_turn()
+            if self.busy:
+                self.action_stop_turn()
+            else:
+                self.action_send()
         elif event.button.id == "earlier":
             await self._load_earlier()
+        elif event.button.id == "session" or event.button.id == "more":
+            self.action_sessions()
+        elif event.button.id == "state":
+            self.push_screen(SessionInfoScreen(self.snapshot, self.records))
+        elif event.button.id == "history":
+            self._record_start = 0
+            await self._render_window()
+            self.query_one("#chat", VerticalScroll).scroll_home(animate=False)
+        elif event.button.id == "settings":
+            self.push_screen(SessionInfoScreen(self.snapshot, self.records))
 
     def _dismiss_approval(self):
         if self.approval is not None:
@@ -314,6 +394,8 @@ class HarnessApp(App):
                 if card.request_id == self.approval.request_id:
                     card.disable()
             self.approval = None
+        if self.is_running:
+            self._set_permission("按工具策略")
 
     def on_approval_card_choice(self, event: ApprovalCard.Choice):
         request = self.approval
@@ -322,6 +404,7 @@ class HarnessApp(App):
         if self.runtime.channel.respond(request.request_id, request.generation, event.decision):
             event.card.finish(event.decision)
             self.approval = None
+            self._set_permission("按工具策略")
             self.query_one("#input", TextArea).focus()
 
     def _record_widget(self, record):
@@ -386,6 +469,8 @@ class HarnessApp(App):
             return
         self._record_ids.add(record["id"])
         self.records.append(record)
+        if self.is_running:
+            self.query_one(BrandBar).update_title(session_title(self.snapshot, self.records))
         chat = self.query_one("#chat", VerticalScroll)
         follow = chat.scroll_y >= chat.max_scroll_y - 1 and self.approval is None
         pending = self._pending_inputs.pop(record["payload"].get("submission_id"), None) if record["type"] == "user_message" else None
@@ -521,6 +606,7 @@ class HarnessApp(App):
             request = self.runtime.channel.next_approval()
             if request is not None:
                 self.approval = request
+                self._set_permission("等待审批")
                 card = next((card for card in self.query(ApprovalCard) if card.request_id == request.request_id), None)
                 if card is None:
                     index = next((index for index, record in enumerate(self.records)
@@ -532,7 +618,9 @@ class HarnessApp(App):
                         card = next(card for card in self.query(ApprovalCard) if card.request_id == request.request_id)
                 if card is not None:
                     card.enable()
-                    self.query_one("#chat", VerticalScroll).scroll_to_widget(card, animate=False)
+                    chat = self.query_one("#chat", VerticalScroll)
+                    chat.scroll_to_widget(card, animate=False)
+                    chat.scroll_end(animate=False)
         self._refresh_commands()
 
     async def _event(self, event):
@@ -553,18 +641,22 @@ class HarnessApp(App):
             if data["status"] not in {"completed", "closed"}:
                 children.append({"name": data["name"], "mode": data["mode"], "status": data["status"]})
                 children.sort(key=lambda child: child["name"])
+            self.query_one(SessionStatePanel).update_snapshot(self.snapshot, self.records)
         elif kind == "session_changed":
             self._hidden_command_text = None
             self.query_one(CommandCandidates).show_commands(())
             await self._restore_records(data["records"])
+            self._controls()
         elif kind == "turn_started":
             self.turn_id = event.turn_id
             self.busy = True
+            self.stopping = False
             self._controls()
             self._status("正在处理请求")
         elif kind == "turn_finished":
             self.turn_id = None
             self.busy = False
+            self.stopping = False
             self._dismiss_approval()
             self._controls()
             outcome = data["outcome"]
@@ -600,5 +692,7 @@ class HarnessApp(App):
     def on_unmount(self):
         if self._consume_timer is not None:
             self._consume_timer.stop()
+        if self._clock_timer is not None:
+            self._clock_timer.stop()
         # Emergency terminal detachment also releases approval waiters.
         self.runtime.close()

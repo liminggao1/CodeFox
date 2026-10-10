@@ -101,11 +101,16 @@ class InteractiveRuntime:
         # All calls run on the execution thread while agent_lock is held.
         with host.tasks.task_lock:
             todos = json_value(host.tasks.CURRENT_TODOS)
+        session_snapshot = self.session.snapshot or {}
         context.publish("state_snapshot", history=json_value(self.session.history),
                         goal=host.GOAL.snapshot(), todos=todos,
                         subagents=host.subagent.list_subagents(), model=core.MODEL,
                         busy=self._busy, closing=self._closing,
-                        lead_main_model_usage=dict(self._usage))
+                        lead_main_model_usage=dict(self._usage),
+                        workdir=session_snapshot.get("workdir"),
+                        task_id=session_snapshot.get("task_id"),
+                        worktree=session_snapshot.get("worktree"),
+                        active_user_request=session_snapshot.get("active_user_request"))
 
     def _background_ready(self):
         if self.session.session_id is None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -11,7 +12,11 @@ from textual.screen import ModalScreen
 from textual.message import Message
 from textual.widgets import Button, Collapsible, Label, ListItem, ListView, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
-from ..presentation import STATUS_LABELS, arguments_summary, full_text, lifecycle_summary, short_text
+from ..presentation import (STATUS_LABELS, arguments_summary, format_elapsed, format_session_state,
+                            full_text, lifecycle_summary, record_time, short_text)
+
+
+LOGO_PATH = Path(__file__).resolve().parents[4] / "assets" / "logo" / "1F98A.svg"
 
 
 class DetailScroll(VerticalScroll):
@@ -19,6 +24,31 @@ class DetailScroll(VerticalScroll):
     DetailScroll { height: auto; max-height: 10; }
     DetailScroll Static { height: auto; }
     """
+
+
+class BrandBar(Horizontal):
+    """Compact CodeFox identity and navigation actions."""
+    DEFAULT_CSS = """
+    BrandBar { height: 3; padding: 0 1; background: #101214; }
+    BrandBar .brand { width: 24; color: #80cbc4; text-style: bold; }
+    BrandBar .session-title { width: 1fr; color: #e1e3e5; padding: 1 0; }
+    BrandBar #top-actions { width: auto; height: 3; align-horizontal: right; }
+    BrandBar #top-actions Button { min-width: 8; margin-left: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        logo = "🦊" if LOGO_PATH.is_file() else ">_"
+        yield Static(f"{logo} CodeFox >_", classes="brand", markup=False)
+        yield Static("未开始会话", classes="session-title", markup=False)
+        with Horizontal(id="top-actions"):
+            yield Button("会话恢复", id="session")
+            yield Button("历史", id="history")
+            yield Button("状态", id="state")
+            yield Button("设置", id="settings")
+            yield Button("···", id="more")
+
+    def update_title(self, title):
+        self.query_one(".session-title", Static).update(title)
 
 
 class ProcessGroup(Vertical):
@@ -54,6 +84,9 @@ class OperationEntry(Vertical):
         self.arguments = record["payload"].get("input", {})
         self.state = "pending"
         self.output = ""
+        self.started_at = None
+        self.finished_at = None
+        self.confirmed_elapsed = None
 
     def compose(self):
         yield Static(classes="operation-summary", markup=False)
@@ -64,6 +97,9 @@ class OperationEntry(Vertical):
     def apply(self, record):
         self.record = record
         data, kind = record["payload"], record["type"]
+        at = record_time(record.get("at"))
+        if self.started_at is None and at is not None:
+            self.started_at = at
         if kind == "tool_call":
             self.tool_name, self.arguments = data["name"], data["input"]
             if data.get("historical") and data.get("result_missing"):
@@ -71,21 +107,48 @@ class OperationEntry(Vertical):
         elif kind == "tool_result":
             self.state = data.get("status", "returned")
             self.output = full_text(data.get("content", ""))
+            self.finished_at = at
         else:
             self.state = data["state"]
             if data.get("historical") and self.state == "running":
                 self.state = "interrupted"
                 data = dict(data, state="interrupted", reason="上次中断，结束状态未记录")
             self.output = data.get("reason", "")
+            if self.state in {"completed", "success", "failed", "stopped", "denied", "discarded", "interrupted"}:
+                self.finished_at = at
+            self.confirmed_elapsed = data.get("elapsed_seconds")
         if kind == "execution_status" and data["phase"] != "tool":
             summary = lifecycle_summary(data)
         else:
             summary = f"工具 · {self.tool_name} · {arguments_summary(self.arguments)} · {STATUS_LABELS.get(self.state, self.state)}"
-        self.query_one(".operation-summary", Static).update(summary)
+        self.query_one(".operation-summary", Static).update(self._summary_text(summary))
         preview = self.query_one(".operation-preview", Static)
         preview.update(short_text(self.output) if self.output else "")
         preview.display = bool(self.output)
         self.query_one(".operation-detail", Static).update(full_text(self.arguments) + "\n" + self.output)
+
+    def _summary_text(self, summary, now=None):
+        elapsed = self.elapsed_seconds(now)
+        return summary + (f" · 耗时 {format_elapsed(elapsed)}" if elapsed is not None else "")
+
+    def elapsed_seconds(self, now=None):
+        if self.confirmed_elapsed is not None:
+            return self.confirmed_elapsed
+        if self.started_at is None:
+            return None
+        end = self.finished_at or now
+        if end is None:
+            return None
+        return max(0.0, (end - self.started_at).total_seconds())
+
+    def refresh_elapsed(self, now):
+        if not self.is_mounted:
+            return
+        summary = self.query_one(".operation-summary", Static).content
+        if " · 耗时 " not in str(summary):
+            return
+        base = str(summary).rsplit(" · 耗时 ", 1)[0]
+        self.query_one(".operation-summary", Static).update(self._summary_text(base, now))
 
 
 class StreamingText(Vertical):
@@ -202,13 +265,18 @@ class ApprovalCard(Vertical):
 class ConversationRecord(Vertical):
     DEFAULT_CSS = """
     ConversationRecord { height: auto; margin-bottom: 1; }
+    ConversationRecord.user-message { width: 82%; margin-left: 10; background: #202326; padding: 0 1; }
+    ConversationRecord.model-message { width: 82%; margin-right: 10; background: #191b1d; padding: 0 1; }
+    ConversationRecord.event-record { width: 100%; background: #17191b; color: #999fa5; padding: 0 1; }
     ConversationRecord .record-source { height: 1; color: #80cbc4; }
     ConversationRecord Static { height: auto; }
     ConversationRecord Collapsible { height: auto; padding: 0; background: transparent; }
     """
 
     def __init__(self, record, tool_name=None):
-        super().__init__(id="record-" + record["id"])
+        kind = record["type"]
+        classes = "user-message" if kind == "user_message" else "model-message" if kind == "assistant_message" else "event-record"
+        super().__init__(id="record-" + record["id"], classes=classes)
         self.record = record
         self.tool_name = tool_name
 
@@ -216,7 +284,8 @@ class ConversationRecord(Vertical):
         record, data = self.record, self.record["payload"]
         kind, source = record["type"], record["source"]
         if kind in {"user_message", "assistant_message"}:
-            yield Static("你" if kind == "user_message" else source, classes="record-source", markup=False)
+            yield Static("你" if kind == "user_message" else "CodeFox" if source == "lead" else source,
+                         classes="record-source", markup=False)
             yield Markdown(data["text"]) if kind == "assistant_message" else Static(data["text"], markup=False)
             return
         yield Static(source, classes="record-source", markup=False)
@@ -311,6 +380,52 @@ class SessionScreen(ModalScreen[str | None]):
         index = self.query_one(ListView).index
         if index is not None:
             self.dismiss(f"/resume {self.entries[index]['id']}")
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
+class SessionStatePanel(VerticalScroll):
+    """Read-only projection of the active session state."""
+    DEFAULT_CSS = """
+    SessionStatePanel { width: 32; min-width: 26; padding: 1 2; background: #191b1d; border-left: solid #35393d; }
+    SessionStatePanel .state-title { color: #80cbc4; text-style: bold; height: 1; }
+    SessionStatePanel .state-body { color: #b8bdc2; height: auto; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("会话状态", classes="state-title", markup=False)
+        yield Static("未开始会话", classes="state-body", markup=False)
+
+    def update_snapshot(self, snapshot, records=()):
+        self.query_one(".state-body", Static).update(format_session_state(snapshot, records=records))
+
+
+class SessionInfoScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "cancel", "返回")]
+    DEFAULT_CSS = """
+    SessionInfoScreen { align: center middle; background: $background 70%; }
+    SessionInfoScreen > Vertical { width: 80; max-width: 95%; height: 80%; border: solid $primary;
+        padding: 1 2; background: $surface; }
+    SessionInfoScreen .info-body { height: 1fr; color: #c5c9cc; padding: 1 0; }
+    SessionInfoScreen Horizontal { height: 3; align-horizontal: right; }
+    """
+
+    def __init__(self, snapshot, records=()):
+        super().__init__()
+        self.snapshot = snapshot
+        self.records = records
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("运行信息")
+            yield Static(format_session_state(self.snapshot, records=self.records), classes="info-body", markup=False)
+            with Horizontal():
+                yield Button("返回", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "cancel":
+            self.dismiss(None)
 
     def action_cancel(self):
         self.dismiss(None)

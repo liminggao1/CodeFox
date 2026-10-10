@@ -288,7 +288,8 @@ def test_command_menu_navigation_fill_escape_and_editor_boundaries(runtime_facto
             await pilot.pause()
             assert not panel.display
             await pilot.press("enter")
-            assert editor.text == "/\nresum"
+            await wait_for(pilot, lambda: not app.busy)
+            assert editor.text == ""
             await command_draft(app, pilot, "/goal")
             editor.selection = Selection((0, 0), (0, 5))
             await pilot.pause()
@@ -300,8 +301,11 @@ def test_command_menu_navigation_fill_escape_and_editor_boundaries(runtime_facto
                 assert not panel.display
             editor.load_text("你好")
             editor.move_cursor((0, 2))
-            await pilot.press("enter")
+            await pilot.press("shift+enter")
             assert editor.text == "你好\n"
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: not app.busy)
+            assert editor.text == ""
             await pilot.press("ctrl+l")
             assert editor.text == "" and not panel.display
             await pilot.press("ctrl+d")
@@ -495,8 +499,8 @@ def test_command_draft_survives_actual_background_wakeup(runtime_factory, monkey
             assert not app.query_one(CommandCandidates).display
             count = len(submissions)
             await pilot.press("enter")
-            assert len(submissions) == count and editor.text == "/goal clear\n"
-            await pilot.press("backspace", "ctrl+enter")
+            assert len(submissions) == count and editor.text == "/goal clear"
+            await pilot.press("shift+enter", "backspace", "ctrl+enter")
             assert editor.text == "/goal clear" and submissions[-1][1].status == "busy"
             release.set()
             await wait_for(pilot, lambda: not app.busy)
@@ -571,7 +575,7 @@ def test_pure_conversation_shows_accepted_input_while_model_is_blocked(runtime_f
         async with app.run_test(size=(100, 30)) as pilot:
             app._submit("实时输入")
             await wait_for(pilot, started.is_set)
-            assert not app.query("#status, #side, #state, #events, Footer")
+            assert app.query_one("#session-status")
             image = ElementTree.fromstring(app.export_screenshot())
             text = "".join(image.itertext())
             assert "实时输入" in text and "正在处理请求" in text
