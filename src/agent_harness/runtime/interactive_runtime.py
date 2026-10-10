@@ -3,22 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-import os
 import threading
 import time
 import uuid
-from pathlib import Path
 
 from .. import core
 from ..agents import goal
 from .. import host
 from ..workspace import tasks
 from ..agents import subagent as subagent_runtime
-from ..tools import file_tools, mcp_tools
+from ..tools import file_tools
 from . import hooks, scheduler
 from . import interaction
 from .lead_context import LeadContext
 from .local_commands import find_command
+from .session_switch import SessionSwitch
 from .session_store import InteractiveSession, SessionError, SessionStore, json_value
 
 
@@ -44,6 +43,14 @@ class InteractiveRuntime:
         self._usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
         self._turn_started_at = None
         self._turn_usage = dict(self._usage)
+        # 会话切换事务由独立 module 拥有；这里只注入运行时自己的窄接口。
+        self.session_switch = SessionSwitch(
+            store=self.session.store, session=self.session,
+            lead_context=self.lead_context, channel=self.channel,
+            context=self._context, checkpoint=self._checkpoint,
+            record=self._record, pause_background=self._pause_background,
+            after_activate=self._after_activate,
+            read_goal=self._read_goal, replace_goal=self._replace_goal)
 
     def _session_context(self):
         with tasks.task_lock:
@@ -355,80 +362,29 @@ class InteractiveRuntime:
             elif target == self.session.session_id:
                 self._command_data = {"text": f"Already using {target}"}
             else:
-                self._command_data = self._resume(target)
+                self._command_data = self.session_switch.switch(target)
         return None
 
-    # -- Session switching: preparation is read-only; activation owns all state changes. --
+    # -- 会话切换已移入 session_switch.SessionSwitch；这里只提供它的窄回调。 --
 
-    def _prepare_resume(self, target):
-        snapshot = self.session.store.load(target)
-        restored_goal = goal.GoalController.from_snapshot(
-            host.GOAL.evaluator, snapshot["goal"], host.GOAL.block_cap)
-        root = Path(snapshot["workdir"]).resolve()
-        if not root.is_dir():
-            raise SessionError(f"Session startup directory does not exist: {root}")
-        if (scheduler.has_background_tasks() or subagent_runtime.list_subagents()
-                or subagent_runtime.BUS.peek("lead")):
-            raise SessionError("Background work or results remain; finish them and retry /resume")
-        with scheduler.cron_lock:
-            if scheduler.cron_queue:
-                raise SessionError("Scheduled results remain; finish them and retry /resume")
-        assignment = tasks.validate_lead_context(target, snapshot, workdir=root)
-        return snapshot, root, restored_goal, assignment
+    def _read_goal(self):
+        """返回运行时当前持有的 goal 控制器。"""
+        return host.GOAL
 
-    def _resume(self, target):
-        snapshot, root, restored_goal, assignment = self._prepare_resume(target)
-        if not self._checkpoint():
-            raise SessionError("Current session could not be saved; context was not switched")
-        directory_changed = root != core.WORKDIR.resolve()
-        # Do not join cron while holding its lock. Recheck after it has stopped.
-        if directory_changed:
-            scheduler.stop_runtime_services()
-        try:
-            with scheduler.cron_lock:
-                if scheduler.cron_queue:
-                    raise SessionError("Scheduled results remain; finish them and retry /resume")
-                if directory_changed:
-                    os.chdir(root)
-                self._activate_resume(snapshot, root, restored_goal, assignment)
-        except Exception:
-            if directory_changed and core.WORKDIR.resolve() != root:
-                scheduler.start_runtime_services(load_jobs=False)
-            raise
-        with interaction.execution_context(self._context()):
-            try:
-                self._record("resume", target, save=False)
-                saved = self._checkpoint()
-                if directory_changed:
-                    scheduler.clear_runtime_jobs()
-                    try:
-                        subagent_runtime.consume_lead_inbox(route_protocol=False)
-                    finally:
-                        scheduler.start_runtime_services()
-            except Exception as exc:
-                # Do not repeatedly consume the same damaged background input.
-                with self._lifecycle:
-                    self._background_paused = True
-                raise SessionError(f"Resumed {target} at {root}; post-resume processing failed: {exc}") from exc
-            finally:
-                self._context().publish("session_changed",
-                                        records=self.session.display_records(historical=True))
-        text = f"Resumed {target} at {root}"
-        if not saved:
-            text += "; context could not be saved and will be retried on the next interaction"
-        return {"text": text, "workdir": str(root), "saved": saved}
+    def _replace_goal(self, value):
+        """替换运行时持有的 goal 控制器。"""
+        host.GOAL = value
 
-    def _activate_resume(self, snapshot, root, restored_goal, assignment):
-        core.WORKDIR = root
-        self.session.store.workdir = root
-        mcp_tools.mcp_clients.clear()
-        host.GOAL = restored_goal
-        with tasks.task_lock:
-            self.lead_context.activate(snapshot["id"], snapshot)
-            tasks.activate_lead_assignment(assignment)
-            self.session.activate(snapshot)
+    def _pause_background(self):
+        """恢复后处理失败时暂停后台输入，避免重复消费同一批损坏数据。"""
+        with self._lifecycle:
+            self._background_paused = True
+
+    def _after_activate(self):
+        """切换落地后刷新运行时自身的用量与代际。"""
         self._usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
         self._generation += 1
+
 
     def _turn_summary(self, context, outcome=None):
         records = self.session.display_records()

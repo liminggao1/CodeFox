@@ -1,0 +1,118 @@
+"""会话切换的唯一拥有者：恢复事务的目标、顺序与失败回滚都在这里。
+
+调用方只调 ``SessionSwitch.switch(target)``。读快照、校验目标、停服务、
+切换目录、激活归属、重启服务和发布 ``session_changed`` 全在实现内完成；
+``interactive_runtime`` 只注入自己的窄接口，不再持有这些步骤。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+import os
+
+from .. import core
+from ..agents import goal
+from ..agents import subagent as subagent_runtime
+from ..tools import mcp_tools
+from ..workspace import tasks
+from . import interaction
+from . import scheduler
+from .session_store import SessionError
+
+
+class SessionSwitch:
+    """切换事务；依赖由运行时显式注入，不反向引用 InteractiveRuntime。"""
+
+    def __init__(self, *, store, session, lead_context, channel, context,
+                 checkpoint, record, pause_background, after_activate,
+                 read_goal, replace_goal):
+        self._store = store
+        self._session = session
+        self._lead_context = lead_context
+        self._channel = channel
+        self._context = context
+        self._checkpoint = checkpoint
+        self._record = record
+        self._pause_background = pause_background
+        self._after_activate = after_activate
+        # goal 由运行时持有；这里只经注入的访问器读写，不直接引用 host 模块绑定。
+        self._read_goal = read_goal
+        self._replace_goal = replace_goal
+
+    # -- 读取阶段：只读，不改任何状态 --
+
+    def _prepare(self, target):
+        """读取目标快照并校验；不改变当前 assignment、目录或会话。"""
+        snapshot = self._store.load(target)
+        current_goal = self._read_goal()
+        restored_goal = goal.GoalController.from_snapshot(
+            current_goal.evaluator, snapshot["goal"], current_goal.block_cap)
+        root = Path(snapshot["workdir"]).resolve()
+        if not root.is_dir():
+            raise SessionError(f"Session startup directory does not exist: {root}")
+        if (scheduler.has_background_tasks() or subagent_runtime.list_subagents()
+                or subagent_runtime.BUS.peek("lead")):
+            raise SessionError("Background work or results remain; finish them and retry /resume")
+        with scheduler.cron_lock:
+            if scheduler.cron_queue:
+                raise SessionError("Scheduled results remain; finish them and retry /resume")
+        assignment = tasks.validate_lead_context(target, snapshot, workdir=root)
+        return snapshot, root, restored_goal, assignment
+
+    # -- 落地阶段：切换事务的唯一真实写入点 --
+
+    def _activate(self, snapshot, root, restored_goal, assignment):
+        """按固定顺序写入全部归属，最后交还运行时刷新自身状态。"""
+        core.WORKDIR = root
+        self._store.workdir = root
+        mcp_tools.mcp_clients.clear()
+        self._replace_goal(restored_goal)
+        with tasks.task_lock:
+            self._lead_context.activate(snapshot["id"], snapshot)
+            tasks.activate_lead_assignment(assignment)
+            self._session.activate(snapshot)
+        self._after_activate()
+
+    # -- 对外唯一 interface --
+
+    def switch(self, target):
+        """切换当前会话；成功返回结果字典，失败保持当前状态并抛出 SessionError。"""
+        snapshot, root, restored_goal, assignment = self._prepare(target)
+        if not self._checkpoint():
+            raise SessionError("Current session could not be saved; context was not switched")
+        directory_changed = root != core.WORKDIR.resolve()
+        # 不在持 cron 锁时等待线程退出；服务停稳后重新检查一次队列。
+        if directory_changed:
+            scheduler.stop_runtime_services()
+        try:
+            with scheduler.cron_lock:
+                if scheduler.cron_queue:
+                    raise SessionError("Scheduled results remain; finish them and retry /resume")
+                if directory_changed:
+                    os.chdir(root)
+                self._activate(snapshot, root, restored_goal, assignment)
+        except Exception:
+            if directory_changed and core.WORKDIR.resolve() != root:
+                scheduler.start_runtime_services(load_jobs=False)
+            raise
+        with interaction.execution_context(self._context()):
+            try:
+                self._record("resume", target, save=False)
+                saved = self._checkpoint()
+                if directory_changed:
+                    scheduler.clear_runtime_jobs()
+                    try:
+                        subagent_runtime.consume_lead_inbox(route_protocol=False)
+                    finally:
+                        scheduler.start_runtime_services()
+            except Exception as exc:
+                # 不重复消费同一批已损坏的后台输入。
+                self._pause_background()
+                raise SessionError(f"Resumed {target} at {root}; post-resume processing failed: {exc}") from exc
+            finally:
+                self._context().publish("session_changed",
+                                        records=self._session.display_records(historical=True))
+        text = f"Resumed {target} at {root}"
+        if not saved:
+            text += "; context could not be saved and will be retried on the next interaction"
+        return {"text": text, "workdir": str(root), "saved": saved}

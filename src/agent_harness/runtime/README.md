@@ -5,7 +5,8 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| [interactive_runtime.py](interactive_runtime.py) | `InteractiveRuntime`：接收输入、执行本地命令、串行驱动 Lead 回合、消费后台输入、生成展示记录、统一保存与恢复交付、切换会话、停止和关闭 |
+| [interactive_runtime.py](interactive_runtime.py) | `InteractiveRuntime`：接收输入、执行本地命令、串行驱动 Lead 回合、消费后台输入、生成展示记录、统一保存与恢复交付、停止和关闭；会话切换委托 `SessionSwitch` |
+| [session_switch.py](session_switch.py) | `SessionSwitch`：会话切换事务的唯一拥有者；读快照、校验、停服务、切换目录、激活归属、重启服务与发布 `session_changed` 都在实现内按序完成 |
 | [lead_context.py](lead_context.py) | `LeadContext`：运行时拥有的 Todo、会话 ID 和保留工作树；防御性复制、显式激活和目录绑定；离线入口显式提供状态作用域 |
 | [interaction.py](interaction.py) | 执行上下文、事件通道、独立事实队列、稳定记录 ID、审批请求及展示确认，关联会话代次和停止状态 |
 | [local_commands.py](local_commands.py) | `LocalCommand`、命令元数据和查找；供运行时路由与前端补全共用 |
@@ -24,8 +25,8 @@
 正文片段只用于实时显示，正式回复接受后才保存；模型、工具和实际 hook 生命周期属于可恢复记录。
 调度器提供待交付工作，共享驱动决定何时把它交给 Lead。
 
-运行时拥有交互会话的执行与切换规则，不拥有 UI 控件。
-`session_store.py` 负责会话存储与恢复准备，目标是否能激活由共享驱动协调。
+运行时拥有交互会话的执行规则，不拥有 UI 控件。
+`session_store.py` 负责会话存储与恢复准备；目标是否能激活、切换步骤与失败回滚由 `session_switch.py` 独占，共享驱动只调 `switch(target)`。
 `InteractiveSession` 按 ID 追加展示记录，维护模型历史与展示历史的不同用途，失败保留内存待重试；`SessionStore` 只校验当前结构及操作文件。
 任务和工作树绑定的校验由 [workspace/](../workspace/README.md) 提供，子 agent 生命周期由 [agents/](../agents/README.md) 提供。
 状态与失败顺序的当前契约见 [职责收敛计划](../../../docs/plans/2026-10-10-03整体架构职责收敛实施计划.md)。

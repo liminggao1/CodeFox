@@ -785,7 +785,7 @@ def test_cross_directory_failure_preserves_current_context(runtime_factory, monk
     if failure == "save":
         monkeypatch.setattr(runtime.session.store, "save", fail)
     elif failure == "chdir":
-        monkeypatch.setattr("agent_harness.runtime.interactive_runtime.os.chdir", fail)
+        monkeypatch.setattr("agent_harness.runtime.session_switch.os.chdir", fail)
     before_history = list(runtime.session.history)
     result, _ = resume_command(runtime, target["id"])
     assert result.payload["status"] == "failed", result.payload
@@ -889,3 +889,34 @@ def test_compact_failure_is_saved_as_a_new_correction_fact(runtime_factory, monk
     assert "Compaction requested" in results[0]["payload"]["content"]
     assert results[1]["payload"]["correction"] and results[1]["payload"]["is_error"]
     assert snapshot["messages"][-2]["content"][0]["is_error"]
+
+
+# -- C1：会话切换深模块。直接打 SessionSwitch.switch 这个 seam，不再经过 /resume 命令 --
+
+def session_switch_for(runtime):
+    """运行时注入的切换 module；测试直接打 switch 这个 seam。"""
+    return runtime.session_switch
+
+
+def test_switch_moves_directory_generation_and_assignment(runtime_factory):
+    runtime, host = runtime_factory(client=lambda **kwargs: response())
+    original_root = core.WORKDIR
+    submission = runtime.submit("original session")
+    until(runtime, "turn_finished", submission_id=submission.submission_id)
+
+    other_root = original_root / "other"
+    other_root.mkdir()
+    target = runtime.session.store.create()
+    target.update(workdir=str(other_root), goal=host.GOAL.snapshot())
+    runtime.session.store.save(target)
+
+    switch = session_switch_for(runtime)
+    before_generation = runtime._generation
+    outcome = switch.switch(target["id"])
+
+    assert outcome["workdir"] == str(other_root)
+    assert outcome["saved"] is True
+    assert Path.cwd() == core.WORKDIR == other_root
+    assert runtime._generation == before_generation + 1
+    assert runtime.session.session_id == target["id"]
+    assert tasks.assignment_cwd("agent") == other_root
