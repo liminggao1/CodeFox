@@ -16,7 +16,8 @@ from ...runtime.interactive_runtime import InteractiveRuntime
 from ...runtime.local_commands import LOCAL_COMMANDS, find_command
 from .widgets import (ApprovalCard, BrandBar, CommandCandidates, ConversationRecord, DetailScroll,
                       SessionInfoScreen, SessionScreen, SessionStatePanel, StateToggle)
-from ..presentation import session_title, session_status_label
+from ..presentation import (PERMISSION_DEFAULT, PERMISSION_WAITING, model_status, permission_summary,
+                            session_title, session_status_label)
 from .conversation_view import ConversationView
 
 
@@ -48,16 +49,18 @@ class HarnessApp(App):
     Markdown { padding: 0 1; margin: 0; background: transparent; }
     .activity { height: auto; color: #999fa5; margin: 1 0; }
     .diagnostic { height: auto; padding: 0; }
-    #input { height: 5; margin-top: 1; border: solid #55595d; background: #202326; }
     #command-hint { display: none; height: 1; color: #80cbc4; }
     #input-status { height: 1; color: #999fa5; }
-    #actions { height: 1; align-horizontal: right; }
-    #actions Button { min-width: 8; height: 1; min-height: 1; border: none; margin-left: 1; padding: 0 1; }
+    #input-box { height: 4; margin-top: 1; border: solid #55595d; background: #202326; }
+    #input-row { height: 1; }
+    #input { width: 1fr; height: 1; border: none; background: transparent; padding: 0 1; }
+    #send { width: auto; min-width: 8; height: 1; min-height: 1; border: none; margin: 0 1; padding: 0 1; }
+    #input-hint { height: 1; color: #999fa5; padding: 0 1; }
     #input-footer { height: 1; color: #999fa5; }
     #permission { width: 1fr; color: #b3a35a; }
     #bottom-status { width: auto; color: #999fa5; }
-    .short #input { height: 3; margin-top: 0; }
-    .short #actions { display: none; }
+    .short #input-box { height: 3; margin-top: 0; }
+    .short #input-hint { display: none; }
     .short #input-footer { display: none; }
     .short #input-status { display: none; }
     .short BrandBar { height: 1; }
@@ -103,13 +106,15 @@ class HarnessApp(App):
                 yield VerticalScroll(id="chat")
                 yield CommandCandidates(id="commands")
                 yield Static(id="command-hint", markup=False)
-                yield TextArea(id="input", soft_wrap=True, placeholder="消息或 / 命令 · Enter 发送 · Shift+Enter 换行")
                 yield Static("就绪", id="input-status", markup=False)
-                with Horizontal(id="actions"):
-                    yield Button("发送", id="send", variant="primary")
+                with Vertical(id="input-box"):
+                    with Horizontal(id="input-row"):
+                        yield TextArea(id="input", soft_wrap=True, placeholder="输入消息或 / 命令…")
+                        yield Button("发送", id="send", variant="primary")
+                    yield Static("Enter 发送 · Shift+Enter 换行", id="input-hint", markup=False)
                 with Horizontal(id="input-footer"):
-                    yield Static("权限：按工具策略", id="permission", markup=False)
-                    yield Static("模型：未开始 · 状态：就绪", id="bottom-status", markup=False)
+                    yield Static(permission_summary(PERMISSION_DEFAULT), id="permission", markup=False)
+                    yield Static(id="bottom-status", markup=False)
             yield SessionStatePanel(id="session-status")
 
     def on_mount(self):
@@ -149,9 +154,8 @@ class HarnessApp(App):
         else:
             button.label = "发送"
             button.disabled = False
-        status = session_status_label({"busy": self.busy, "closing": self.closing})
         self.query_one("#bottom-status", Static).update(
-            f"模型：{self.snapshot.get('model') or '未开始'} · 消息：{len(self.records)} · 字符预算：{core.CONTEXT_LIMIT}")
+            model_status(self.snapshot, len(self.records), core.CONTEXT_LIMIT))
         self._input_status()
         self.query_one(SessionStatePanel).update_snapshot(self.snapshot, self.records)
         self.query_one(SessionStatePanel).display = self.state_expanded
@@ -160,7 +164,7 @@ class HarnessApp(App):
         self._refresh_commands()
 
     def _set_permission(self, text):
-        self.query_one("#permission", Static).update("权限：" + text)
+        self.query_one("#permission", Static).update(permission_summary(text))
 
     # Command input decisions are local; the runtime remains the execution authority.
     def _command_context(self):
@@ -413,7 +417,7 @@ class HarnessApp(App):
                     card.disable()
             self.approval = None
         if self.is_running:
-            self._set_permission("按工具策略")
+            self._set_permission(PERMISSION_DEFAULT)
 
     def on_approval_card_choice(self, event: ApprovalCard.Choice):
         request = self.approval
@@ -422,7 +426,7 @@ class HarnessApp(App):
         if self.runtime.channel.respond(request.request_id, request.generation, event.decision):
             event.card.finish(event.decision)
             self.approval = None
-            self._set_permission("按工具策略")
+            self._set_permission(PERMISSION_DEFAULT)
             self.query_one("#input", TextArea).focus()
 
     def _log(self, text):
@@ -468,7 +472,7 @@ class HarnessApp(App):
             request = self.runtime.channel.next_approval()
             if request is not None:
                 self.approval = request
-                self._set_permission("等待审批")
+                self._set_permission(PERMISSION_WAITING)
                 await self.conversation.enable_approval(request)
         self._refresh_commands()
 

@@ -839,6 +839,14 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
             assert str(app.query_one("#state-collapse", Button).label) == "收起"
             state = str(app.query_one(SessionStatePanel).query_one(".state-body", Static).content)
             assert "test-model" in state and "/tmp/project" in state and "feature" in state
+            # 输入区：状态行在输入框上方，主按钮在同一输入框内，底部是权限与模型摘要。
+            assert app.query_one("#input-status").region.y < app.query_one("#input").region.y
+            box = app.query_one("#input-box").region
+            send = app.query_one("#send", Button).region
+            assert box.y <= send.y and send.bottom <= box.bottom
+            footer = str(app.query_one("#bottom-status", Static).content)
+            assert "test-model" in footer and "消息：" in footer and "字符预算：" in footer
+            assert str(app.query_one("#permission", Static).content) == "权限：按工具策略"
     import asyncio
     asyncio.run(exercise())
 

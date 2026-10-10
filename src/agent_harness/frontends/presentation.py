@@ -11,6 +11,22 @@ STATUS_LABELS = {"returned": "已返回结果", "success": "成功", "failed": "
                  "discarded": "本次输出未采用", "interrupted": "上次中断，结束状态未记录"}
 
 
+PERMISSION_DEFAULT = "按工具策略"
+PERMISSION_WAITING = "等待审批"
+
+
+def permission_summary(label):
+    """Left footer summary; the caller passes the factual runtime label."""
+    return f"权限：{label}"
+
+
+def model_status(snapshot=None, message_count=0, context_limit=0):
+    """Right footer summary: model, message count and static character budget."""
+    snapshot = snapshot or {}
+    return (f"模型：{snapshot.get('model') or '未开始'} · 消息：{message_count}"
+            f" · 字符预算：{context_limit}")
+
+
 def full_text(value):
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
 
@@ -70,6 +86,19 @@ def record_time(value):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def compact_count(value):
+    """Short token count for the state panel, e.g. 12300 -> 12.3k."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number >= 10000:
+        return f"{number / 1000:.1f}k"
+    if number >= 1000:
+        return f"{number / 1000:.2f}k"
+    return str(number)
+
+
 def session_title(snapshot=None, records=()):
     """Build a stable display title from existing session data."""
     snapshot = snapshot or {}
@@ -91,7 +120,8 @@ def format_session_state(snapshot=None, *, records=()):
     todos = snapshot.get("todos") or []
     todo_lines = [f"{todo.get('status', '')} · {todo.get('content', '')}" for todo in todos]
     subagents = snapshot.get("subagents") or []
-    child_lines = [f"{child.get('name', '子 agent')} · {child.get('status', '')}" for child in subagents]
+    child_lines = [f"{child.get('name', '子 agent')} · {child.get('mode', '')} · {child.get('status', '')}"
+                   for child in subagents]
     usage = snapshot.get("lead_main_model_usage") or {}
     lines = [
         f"会话  {snapshot.get('session_id') or '未开始'}",
@@ -104,7 +134,8 @@ def format_session_state(snapshot=None, *, records=()):
         f"工作树  {snapshot.get('worktree') or '无'}",
         "子 agent  " + ("\n         " + "\n         ".join(child_lines) if child_lines else "无"),
         f"模型  {snapshot.get('model') or '未提供'}",
-        f"请求  {usage.get('model_calls', 0)} · 输入 {usage.get('input_tokens', 0)} · 输出 {usage.get('output_tokens', 0)}",
+        f"请求  {usage.get('model_calls', 0)}",
+        f"输入 {compact_count(usage.get('input_tokens', 0))} · 输出 {compact_count(usage.get('output_tokens', 0))}",
     ]
     return "\n".join(lines)
 
