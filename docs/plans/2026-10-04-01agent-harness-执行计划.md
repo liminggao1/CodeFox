@@ -6,6 +6,8 @@
 > 来源仓库：[learn-claude-code](/D:/01dpan/01project/life/learncc/learn-claude-code)
 > 本文件位置：`docs/plans/`（原在 `docs/` 根目录）
 
+> **已被后续计划取代的规则**：[2026-10-08-03 统一子 agent 实施计划](2026-10-08-03统一子agent实施计划.md) 已按用户决定取消 flat 生成机制，移除生成文件、构建脚本、专用测试和自检项。本文 `scripts/build_flat.py`、`flat/agent_full.py` 与相关维护步骤不再适用。原文保留为当时实施记录。
+
 ## 一、目标
 
 以 s15 集成宿主为基础，把 s16 的 workflow 运行时和 s17 的 goal loop 原生并入，做成一个自包含项目，另附一份自动拼接的单文件教学版。
