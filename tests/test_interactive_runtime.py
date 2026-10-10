@@ -96,9 +96,9 @@ def test_stop_waiting_approval_completes_tools_and_pauses_background(runtime_fac
     assert not (core.WORKDIR / "unwanted").exists()
     assert len([event for event in events if event.type == "tool_result"]) == 2
     subagent_runtime.BUS.send("child", "lead", "Waiting result")
-    assert runtime._background_paused
+    assert runtime.turns.background_paused
     assert runtime.submit("continue").status == "accepted"
-    assert not runtime._background_paused
+    assert not runtime.turns.background_paused
 
 
 def test_close_waiting_approval_is_nonblocking_and_terminal(runtime_factory):
@@ -308,7 +308,7 @@ def test_stop_cron_delivery_boundary(runtime_factory, monkeypatch, boundary):
     submission = runtime.submit("run")
     finished, _ = stop_running_turn(runtime, started, release, submission)
     assert finished.payload["outcome"]["status"] == "stopped"
-    assert runtime._background_paused
+    assert runtime.turns.background_paused
     # A cancelled stream has no accepted response to confirm cron delivery.
     assert scheduler.cron_queue == [job]
     assert scheduler.scheduled_jobs[job.id].pending_delivery
@@ -779,7 +779,7 @@ def test_cross_directory_failure_preserves_current_context(runtime_factory, monk
     if failure == "queued_cron":
         with scheduler.cron_lock:
             scheduler._enqueue_due_job(job)
-        runtime._background_paused = True
+        runtime.turns.pause_background()
     def fail(*args):
         raise OSError("unavailable")
     if failure == "save":

@@ -165,7 +165,7 @@ def test_tui_subagent_conversation_updates_while_background_lead_is_paused(runti
             child_release.set()
             await wait_for(pilot, lambda: any(child["status"] == "idle" for child in app.snapshot["subagents"]))
             assert any("helper · idle" in str(widget.content) for widget in app.query(Static))
-            assert runtime._background_paused and not app.busy
+            assert runtime.turns.background_paused and not app.busy
             assert lead_calls == [True, True]
             subagent_runtime.run_request_shutdown("helper").content
             await wait_for(pilot, lambda: not app.snapshot["subagents"])
@@ -450,11 +450,11 @@ def test_command_runtime_rejection_busy_approval_and_resume_reset(runtime_factor
             panel = app.query_one(CommandCandidates)
             # A background wakeup may set runtime busy before the UI sees a snapshot.
             with runtime._lifecycle:
-                runtime._busy = True
+                runtime.turns._busy = True
             await pilot.press("enter")
             assert editor.text == "/goal" and submissions[-1][1].status == "busy"
             with runtime._lifecycle:
-                runtime._busy = False
+                runtime.turns._busy = False
             await command_draft(app, pilot, "/resume " + target["id"])
             await pilot.press("enter")
             await wait_for(pilot, lambda: app.generation == 2 and not app.busy)
