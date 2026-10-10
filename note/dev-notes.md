@@ -391,6 +391,76 @@ F10 单步，F11 进入函数，Shift+F11 返回，F5 继续。暂时不看的�
 和 [lead_tools.py:88](../src/agent_harness/agents/lead_tools.py#L88)（执行工具）下断点。
 它会两次命中模拟模型：先返回 `tool_use`，再接收 `tool_result` 并回答；`你好` 不会命中工具断点。
 
+#### 1.1 一轮对话的完整流程（真实 API）
+
+**用途：**这一节与上面的模拟 API 观察点一一对应，但模型请求会发到 `.env` 配置的真实端点并消耗额度。
+默认长期记忆开关为关闭，因此普通回答完成后不会再发起记忆抽取请求；历史压缩仍独立生效。
+
+**启动前检查：**在 WSL 的 `learncc` 环境中打开 Remote-WSL 窗口，确认项目根目录存在 `.env`，并只检查密钥是否存在，
+不要把密钥打印到终端或调试控制台。`.env` 由 [core.py:29](../src/agent_harness/core.py#L29) 自动加载，
+会覆盖 `launch.json` 中同名的 `env` 值。
+
+```sh
+cd /mnt/d/01dpan/01project/life/learncc/agent-harness
+test -n "${ANTHROPIC_API_KEY:-${OPENAI_API_KEY:-}}" \
+  && echo "API key is configured" \
+  || echo "API key is missing"
+```
+
+默认 Anthropic Messages 协议至少需要 `ANTHROPIC_API_KEY` 和 `MODEL_ID`；如果使用兼容服务，
+再设置 `ANTHROPIC_BASE_URL`。若使用 Responses 协议，设置 `LLM_API=responses`，并配置
+`OPENAI_BASE_URL`（或完整的 `LLM_RESPONSES_URL`）和 `OPENAI_API_KEY`；缺少后者时会回退到
+`ANTHROPIC_API_KEY`。协议和端点规则见 [llm_client.py:34](../src/agent_harness/providers/llm_client.py#L34)。
+首次调试建议明确写入 `AGENT_MEMORY_ENABLED=0`，避免把一次调试对话写入长期记忆。
+
+**launch 配置：**选择「Agent 交互（真实 API）」，入口是 `agent_harness` 模块，终端使用
+`integratedTerminal`。不要选择「Agent 交互（模拟 API，离线）」，也不要在真实 API 配置中注入
+`scripts/debug_chat.py` 的 fake client。按 F5 后等待 `agent-harness >>`，再在集成终端输入 `你好`。
+
+**启动阶段断点：**首次只设置下面三个断点，确认配置后再继续；查看 `core.client` 时只看客户端类型，
+不要展开可能包含认证信息的内部字段。
+
+| 顺序 | 断点 | 看什么 |
+| --- | --- | --- |
+| 1 | [core.py:29](../src/agent_harness/core.py#L29) | `.env` 加载入口；确认断点命中后按 F10，继续到客户端初始化 |
+| 2 | [core.py:39](../src/agent_harness/core.py#L39) | `client` 创建；默认应为 Anthropic SDK 客户端，`LLM_API=responses` 时应为 `ResponsesClient` |
+| 3 | [core.py:40](../src/agent_harness/core.py#L40) | `MODEL` 已从 `MODEL_ID` 读取；不要在 Variables 面板展开环境变量集合 |
+
+**输入“你好”的真实请求路径：**断点按下面顺序命中。网络等待期间不要反复按 F10，按 F5 交给
+网络请求继续；如果需要停止，使用 CLI 的 Ctrl+C 或调试器停止按钮。
+
+| 顺序 | 断点 | 看什么 |
+| --- | --- | --- |
+| 1 | [cli.py:217](../src/agent_harness/frontends/cli.py#L217) | 输入已提交，`text == "你好"`；CLI 将请求交给共享运行时 |
+| 2 | [interactive_runtime.py:276](../src/agent_harness/runtime/interactive_runtime.py#L276) | 工作线程调用 `host.agent_loop`；当前回合已经进入真实执行路径 |
+| 3 | [host.py:343](../src/agent_harness/host.py#L343) | 构造本轮 `RuntimeContext`；`memory_catalog` 和 `memories` 通常为空 |
+| 4 | [host.py:354](../src/agent_harness/host.py#L354) | `call_llm` 即将发起请求；检查 `state.current_model`、`context`、`tools` 和 `messages`，不要复制完整请求到日志 |
+| 5 | [host.py:255](../src/agent_harness/host.py#L255) | Lead 使用流式入口 `stream_message`；普通 CLI 回合会走这个分支 |
+| 6 | [host.py:242](../src/agent_harness/host.py#L242) | `on_text` 收到真实模型文本增量；不要对每个增量逐步执行，按 F5 查看最终输出即可 |
+| 7 | [host.py:405](../src/agent_harness/host.py#L405) | 完整响应已回填历史且没有工具调用；继续后会执行收尾 |
+| 8 | [host.py:440](../src/agent_harness/host.py#L440) | 调用记忆收尾；`AGENT_MEMORY_ENABLED=0` 时立即跳过，不会追加模型请求 |
+| 9 | [host.py:445](../src/agent_harness/host.py#L445) | 本轮返回 `completed`；终端显示完整回答并回到提示符 |
+
+**按协议查看网络边界：**不要进入第三方 SDK 的内部实现；只在项目自己的适配层观察请求和响应。
+
+- **Anthropic Messages（默认）：**在 [llm_client.py:499](../src/agent_harness/providers/llm_client.py#L499)
+  观察 `client.messages.stream(**request)` 的调用边界。请求体由 SDK 发送，调试器里只查看
+  `request` 的模型、消息数量和工具数量，不展开客户端认证字段。
+- **Responses API：**在 [llm_client.py:491](../src/agent_harness/providers/llm_client.py#L491)
+  确认进入适配器，在 [llm_client.py:410](../src/agent_harness/providers/llm_client.py#L410)
+  查看转换后的流式请求，在 [llm_client.py:418](../src/agent_harness/providers/llm_client.py#L418)
+  查看网络边界；收到文本事件时命中 [llm_client.py:421](../src/agent_harness/providers/llm_client.py#L421)，
+  完成事件时命中 [llm_client.py:428](../src/agent_harness/providers/llm_client.py#L428)。
+
+**预期结果：**输入“你好”通常只产生一次 Lead 模型请求；若触发重试、输出续写、目标检查或工具调用，
+请求次数会增加。流式文本先通过 `on_text` 显示，完整响应确认后才写入会话历史。退出后可在
+`~/.agent-harness/sessions/` 查看会话文件；运行时目录仍位于启动目录。真实请求失败时，优先查看
+终端中的 HTTP 状态、端点和模型名，不要输出 API key；重试与降级由 [host.py:265](../src/agent_harness/host.py#L265)
+统一处理。
+
+**安全收尾：**按 `q` 或 Ctrl+D 退出，确认回到 shell 后再按 Shift+F5 停止调试。若测试使用了临时的
+`.env`，调试结束后恢复原配置；不要提交 `.env`、会话文件或包含真实请求内容的调试日志。
+
 #### 2. 上下文如何刷新
 
 这里的“上下文”特指 **每次主模型请求前构造的 `RuntimeContext` 快照**，不是全部对话历史。
