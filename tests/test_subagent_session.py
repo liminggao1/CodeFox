@@ -1,5 +1,10 @@
 """Persistent execution is testable without waiting for a real thread."""
 
+import agent_harness.workspace.tasks as tasks
+import agent_harness.core as core
+import agent_harness.agents.subagent as subagent_runtime
+
+
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +13,7 @@ import pytest
 @pytest.mark.parametrize("fail", [False, True, "truncated_text", "truncated_tool"])
 def test_subagent_completion_and_failure_release_assignment(host_factory, monkeypatch, fail):
     host = host_factory()
-    task = host.tasks.create_task("Session task")
+    task = tasks.create_task("Session task")
     calls = []
 
     def create(**kwargs):
@@ -28,20 +33,20 @@ def test_subagent_completion_and_failure_release_assignment(host_factory, monkey
             )])
         return SimpleNamespace(content=[SimpleNamespace(type="text", text="Finished")])
 
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
-    monkeypatch.setattr(host.subagent.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    monkeypatch.setattr(subagent_runtime.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
 
     def shutdown(name, timeout=None):
-        host.subagent.run_request_shutdown(name)
-        return host.subagent.BUS.read_inbox(name)
+        subagent_runtime.run_request_shutdown(name).content
+        return subagent_runtime.BUS.read_inbox(name)
 
-    monkeypatch.setattr(host.subagent.BUS, "wait_for_messages", shutdown)
-    host.subagent.spawn_subagent("alice", "Finish the task", "persistent", role="tester", task_id=task.id)
+    monkeypatch.setattr(subagent_runtime.BUS, "wait_for_messages", shutdown)
+    subagent_runtime.spawn_subagent("alice", "Finish the task", "persistent", role="tester", task_id=task.id)
 
-    assert "alice" not in host.tasks.assignments
-    assert "alice" not in host.subagent.active_subagents
-    assert host.tasks.load_task(task.id).status == ("pending" if fail else "completed")
-    inbox = host.subagent.BUS.read_inbox("lead")
+    assert "alice" not in tasks.assignments
+    assert "alice" not in subagent_runtime.active_subagents
+    assert tasks.load_task(task.id).status == ("pending" if fail else "completed")
+    inbox = subagent_runtime.BUS.read_inbox("lead")
     assert any(msg["type"] == ("error" if fail else "result") for msg in inbox)
     if fail:
         assert not any(msg["type"] == "result" for msg in inbox)

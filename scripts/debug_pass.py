@@ -86,32 +86,46 @@ def run_git(*args: str, cwd: Path):
 def worktree_child() -> int:
     """在独立进程中执行 worktree 流程，此时 cwd 是 Git 仓库。"""
     import agent_harness.host as host
+    from agent_harness.runtime import tool_execution
 
+
+    import agent_harness.workspace.tasks as tasks
+    import agent_harness.workspace.task_worktrees as task_worktrees
+    import agent_harness.registrations as registrations
+    import agent_harness.core as core
+    import agent_harness.tools.file_tools as file_tools
+    import agent_harness.workflows.workflow_runtime as workflow_runtime
+    import agent_harness.agents.subagent as subagent_runtime
     host.initialize_runtime()
     repo = Path.cwd()
-    task = host.create_task("worktree debug")
-    assert host.create_worktree("dbg", task.id).startswith("Worktree"), "create failed"
-    assert "Claimed" in host.claim_task(task.id, owner="agent")
+    task = tasks.create_task("worktree debug")
+    assert task_worktrees.create_worktree("dbg", task.id).startswith("Worktree"), "create failed"
+    assert "Claimed" in tasks.claim_task(task.id, owner="agent")
     bound = (repo / ".worktrees" / "dbg").resolve()
-    cwd, error = host.task_worktree_cwd(host.load_task(task.id))
+    cwd, error = tasks.task_worktree_cwd(tasks.load_task(task.id))
     assert error is None and cwd == bound, (cwd, error)
     (bound / "b.txt").write_text("work done\n", encoding="utf-8")
     run_git("add", "-A", cwd=bound)
     run_git("commit", "-qm", "work in worktree", cwd=bound)
     # 任务仍在进行时不允许移除 worktree，必须先完成任务。
-    assert "Error" in host.remove_worktree("dbg", discard_changes=True)
-    assert "Completed" in host.complete_task(task.id, owner="agent")
-    assert host.BUILTIN_HANDLERS["remove_worktree"](name="dbg").startswith("Worktree")
-    assert "agent" not in host.assignments
-    assert host.load_task(task.id).worktree is None
-    assert host.assignment_cwd("agent") == repo
+    try:
+        task_worktrees.remove_worktree("dbg", discard_changes=True)
+    except ValueError as exc:
+        assert "Error" in str(exc)
+    else:
+        raise AssertionError("active task worktree removal must be rejected")
+    assert "Completed" in tasks.complete_task(task.id, owner="agent")
+    assert registrations.BUILTIN_HANDLERS["remove_worktree"](name="dbg").content.startswith("Worktree")
+    assert "agent" not in tasks.assignments
+    assert tasks.load_task(task.id).worktree is None
+    assert tasks.assignment_cwd("agent") == repo
     listing = run_git("worktree", "list", cwd=repo).stdout
     assert ".worktrees/dbg" not in listing, listing
     print("WORKTREE FLOW OK")
     return 0
 
 
-def main() -> int:
+def _main() -> int:
     if "--worktree-child" in sys.argv:
         return worktree_child()
 
@@ -120,8 +134,18 @@ def main() -> int:
     os.chdir(workdir)
 
     import agent_harness.host as host
+    from agent_harness.runtime import tool_execution
+
+    import agent_harness.workspace.tasks as tasks
+    import agent_harness.workspace.task_worktrees as task_worktrees
+    import agent_harness.registrations as registrations
+    import agent_harness.core as core
+    import agent_harness.tools.file_tools as file_tools
+    import agent_harness.workflows.workflow_runtime as workflow_runtime
+    import agent_harness.agents.subagent as subagent_runtime
     from agent_harness.agents import goal as goal_module
 
+    core.WORKDIR = workdir
     host.initialize_runtime()
     host.remember_after_turn = lambda messages: None  # 保持记忆功能离线
 
@@ -140,38 +164,38 @@ def main() -> int:
             tool_response("write_file", {"path": "hello.txt", "content": "hi from agent\n"}),
             text_response("Wrote the file."),
         ])
-        host.core.client = client
+        core.client = client
         messages = [{"role": "user", "content": "write hello.txt"}]
         host.agent_loop(messages, "write hello.txt")
         assert (workdir / "hello.txt").read_text(encoding="utf-8") == "hi from agent\n"
         assert len(client.calls) == 2, f"expected 2 model calls, got {len(client.calls)}"
-        assert client.calls[0]["model"] == host.core.MODEL
+        assert client.calls[0]["model"] == core.MODEL
         assert messages[-1]["role"] == "assistant"
         return "tool round-trip, 2 model calls"
 
     def t_edit_guard():
         (workdir / "e.txt").write_text("alpha beta\n", encoding="utf-8")
         _, handlers = host.assemble_tool_pool()
-        out = host.call_tool_handler(
+        out = tool_execution.call_tool_handler(
             handlers["edit_file"],
             {"path": "e.txt", "old_text": "nope", "new_text": "x"},
             "edit_file",
-        )
+        ).content
         assert (workdir / "e.txt").read_text(encoding="utf-8") == "alpha beta\n", "file changed"
         assert "error" in str(out).lower(), out
-        host.call_tool_handler(
+        tool_execution.call_tool_handler(
             handlers["edit_file"],
             {"path": "e.txt", "old_text": "beta", "new_text": "gamma"},
             "edit_file",
-        )
+        ).content
         assert (workdir / "e.txt").read_text(encoding="utf-8") == "alpha gamma\n"
         return "mismatch refused, then applied"
 
     def t_escape():
         _, handlers = host.assemble_tool_pool()
-        out = host.call_tool_handler(
+        out = tool_execution.call_tool_handler(
             handlers["read_file"], {"path": "../../../etc/passwd"}, "read_file"
-        )
+        ).content
         assert "Error" in str(out), out
         return "path outside workdir blocked"
 
@@ -187,7 +211,7 @@ def main() -> int:
                 return goal_module.GoalEvaluation(True, "tests pass")
 
         client = FakeClient([text_response("Done."), text_response("Verified.")])
-        host.core.client = client
+        core.client = client
         host.GOAL = goal_module.GoalController(evaluator=Evaluator())
         host.GOAL.set_goal("tests pass")
         messages = [{"role": "user", "content": "go"}]
@@ -199,12 +223,12 @@ def main() -> int:
         return "block -> continue -> allow -> cleared"
 
     def t_tasks():
-        host.assignments.clear()
-        task = host.create_task("debug task")
-        assert "Claimed" in host.claim_task(task.id, owner="alice")
-        assert "Completed" in host.complete_task(task.id, owner="alice")
-        assert host.release_completed_assignment("alice") is True
-        assert "alice" not in host.assignments
+        tasks.assignments.clear()
+        task = tasks.create_task("debug task")
+        assert "Claimed" in tasks.claim_task(task.id, owner="alice")
+        assert "Completed" in tasks.complete_task(task.id, owner="alice")
+        assert tasks.release_completed_assignment("alice") is True
+        assert "alice" not in tasks.assignments
         return "create/claim/complete/release"
 
     def t_workflow():
@@ -222,7 +246,7 @@ def main() -> int:
         assert resumed.returncode == 0, resumed.stderr
         assert "status=completed  agents=0  tokens=0" in resumed.stdout, resumed.stdout
         assert (workdir / ".runtime").is_dir()
-        wf = host.workflow_runtime
+        wf = workflow_runtime
         original_factory = wf.RUNNER_FACTORY
         async def write_step(ctx, args):
             return await ctx.agent("Write workflow-child.txt", label="debug write")
@@ -234,11 +258,11 @@ def main() -> int:
         wf.RUNNER_FACTORY = lambda: wf.SubagentRunner(client, "debug-model")
         try:
             handler = host.assemble_tool_pool()[1]["Workflow"]
-            out = json.loads(handler(name="debug-write"))
-            replay = json.loads(handler(name="debug-write", resume_from_run_id=out["task"]["runId"]))
+            out = json.loads(handler(name="debug-write").content)
+            replay = json.loads(handler(name="debug-write", resume_from_run_id=out["task"]["runId"]).content)
             assert out["task"]["status"] == "completed", out
             assert replay["task"]["usage"] == {"agents": 0, "tokens": 0}, replay
-            assert len(client.calls) == 2 and not host.active_subagents
+            assert len(client.calls) == 2 and not subagent_runtime.active_subagents
             assert (workdir / "workflow-child.txt").read_text() == "saved"
         finally:
             wf.RUNNER_FACTORY = original_factory
@@ -255,39 +279,39 @@ def main() -> int:
                 finally:
                     done.set()
             return original_thread(target=run, **kwargs)
-        host.subagent.threading.Thread = thread_factory
-        host.core.client = FakeClient([
+        subagent_runtime.threading.Thread = thread_factory
+        core.client = FakeClient([
             text_response("Investigation complete."),
             tool_response("write_file", {"path": "child.txt", "content": "child result"}),
             text_response("Persistent work complete."),
         ])
         try:
-            create = host.BUILTIN_HANDLERS["spawn_subagent"]
-            once = json.loads(create(name="scout", prompt="Inspect", mode="once"))
-            assert once["status"] == "completed" and "scout" not in host.active_subagents
-            started = json.loads(create(name="worker", prompt="Write child.txt", mode="persistent"))
+            create = registrations.BUILTIN_HANDLERS["spawn_subagent"]
+            once = json.loads(create(name="scout", prompt="Inspect", mode="once").content)
+            assert once["status"] == "completed" and "scout" not in subagent_runtime.active_subagents
+            started = json.loads(create(name="worker", prompt="Write child.txt", mode="persistent").content)
             assert started["status"] == "started"
             events = []
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline and not any(
                 message["type"] == "idle_notification" for message in events
             ):
-                events.extend(host.BUS.wait_for_messages("lead", deadline - time.monotonic()))
+                events.extend(subagent_runtime.BUS.wait_for_messages("lead", deadline - time.monotonic()))
             assert any(message["type"] == "result" for message in events), events
             assert any(message["type"] == "idle_notification" for message in events), events
             assert (workdir / "child.txt").read_text(encoding="utf-8") == "child result"
-            assert host.active_subagents["worker"].status == "idle"
-            host.run_request_shutdown("worker")
+            assert subagent_runtime.active_subagents["worker"].status == "idle"
+            subagent_runtime.run_request_shutdown("worker").content
             assert done.wait(3), "child failed to stop"
-            assert "worker" not in host.active_subagents
+            assert "worker" not in subagent_runtime.active_subagents
             assert any(message["type"] == "shutdown_response"
-                       for message in host.consume_lead_inbox()), "no shutdown acknowledgement"
+                       for message in subagent_runtime.consume_lead_inbox()), "no shutdown acknowledgement"
             return "once result; persistent start/write/events/shutdown"
         finally:
-            if "worker" in host.active_subagents:
-                host.run_request_shutdown("worker")
+            if "worker" in subagent_runtime.active_subagents:
+                subagent_runtime.run_request_shutdown("worker").content
                 done.wait(3)
-            host.subagent.threading.Thread = original_thread
+            subagent_runtime.threading.Thread = original_thread
 
     def t_worktree():
         repo = workdir / "gitrepo"
@@ -323,6 +347,14 @@ def main() -> int:
         print(f"[{status}] {name} :: {detail}")
     print(f"\n{len(RESULTS) - failures}/{len(RESULTS)} passed")
     return failures
+
+
+def main() -> int:
+    sys.path.insert(0, str(SRC_DIR))
+    from agent_harness.runtime.lead_context import LeadContext, lead_context_scope
+    from agent_harness.workspace import tasks
+    with lead_context_scope(LeadContext(tasks.task_lock)):
+        return _main()
 
 
 if __name__ == "__main__":

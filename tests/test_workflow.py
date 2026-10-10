@@ -5,6 +5,11 @@ Workflow 工具属于 host 工具池，因此这些用例检查真实工具池�
 
 from __future__ import annotations
 
+import agent_harness.registrations as registrations
+import agent_harness.workflows.workflow_runtime as workflow_runtime
+import agent_harness.core as core
+
+
 import asyncio
 import json
 import multiprocessing
@@ -982,9 +987,9 @@ def test_host_tool_pool_ships_the_workflow_tool(host_factory) -> None:
     tools, handlers = host.assemble_tool_pool()
     names = [tool["name"] for tool in tools]
 
-    assert names == [tool["name"] for tool in host.BUILTIN_TOOLS] + ["Workflow"]
-    assert handlers["Workflow"] is host.workflow_runtime.run_workflow_sync
-    assert handlers["Workflow"](name="missing") == (
+    assert names == [tool["name"] for tool in registrations.BUILTIN_TOOLS] + ["Workflow"]
+    assert handlers["Workflow"] is workflow_runtime.run_workflow_sync
+    assert handlers["Workflow"](name="missing").content == (
         "Error: unknown workflow 'missing'"
     )
 
@@ -992,10 +997,10 @@ def test_host_tool_pool_ships_the_workflow_tool(host_factory) -> None:
 def test_default_workflow_runner_uses_current_client_and_model(host_factory, monkeypatch) -> None:
     host = host_factory()
     monkeypatch.setattr(workflow, "RUNNER_FACTORY", workflow.SubagentRunner)
-    monkeypatch.setattr(host.core, "client", object())
-    monkeypatch.setattr(host.core, "MODEL", "current-model")
-    runner = host.workflow_runtime.RUNNER_FACTORY()
+    monkeypatch.setattr(core, "client", object())
+    monkeypatch.setattr(core, "MODEL", "current-model")
+    runner = workflow_runtime.RUNNER_FACTORY()
 
     assert isinstance(runner, workflow.SubagentRunner)
-    assert runner.client is host.core.client
-    assert runner.model == host.core.MODEL
+    assert runner.client is core.client
+    assert runner.model == core.MODEL

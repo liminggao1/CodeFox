@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 
+from .tool_result import ToolResult
 from .. import core
 from .tool_registry import ToolDefinition
 from ..workspace.task_worktrees import create_worktree
@@ -36,19 +37,19 @@ class MCPClient:
         self.tools = list(tool_defs)
         self._handlers = dict(handlers)
 
-    def call_tool(self, tool_name: str, args: dict) -> str:
+    def call_tool(self, tool_name: str, args: dict) -> ToolResult:
         """按原始工具名称执行模拟 MCP 处理器。
 
         输入：tool_name 为服务器内部名称；args 为展开成关键字参数的字典。
-        返回：字符串结果；未知工具或处理器异常转换成 MCP 错误文本。
+        返回：ToolResult；正常正文标 returned，未知工具或处理器异常标 failed。
         """
         handler = self._handlers.get(tool_name)
         if not handler:
-            return f"MCP error: unknown tool '{tool_name}'"
+            return ToolResult(f"MCP error: unknown tool '{tool_name}'", "failed")
         try:
-            return str(handler(**args))
+            return ToolResult(str(handler(**args)), "returned")
         except Exception as exc:
-            return f"MCP error: {type(exc).__name__}: {exc}"
+            return ToolResult(f"MCP error: {type(exc).__name__}: {exc}", "failed")
 
 
 mcp_clients: dict[str, MCPClient] = {}
@@ -135,7 +136,7 @@ def connect_mcp(name: str) -> str:
     factory = MOCK_SERVERS.get(name)
     if not factory:
         available = ", ".join(MOCK_SERVERS)
-        return f"Unknown server '{name}'. Available: {available}"
+        raise ValueError(f"Unknown server '{name}'. Available: {available}")
     mcp_client = factory()
     mcp_clients[name] = mcp_client
     tool_names = [tool["name"] for tool in mcp_client.tools]
@@ -186,10 +187,3 @@ def discover_tools() -> list[ToolDefinition]:
 
             entries.append(ToolDefinition(schema, handler, origin, policy))
     return entries
-
-
-
-# -- Lead 的 worktree 工具 --
-
-def run_create_worktree(name: str, task_id: str) -> str:
-    return create_worktree(name, task_id)

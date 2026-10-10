@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+
+
 import os
 import sys
 import threading
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -37,36 +40,41 @@ def isolated_session_directory(tmp_path, monkeypatch):
 @pytest.fixture
 def host_factory(tmp_path, monkeypatch):
     """在 tmp_path 下重新加载 agent.host，使状态目录跟随测试目录。"""
+    contexts = ExitStack()
 
     def load(*, enable_memory=False):
         monkeypatch.chdir(tmp_path)
         _reload_host()
         import agent_harness.host as host
 
+        import agent_harness.core as core
+        import agent_harness.agents.subagent as subagent_runtime
+        import agent_harness.workspace.tasks as tasks
+        import agent_harness.tools.mcp_tools as mcp_tools
+        import agent_harness.runtime.scheduler as scheduler
+        from agent_harness.runtime.lead_context import LeadContext, lead_context_scope
         # 路径和运行时状态位于模块全局变量中；新会话不能继承上个测试的
         # 启动目录、子 agent、计划审批、任务分配或 MCP 客户端。
-        host.core.WORKDIR = tmp_path
-        monkeypatch.setattr(host.core, "MEMORY_ENABLED", enable_memory)
-        host.subagent.active_subagents.clear()
-        host.subagent.PROTOCOL.clear()
-        host.tasks.assignments.clear()
-        host.tasks.assignment_versions.clear()
-        host.tasks.lead_session_id = None
-        host.tasks.lead_worktree = None
-        host.tasks.save_lead_context = None
-        host.tasks.CURRENT_TODOS.clear()
-        host.mcp_clients.clear()
-        host.scheduler.scheduled_jobs.clear()
-        host.scheduler.cron_queue.clear()
-        host.scheduler.background_tasks.clear()
-        host.scheduler.background_results.clear()
+        core.WORKDIR = tmp_path
+        monkeypatch.setattr(core, "MEMORY_ENABLED", enable_memory)
+        subagent_runtime.active_subagents.clear()
+        subagent_runtime.PROTOCOL.clear()
+        tasks.assignments.clear()
+        tasks.assignment_versions.clear()
+        contexts.enter_context(lead_context_scope(LeadContext(tasks.task_lock)))
+        mcp_tools.mcp_clients.clear()
+        scheduler.scheduled_jobs.clear()
+        scheduler.cron_queue.clear()
+        scheduler.background_tasks.clear()
+        scheduler.background_results.clear()
         host.initialize_runtime()
         # 记忆提取会调用模型，测试中由用例显式控制。
         if not enable_memory:
             monkeypatch.setattr(host, "remember_after_turn", lambda messages: None)
         return host
 
-    return load
+    yield load
+    contexts.close()
 
 
 @pytest.fixture

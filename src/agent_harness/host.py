@@ -2,7 +2,7 @@
 
 本模块负责连接各功能模块。模型可用的能力分别位于 core（配置）、tasks、
 worktrees、task_worktrees、skills、prompts、file_tools、subagent、hooks、
-subagent、compaction、recovery、scheduler、mcp_tools 和 registrations。
+compaction、recovery、scheduler、mcp_tools 和 registrations；调用方直接导入所属模块。
 从 cli.py 启动。
 """
 
@@ -41,63 +41,6 @@ from .agents import goal as goal_module
 from .workflows import workflow_runtime
 from .workflows import workflow_demo
 from .runtime import interaction
-
-# Re-export names used by the CLI and source-level callers.
-from .core import (  # noqa: F401
-    CONSOLE, PROMPT, READLINE_PROMPT,
-    terminal_print,
-)
-from .workspace.tasks import (  # noqa: F401
-    CURRENT_TODOS, Task, assignment_cwd, assignment_versions, claim_task,
-    complete_task, create_task, get_task_json, list_tasks, load_task,
-    release_completed_assignment, release_assignment, save_task,
-    task_lock, task_worktree_cwd, assignments, update_task,
-)
-from .workspace.worktrees import (  # noqa: F401
-    run_git, _registered_worktrees, _registered_worktree,
-)
-from .workspace.task_worktrees import create_worktree, remove_worktree  # noqa: F401
-from .context.skills import list_skills, load_skill, SKILL_REGISTRY  # noqa: F401
-from .context.prompts import PROMPT_SECTIONS, ENVIRONMENT_PROMPT  # noqa: F401
-from .tools.file_tools import (  # noqa: F401
-    call_tool_handler, run_agent_bash, run_agent_edit, run_agent_glob,
-    run_agent_read, run_agent_write, run_bash, run_edit, run_glob, run_read,
-    run_todo_write, run_write, safe_path,
-)
-from .agents.subagent import (  # noqa: F401
-    BUS, MessageBus, RESERVED_SUBAGENT_NAMES,
-    active_subagents, consume_lead_inbox, format_subagent_events,
-    is_valid_agent_name, SubagentRecord, apply_plan_response,
-    apply_shutdown_request, send_message, submit_plan,
-    run_request_plan, run_request_shutdown,
-    run_review_plan, subagent_lock,
-)
-from .runtime.hooks import (  # noqa: F401
-    register_hook, trigger_hooks, permission_hook, log_hook, large_output_hook,
-    user_prompt_hook, stop_hook, HOOKS, DENY_LIST,
-)
-from .agents.subagent import spawn_subagent  # noqa: F401
-from .context.compaction import (  # noqa: F401
-    block_type, compact_history, estimate_size, micro_compact, snip_compact,
-    tool_result_budget, fit_tool_results, reactive_compact,
-)
-from .runtime.scheduler import (  # noqa: F401
-    collect_background_results, has_pending_background, start_runtime_services,
-    should_run_background, start_background_task, consume_cron_queue,
-    acknowledge_cron_jobs, restore_cron_jobs, cron_lock, cron_queue, CronJob,
-    schedule_job, cancel_job, run_schedule_cron, run_list_crons, run_cancel_cron,
-)
-from .tools.mcp_tools import (  # noqa: F401
-    connect_mcp, mcp_clients, MCPClient, MOCK_SERVERS,
-    normalize_mcp_name, MCP_HOST_POLICY,
-)
-from .registrations import (  # noqa: F401
-    BUILTIN_TOOLS, BUILTIN_HANDLERS, run_create_task, run_update_task,
-    run_list_tasks, run_get_task, run_claim_task, run_complete_task,
-    run_spawn_subagent, run_list_subagents, run_send_message,
-    run_connect_mcp, run_create_worktree, run_remove_worktree,
-)
-from .agents.recovery import RecoveryState  # noqa: F401
 
 def assemble_tool_pool() -> tuple[list[dict], dict]:
     """从同一个注册器快照取得模型工具描述和处理器映射。
@@ -306,7 +249,7 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
         on_usage: 接收 Lead 主模型用量的回调。
     Returns:
         TurnOutcome；历史和工具副作用保留在各自所属模块。
-    LeadTurn 负责本轮记录与收尾，工具批次复用 hooks；本循环保留
+    LeadTurn 负责本轮记录与收尾，工具批次复用权限检查与统一执行器；本循环保留
     上下文准备、模型重试/续写、goal 判定和工具迭代的显式顺序。
     """
     # 创建本轮回合对象 LeadTurn：管理本轮所有记录、状态、会话保存、token用量回调

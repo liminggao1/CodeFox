@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import agent_harness.context.compaction as compaction
+import agent_harness.core as core
+
+
 import json
 from types import SimpleNamespace
 
@@ -18,7 +22,7 @@ def tool_result(tool_id: str, text: str) -> dict:
 
 
 def test_context_thresholds_follow_the_main_budget(host_factory) -> None:
-    core = host_factory().core
+    host_factory()
 
     assert core.CONTEXT_LIMIT > 0
     assert core.COMPACT_TRIGGER == int(core.CONTEXT_LIMIT * 0.8)
@@ -36,12 +40,12 @@ def test_prepare_compacts_only_above_trigger(host_factory, monkeypatch) -> None:
         requests.append(active_request)
         return [{"role": "user", "content": "summary"}]
 
-    monkeypatch.setattr(host.compaction, "compact_history", compact_history)
-    below = [{"role": "user", "content": "x" * (host.core.COMPACT_TRIGGER - 100)}]
-    above = [{"role": "user", "content": "x" * host.core.COMPACT_TRIGGER}]
+    monkeypatch.setattr(compaction, "compact_history", compact_history)
+    below = [{"role": "user", "content": "x" * (core.COMPACT_TRIGGER - 100)}]
+    above = [{"role": "user", "content": "x" * core.COMPACT_TRIGGER}]
 
-    host.compaction.prepare_history(below, "below")
-    host.compaction.prepare_history(above, "above")
+    compaction.prepare_history(below, "below")
+    compaction.prepare_history(above, "above")
 
     assert requests == ["above"]
     assert above == [{"role": "user", "content": "summary"}]
@@ -54,21 +58,21 @@ def test_prepare_stops_below_trigger_without_forcing_target(
 
     def micro_compact(messages, target_chars):
         targets.append(target_chars)
-        return [{"role": "user", "content": "x" * (host.core.COMPACT_TRIGGER - 100)}]
+        return [{"role": "user", "content": "x" * (core.COMPACT_TRIGGER - 100)}]
 
     def unexpected(*args):
         raise AssertionError("already below the compression trigger")
 
-    monkeypatch.setattr(host.compaction, "micro_compact", micro_compact)
-    monkeypatch.setattr(host.compaction, "fit_tool_results", unexpected)
-    monkeypatch.setattr(host.compaction, "compact_history", unexpected)
-    messages = [{"role": "user", "content": "x" * host.core.COMPACT_TRIGGER}]
+    monkeypatch.setattr(compaction, "micro_compact", micro_compact)
+    monkeypatch.setattr(compaction, "fit_tool_results", unexpected)
+    monkeypatch.setattr(compaction, "compact_history", unexpected)
+    messages = [{"role": "user", "content": "x" * core.COMPACT_TRIGGER}]
 
-    host.compaction.prepare_history(messages, "go")
+    compaction.prepare_history(messages, "go")
 
-    assert targets == [host.core.COMPACT_TARGET]
-    assert host.compaction.estimate_size(messages) > host.core.COMPACT_TARGET
-    assert host.compaction.estimate_size(messages) < host.core.COMPACT_TRIGGER
+    assert targets == [core.COMPACT_TARGET]
+    assert compaction.estimate_size(messages) > core.COMPACT_TARGET
+    assert compaction.estimate_size(messages) < core.COMPACT_TRIGGER
 
 
 def test_prepare_preserves_results_below_the_pressure_limit(host_factory) -> None:
@@ -76,7 +80,7 @@ def test_prepare_preserves_results_below_the_pressure_limit(host_factory) -> Non
     messages = [{"role": "user", "content": "go"}, tool_use("t1"),
                 tool_result("t1", "x" * 500)]
 
-    result = host.compaction.prepare_history(messages, "go")
+    result = compaction.prepare_history(messages, "go")
 
     assert not result.applied and result.reason is None
     assert messages[2]["content"][0]["content"] == "x" * 500
@@ -87,14 +91,14 @@ def test_prepare_persists_oversized_result_before_trimming(host_factory) -> None
     messages = [
         {"role": "user", "content": "go"},
         tool_use("t1"),
-        tool_result("t1", "y" * (host.core.COMPACT_TRIGGER // 2 + 1000)),
+        tool_result("t1", "y" * (core.COMPACT_TRIGGER // 2 + 1000)),
         tool_use("t2"),
-        tool_result("t2", "z" * (host.core.COMPACT_TRIGGER // 2 + 1000)),
+        tool_result("t2", "z" * (core.COMPACT_TRIGGER // 2 + 1000)),
         {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
         {"role": "user", "content": "next"},
     ]
 
-    result = host.compaction.prepare_history(messages, "go")
+    result = compaction.prepare_history(messages, "go")
 
     assert result.applied and result.reason is None
     rendered = json.dumps(messages, default=str)
@@ -103,31 +107,31 @@ def test_prepare_persists_oversized_result_before_trimming(host_factory) -> None
 
 def test_tool_result_budget_persists_a_single_large_result(host_factory) -> None:
     host = host_factory()
-    output = "x" * (host.core.PERSIST_THRESHOLD + 1)
+    output = "x" * (core.PERSIST_THRESHOLD + 1)
     messages = [tool_result("large", output)]
 
-    host.compaction.tool_result_budget(messages)
+    compaction.tool_result_budget(messages)
 
     result = messages[0]["content"][0]["content"]
     assert result.startswith("<persisted-output>")
-    assert f"Preview:\n{'x' * host.core.TOOL_PREVIEW_CHARS}\n" in result
-    assert (host.core.tool_results_dir() / "large.txt").read_text(encoding="utf-8") == output
+    assert f"Preview:\n{'x' * core.TOOL_PREVIEW_CHARS}\n" in result
+    assert (core.tool_results_dir() / "large.txt").read_text(encoding="utf-8") == output
 
 
 def test_tool_result_budget_reduces_batch_below_individual_limit(host_factory) -> None:
     host = host_factory()
-    output = "x" * (host.core.PERSIST_THRESHOLD - 1000)
+    output = "x" * (core.PERSIST_THRESHOLD - 1000)
     messages = [{"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": f"t{index}", "content": output}
         for index in range(3)
     ]}]
 
-    host.compaction.tool_result_budget(messages)
+    compaction.tool_result_budget(messages)
 
     results = [block["content"] for block in messages[0]["content"]]
     assert results[0].startswith("<persisted-output>")
     assert results[1:] == [output, output]
-    assert sum(map(len, results)) <= host.core.TOOL_RESULT_BUDGET
+    assert sum(map(len, results)) <= core.TOOL_RESULT_BUDGET
 
 
 def test_micro_compact_keeps_unseen_tool_result_batch(host_factory) -> None:
@@ -147,7 +151,7 @@ def test_micro_compact_keeps_unseen_tool_result_batch(host_factory) -> None:
         tool_result("t5", "e" * 5000),
     ]
 
-    host.compaction.micro_compact(messages, target_chars=1)
+    compaction.micro_compact(messages, target_chars=1)
 
     # 模型尚未处理的结果保持原文。
     assert messages[5]["content"][0]["content"] == "b" * 5000
@@ -170,9 +174,9 @@ def test_micro_compact_releases_batch_after_model_consumes_it(
             {"role": "assistant", "content": [{"type": "text", "text": "seen"}]}
         )
 
-    host.compaction.micro_compact(messages, target_chars=1)
+    compaction.micro_compact(messages, target_chars=1)
 
-    saved = {path.name for path in host.core.tool_results_dir().glob("*.txt")}
+    saved = {path.name for path in core.tool_results_dir().glob("*.txt")}
     assert {"t0.txt", "t1.txt", "t2.txt"} <= saved
     # 除最新结果外，其余内容都已移到磁盘。
     for result_index in (2, 5):
@@ -189,7 +193,7 @@ def test_snip_compact_keeps_head_and_tail_tool_pairs(host_factory) -> None:
         messages.append(tool_use(f"t{index}"))
         messages.append(tool_result(f"t{index}", f"r{index}"))
 
-    compacted = host.compaction.snip_compact(messages, max_messages=20)
+    compacted = compaction.snip_compact(messages, max_messages=20)
 
     assert len(compacted) == 20
     assert compacted[0] == {"role": "user", "content": "go"}
@@ -208,10 +212,10 @@ def test_snip_compact_archives_the_complete_history(host_factory) -> None:
         messages.append(tool_use(f"t{index}"))
         messages.append(tool_result(f"t{index}", f"r{index}"))
 
-    before = set(host.core.transcript_dir().glob("transcript_*.jsonl"))
-    compacted = host.compaction.snip_compact(messages, max_messages=20)
+    before = set(core.transcript_dir().glob("transcript_*.jsonl"))
+    compacted = compaction.snip_compact(messages, max_messages=20)
 
-    written = set(host.core.transcript_dir().glob("transcript_*.jsonl")) - before
+    written = set(core.transcript_dir().glob("transcript_*.jsonl")) - before
     assert len(written) == 1
     lines = written.pop().read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 61
@@ -225,8 +229,8 @@ def test_reactive_compact_keeps_the_tail_tool_pair(host_factory, monkeypatch) ->
         messages.append(tool_use(f"t{index}"))
         messages.append(tool_result(f"t{index}", f"r{index}"))
 
-    monkeypatch.setattr(host.compaction, "summarize_history", lambda _: "summary")
-    result = host.compaction.reactive_compact(messages, "go")
+    monkeypatch.setattr(compaction, "summarize_history", lambda _: "summary")
+    result = compaction.reactive_compact(messages, "go")
 
     assert result.applied
     assert messages[-1]["content"][0]["type"] == "tool_result"
@@ -243,14 +247,14 @@ def test_reactive_compact_summarizes_only_old_history(host_factory) -> None:
         from types import SimpleNamespace
         return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="summary")])
 
-    host.core.client = SimpleNamespace(
+    core.client = SimpleNamespace(
         messages=SimpleNamespace(create=respond))
     messages = [{"role": "user", "content": "old"}]
     for index in range(8):
         messages.append(tool_use(f"t{index}"))
         messages.append(tool_result(f"t{index}", f"r{index}"))
 
-    host.compaction.reactive_compact(messages, "go")
+    compaction.reactive_compact(messages, "go")
 
     summarized = json.dumps(seen["messages"], default=str)
     assert "r7" not in summarized
@@ -259,7 +263,7 @@ def test_reactive_compact_summarizes_only_old_history(host_factory) -> None:
 
 def test_manual_compact_runs_once_per_user_turn(host_factory, monkeypatch) -> None:
     host = host_factory()
-    monkeypatch.setattr(host.compaction, "summarize_history", lambda _: "summary")
+    monkeypatch.setattr(compaction, "summarize_history", lambda _: "summary")
 
     def compact_response(tool_id: str):
         return SimpleNamespace(
@@ -288,19 +292,19 @@ def test_manual_compact_runs_once_per_user_turn(host_factory, monkeypatch) -> No
         offered_tools.append({tool["name"] for tool in kwargs["tools"]})
         return responses.pop(0)
 
-    host.core.client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    core.client = SimpleNamespace(messages=SimpleNamespace(create=create))
     messages = [{"role": "user", "content": "Compress the context"}]
 
     host.agent_loop(messages, "Compress the context")
 
-    assert len(list(host.core.transcript_dir().glob("transcript_*.jsonl"))) == 1
+    assert len(list(core.transcript_dir().glob("transcript_*.jsonl"))) == 1
     assert "Compress the context" in messages[0]["content"]
     assert messages[-1]["content"][0].text == "done"
 
     messages.append({"role": "user", "content": "Compress again"})
     host.agent_loop(messages, "Compress again")
 
-    assert len(list(host.core.transcript_dir().glob("transcript_*.jsonl"))) == 2
+    assert len(list(core.transcript_dir().glob("transcript_*.jsonl"))) == 2
     assert ["compact" in names for names in offered_tools] == [
         True, False, False, True, False,
     ]
@@ -316,8 +320,8 @@ def test_manual_compact_handles_duplicate_calls_in_one_batch(
         summaries.append((list(messages), active_request))
         return [{"role": "user", "content": "summary"}]
 
-    monkeypatch.setattr(host.compaction, "compact_history", compact_history)
-    manual = host.compaction.ManualCompaction()
+    monkeypatch.setattr(compaction, "compact_history", compact_history)
+    manual = compaction.ManualCompaction()
     tools = [{"name": "compact"}, {"name": "bash"}]
     assert manual.available_tools(tools) == tools
     assert manual.handle_tool_use(SimpleNamespace(name="bash", id="other")) is None

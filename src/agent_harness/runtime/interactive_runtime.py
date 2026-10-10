@@ -12,7 +12,12 @@ from pathlib import Path
 from .. import core
 from ..agents import goal
 from .. import host
+from ..workspace import tasks
+from ..agents import subagent as subagent_runtime
+from ..tools import file_tools, mcp_tools
+from . import hooks, scheduler
 from . import interaction
+from .lead_context import LeadContext
 from .local_commands import find_command
 from .session_store import InteractiveSession, SessionError, SessionStore, json_value
 
@@ -20,6 +25,7 @@ from .session_store import InteractiveSession, SessionError, SessionStore, json_
 class InteractiveRuntime:
     def __init__(self, *, channel=None, store=None):
         self.channel = channel or interaction.InteractionChannel()
+        self.lead_context = LeadContext(tasks.task_lock)
         self.channel.set_projector(self._display_record)
         self.session = InteractiveSession(store or SessionStore(core.WORKDIR), [],
                                           lambda: host.GOAL, core.terminal_print,
@@ -40,13 +46,24 @@ class InteractiveRuntime:
         self._turn_usage = dict(self._usage)
 
     def _session_context(self):
-        with host.tasks.task_lock:
-            host.tasks.lead_session_id = self.session.session_id
-            return host.tasks.lead_context()
+        with tasks.task_lock:
+            return self.lead_context.snapshot(tasks.active_lead_task_id())
+
+    def _record(self, *args, **kwargs):
+        # 首次创建明确激活归属，保存只读取状态，不暗中修改 session_id。
+        if self.session.snapshot is None:
+            snapshot = self.session.store.create()
+            snapshot["messages"] = json_value(self.session.history)
+            with tasks.task_lock:
+                self.lead_context.activate(snapshot["id"], snapshot)
+                tasks.activate_lead_assignment()
+                self.session.activate(snapshot)
+        return self.session.record(*args, **kwargs)
 
     def _context(self, **kwargs):
         return interaction.ExecutionContext(self.channel, self.session.session_id,
                                               self._generation, checkpoint=self._checkpoint,
+                                              lead_context=self.lead_context,
                                               **kwargs)
 
     def start(self):
@@ -99,12 +116,11 @@ class InteractiveRuntime:
 
     def _snapshot(self, context):
         # All calls run on the execution thread while agent_lock is held.
-        with host.tasks.task_lock:
-            todos = json_value(host.tasks.CURRENT_TODOS)
+        todos = self.lead_context.todos
         session_snapshot = self.session.snapshot or {}
         context.publish("state_snapshot", history=json_value(self.session.history),
                         goal=host.GOAL.snapshot(), todos=todos,
-                        subagents=host.subagent.list_subagents(), model=core.MODEL,
+                        subagents=subagent_runtime.list_subagents(), model=core.MODEL,
                         busy=self._busy, closing=self._closing,
                         lead_main_model_usage=dict(self._usage),
                         workdir=session_snapshot.get("workdir"),
@@ -115,9 +131,9 @@ class InteractiveRuntime:
     def _background_ready(self):
         if self.session.session_id is None:
             return False
-        with host.scheduler.cron_lock:
-            fired = bool(host.scheduler.cron_queue)
-        return fired or host.subagent.BUS.peek("lead") or host.scheduler.has_pending_background()
+        with scheduler.cron_lock:
+            fired = bool(scheduler.cron_queue)
+        return fired or subagent_runtime.BUS.peek("lead") or scheduler.has_pending_background()
 
     def _record_usage(self, usage):
         for key in ("input_tokens", "output_tokens"):
@@ -175,10 +191,10 @@ class InteractiveRuntime:
     def _run(self):
         try:
             with host.agent_lock, interaction.execution_context(self._context()):
-                host.tasks.activate_lead_context(None, {"worktree": None, "todos": []})
-                host.tasks.save_lead_context = self._checkpoint
-                host.start_runtime_services()
-                host.subagent.consume_lead_inbox(route_protocol=False)
+                self.lead_context.activate(None, {"worktree": None, "todos": []})
+                tasks.activate_lead_assignment()
+                scheduler.start_runtime_services()
+                subagent_runtime.consume_lead_inbox(route_protocol=False)
                 self._snapshot(self._context())
             while True:
                 self._wake.wait(core.ASYNC_EVENT_POLL_SECONDS)
@@ -246,19 +262,19 @@ class InteractiveRuntime:
                                             origin="background" if kind == "background" else "frontend",
                                             stop_event=self._stop)
                 with interaction.execution_context(context):
+                    self.session.finish_pending_tools()
                     if kind == "background":
-                        inbox = host.subagent.consume_lead_inbox(route_protocol=True)
+                        inbox = subagent_runtime.consume_lead_inbox(route_protocol=True)
                         if inbox:
-                            self.session.history.append({"role": "user", "content": host.subagent.format_subagent_events(inbox)})
-                        with host.scheduler.cron_lock:
-                            fired = list(host.scheduler.cron_queue)
+                            self.session.history.append({"role": "user", "content": subagent_runtime.format_subagent_events(inbox)})
+                        with scheduler.cron_lock:
+                            fired = list(scheduler.cron_queue)
                         if fired:
                             text = "\n".join(f"Run scheduled task: {job.prompt}" for job in fired)
-                        self.session.record("background_notification", text, save=False)
+                        self._record("background_notification", text, save=False)
                     else:
-                        self.session.finish_pending_tools()
                         self.session.history.append({"role": "user", "content": text})
-                        self.session.record("user_input", text, save=False)
+                        self._record("user_input", text, save=False)
                     # The first user message may have created the durable session ID.
                     context = replace(context, session_id=self.session.session_id)
                 with interaction.execution_context(context):
@@ -268,7 +284,7 @@ class InteractiveRuntime:
                                         turn_id=context.turn_id, recorded=True)
                     if kind != "background":
                         context.publish("user_message", text=text, submission_id=submission_id)
-                        host.trigger_hooks("UserPromptSubmit", text)
+                        hooks.trigger_hooks("UserPromptSubmit", text)
                     context.publish("turn_started", submission_id=submission_id)
                     self._checkpoint()
                     self._snapshot(context)
@@ -283,7 +299,7 @@ class InteractiveRuntime:
                         self._stop = None
                     self._checkpoint(poll=True)
                     summary = self._turn_summary(context, outcome)
-                    self.session.record("turn_complete", text, outcome.status, save=False)
+                    self._record("turn_complete", text, outcome.status, save=False)
                     with self._lifecycle:
                         self._busy = False
                     self._snapshot(context)
@@ -314,13 +330,13 @@ class InteractiveRuntime:
             argument = text[5:].strip()
             if not argument:
                 self._command_data = {"text": host.GOAL.status(0)}
-                self.session.record("goal_query", text, save=False)
+                self._record("goal_query", text, save=False)
             elif argument.lower() in goal.CLEAR_ALIASES:
                 self._command_data = {"text": host.GOAL.clear()}
-                self.session.record("goal_clear", text, save=False)
+                self._record("goal_clear", text, save=False)
             else:
                 host.GOAL.set_goal(argument)
-                self.session.record("goal_set", argument, save=False)
+                self._record("goal_set", argument, save=False)
                 self._command_data = {"text": f"Goal set: {argument}"}
                 return argument
         elif command == "/resume" and len(parts) == 1:
@@ -351,13 +367,13 @@ class InteractiveRuntime:
         root = Path(snapshot["workdir"]).resolve()
         if not root.is_dir():
             raise SessionError(f"Session startup directory does not exist: {root}")
-        if (host.scheduler.has_background_tasks() or host.subagent.list_subagents()
-                or host.subagent.BUS.peek("lead")):
+        if (scheduler.has_background_tasks() or subagent_runtime.list_subagents()
+                or subagent_runtime.BUS.peek("lead")):
             raise SessionError("Background work or results remain; finish them and retry /resume")
-        with host.scheduler.cron_lock:
-            if host.scheduler.cron_queue:
+        with scheduler.cron_lock:
+            if scheduler.cron_queue:
                 raise SessionError("Scheduled results remain; finish them and retry /resume")
-        assignment = host.tasks.validate_lead_context(target, snapshot, workdir=root)
+        assignment = tasks.validate_lead_context(target, snapshot, workdir=root)
         return snapshot, root, restored_goal, assignment
 
     def _resume(self, target):
@@ -367,28 +383,28 @@ class InteractiveRuntime:
         directory_changed = root != core.WORKDIR.resolve()
         # Do not join cron while holding its lock. Recheck after it has stopped.
         if directory_changed:
-            host.scheduler.stop_runtime_services()
+            scheduler.stop_runtime_services()
         try:
-            with host.scheduler.cron_lock:
-                if host.scheduler.cron_queue:
+            with scheduler.cron_lock:
+                if scheduler.cron_queue:
                     raise SessionError("Scheduled results remain; finish them and retry /resume")
                 if directory_changed:
                     os.chdir(root)
                 self._activate_resume(snapshot, root, restored_goal, assignment)
         except Exception:
             if directory_changed and core.WORKDIR.resolve() != root:
-                host.scheduler.start_runtime_services(load_jobs=False)
+                scheduler.start_runtime_services(load_jobs=False)
             raise
         with interaction.execution_context(self._context()):
             try:
-                self.session.record("resume", target, save=False)
+                self._record("resume", target, save=False)
                 saved = self._checkpoint()
                 if directory_changed:
-                    host.scheduler.clear_runtime_jobs()
+                    scheduler.clear_runtime_jobs()
                     try:
-                        host.subagent.consume_lead_inbox(route_protocol=False)
+                        subagent_runtime.consume_lead_inbox(route_protocol=False)
                     finally:
-                        host.scheduler.start_runtime_services()
+                        scheduler.start_runtime_services()
             except Exception as exc:
                 # Do not repeatedly consume the same damaged background input.
                 with self._lifecycle:
@@ -405,10 +421,12 @@ class InteractiveRuntime:
     def _activate_resume(self, snapshot, root, restored_goal, assignment):
         core.WORKDIR = root
         self.session.store.workdir = root
-        host.mcp_clients.clear()
+        mcp_tools.mcp_clients.clear()
         host.GOAL = restored_goal
-        host.tasks.activate_lead_context(snapshot["id"], snapshot, assignment)
-        self.session.activate(snapshot)
+        with tasks.task_lock:
+            self.lead_context.activate(snapshot["id"], snapshot)
+            tasks.activate_lead_assignment(assignment)
+            self.session.activate(snapshot)
         self._usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
         self._generation += 1
 
@@ -427,16 +445,26 @@ class InteractiveRuntime:
         self.channel.close_approvals()
         with host.agent_lock, interaction.execution_context(self._context()):
             saved = self._checkpoint()
-            host.scheduler.stop_runtime_services()
-            for child in host.subagent.list_subagents():
+            scheduler.stop_runtime_services()
+            for child in subagent_runtime.list_subagents():
                 if child["mode"] == "persistent":
-                    host.subagent.run_request_shutdown(child["name"])
+                    subagent_runtime.run_request_shutdown(child["name"])
             core.terminal_print("Closing background execution")
-        host.file_tools._stop_all_shell_processes()
-        host.subagent.wait_for_subagents()
-        host.scheduler.wait_for_background_tasks()
+        file_tools._stop_all_shell_processes()
+        subagent_runtime.wait_for_subagents()
+        scheduler.wait_for_background_tasks()
         with host.agent_lock, interaction.execution_context(self._context()):
-            saved = self._checkpoint()
-            host.tasks.save_lead_context = None
+            # 关闭不再请求模型，但仍结算后台真实结果、全文和待交付通知。
+            collected = True
+            try:
+                notes = scheduler.collect_background_results()
+                if notes:
+                    self.session.finish_pending_tools()
+                    self.session.history.append({"role": "user", "content": [
+                        {"type": "text", "text": note} for note in notes]})
+            except OSError as exc:
+                collected = False
+                self._context().publish("runtime_error", error=f"Could not save background results: {exc}")
+            saved = self._checkpoint() and collected
             self._context().publish("runtime_closed", saved=saved)
         self.channel.close()

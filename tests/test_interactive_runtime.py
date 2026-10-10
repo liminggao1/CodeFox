@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+
+import agent_harness.core as core
+import agent_harness.runtime.scheduler as scheduler
+import agent_harness.agents.subagent as subagent_runtime
+import agent_harness.context.compaction as compaction
+import agent_harness.context.memory_runtime as memory_runtime
+import agent_harness.workspace.tasks as tasks
+import agent_harness.workspace.task_worktrees as task_worktrees
+import agent_harness.tools.file_tools as file_tools
+import agent_harness.workspace.worktrees as worktrees
+
+
 import threading
 import time
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
+from agent_harness.runtime.lead_context import lead_context_scope
 
 import pytest
 
@@ -84,8 +97,9 @@ def runtime_factory(host_factory, monkeypatch):
     host = host_factory(enable_memory=True)
     remember = host.remember_after_turn
     monkeypatch.setattr(interactive_runtime, "host", host)
-    monkeypatch.setattr(host.core, "ASYNC_EVENT_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(core, "ASYNC_EVENT_POLL_SECONDS", 0.01)
     runtimes = []
+    contexts = ExitStack()
 
     def create(responses=None, client=None, enable_memory=False, stream=None):
         monkeypatch.setattr(host, "remember_after_turn", remember if enable_memory else lambda messages: None)
@@ -94,8 +108,9 @@ def runtime_factory(host_factory, monkeypatch):
             client = lambda **kwargs: next(values)
         messages = SimpleNamespace(create=client)
         messages.stream = stream or fake_stream_for(lambda **kwargs: messages.create(**kwargs))
-        monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=messages))
+        monkeypatch.setattr(core, "client", SimpleNamespace(messages=messages))
         runtime = interactive_runtime.InteractiveRuntime()
+        contexts.enter_context(lead_context_scope(runtime.lead_context))
         runtimes.append(runtime)
         runtime.start()
         until(runtime, "state_snapshot")
@@ -106,8 +121,9 @@ def runtime_factory(host_factory, monkeypatch):
         runtime.close()
         runtime._thread.join(timeout=5)
         assert not runtime._thread.is_alive()
-    assert host.scheduler._runtime_thread is None
-    assert not host.subagent.active_subagents
+    assert scheduler._runtime_thread is None
+    assert not subagent_runtime.active_subagents
+    contexts.close()
 
 
 def test_serial_submission_history_events_and_usage(runtime_factory):
@@ -155,9 +171,9 @@ def test_stop_waiting_approval_completes_tools_and_pauses_background(runtime_fac
     assert runtime.request_stop(request.turn_id)
     finished, events = until(runtime, "turn_finished", submission_id=submission.submission_id)
     assert finished.payload["outcome"]["status"] == "stopped"
-    assert not (host.core.WORKDIR / "unwanted").exists()
+    assert not (core.WORKDIR / "unwanted").exists()
     assert len([event for event in events if event.type == "tool_result"]) == 2
-    host.subagent.BUS.send("child", "lead", "Waiting result")
+    subagent_runtime.BUS.send("child", "lead", "Waiting result")
     assert runtime._background_paused
     assert runtime.submit("continue").status == "accepted"
     assert not runtime._background_paused
@@ -174,7 +190,7 @@ def test_close_waiting_approval_is_nonblocking_and_terminal(runtime_factory):
     closed, events = until(runtime, "runtime_closed")
     assert closed.payload["saved"]
     assert len([event for event in events if event.type == "turn_finished"]) == 1
-    assert not (host.core.WORKDIR / "unwanted").exists()
+    assert not (core.WORKDIR / "unwanted").exists()
 
 
 @pytest.mark.parametrize("mode", ["failure", "truncated"])
@@ -288,10 +304,10 @@ def test_stop_model_context_error_does_not_start_reactive_summary(runtime_factor
         assert release.wait(3)
         raise RuntimeError("context_length_exceeded")
     runtime, host = runtime_factory(client=create)
-    monkeypatch.setattr(host.compaction, "summarize_history",
+    monkeypatch.setattr(compaction, "summarize_history",
                         lambda *args, **kwargs: summaries.append(True) or "summary")
-    job = host.schedule_job("0 0 1 1 *", "deliver once", recurring=False)
-    host.scheduler._enqueue_due_job(job)
+    job = scheduler.schedule_job("0 0 1 1 *", "deliver once", recurring=False)
+    scheduler._enqueue_due_job(job)
     submission = runtime.submit("run")
     assert started.wait(2)
     turn, _ = until(runtime, "turn_started")
@@ -305,8 +321,8 @@ def test_stop_model_context_error_does_not_start_reactive_summary(runtime_factor
     assert finished.payload["outcome"]["status"] == "failed"
     assert "context_length_exceeded" in finished.payload["outcome"]["reason"]
     assert calls == [True] and summaries == []
-    assert host.scheduler.cron_queue == [job]
-    assert host.scheduler.scheduled_jobs[job.id].pending_delivery
+    assert scheduler.cron_queue == [job]
+    assert scheduler.scheduled_jobs[job.id].pending_delivery
     if operation == "close":
         until(runtime, "runtime_closed")
 
@@ -347,7 +363,7 @@ def test_stop_during_real_memory_extraction_preserves_writes_without_consolidati
                         '"description":"Preferred language","body":"Use Chinese in future sessions."}]')
     runtime, host = runtime_factory(client=create, enable_memory=True)
     consolidated = []
-    monkeypatch.setattr(host.memory_runtime, "consolidate_memories", lambda: consolidated.append(True))
+    monkeypatch.setattr(memory_runtime, "consolidate_memories", lambda: consolidated.append(True))
     submission = runtime.submit("Please remember to use Chinese in future sessions")
     assert started.wait(2)
     started_event, _ = until(runtime, "turn_started")
@@ -357,7 +373,7 @@ def test_stop_during_real_memory_extraction_preserves_writes_without_consolidati
     assert finished.payload["outcome"]["status"] == "stopped"
     assert len(calls) == 2
     assert not consolidated
-    assert host.memory_runtime.list_memory_files()[0]["name"] == "language"
+    assert memory_runtime.list_memory_files()[0]["name"] == "language"
 
 
 @pytest.mark.parametrize("boundary", ["before_model", "during_model"])
@@ -372,13 +388,13 @@ def test_stop_cron_delivery_boundary(runtime_factory, monkeypatch, boundary):
         return response()
     runtime, host = runtime_factory(client=create)
     if boundary == "before_model":
-        prepare = host.compaction.prepare_history
+        prepare = compaction.prepare_history
         def prepare_blocked(*args, **kwargs):
             block()
             return prepare(*args, **kwargs)
-        monkeypatch.setattr(host.compaction, "prepare_history", prepare_blocked)
-    job = host.schedule_job("0 0 1 1 *", "deliver once", recurring=False)
-    host.scheduler._enqueue_due_job(job)
+        monkeypatch.setattr(compaction, "prepare_history", prepare_blocked)
+    job = scheduler.schedule_job("0 0 1 1 *", "deliver once", recurring=False)
+    scheduler._enqueue_due_job(job)
     submission = runtime.submit("run")
     assert started.wait(2)
     started_event, _ = until(runtime, "turn_started")
@@ -388,20 +404,20 @@ def test_stop_cron_delivery_boundary(runtime_factory, monkeypatch, boundary):
     assert finished.payload["outcome"]["status"] == "stopped"
     assert runtime._background_paused
     # A cancelled stream has no accepted response to confirm cron delivery.
-    assert host.scheduler.cron_queue == [job]
-    assert host.scheduler.scheduled_jobs[job.id].pending_delivery
+    assert scheduler.cron_queue == [job]
+    assert scheduler.scheduled_jobs[job.id].pending_delivery
 
 
 def test_background_delivery_runs_with_noninteractive_permissions(runtime_factory):
     runtime, host = runtime_factory([response("initial"), response(tools=[tool("bash", command="touch unwanted")], stop="tool_use"), response("delivered")])
     submission = runtime.submit("run")
     until(runtime, "turn_finished", submission_id=submission.submission_id)
-    host.subagent.BUS.send("child", "lead", "Background result")
+    subagent_runtime.BUS.send("child", "lead", "Background result")
     finished, events = until(runtime, "turn_finished")
     assert finished.payload["submission_id"] is None
     assert finished.payload["outcome"]["status"] == "completed"
     assert runtime.channel.next_approval() is None
-    assert not (host.core.WORKDIR / "unwanted").exists()
+    assert not (core.WORKDIR / "unwanted").exists()
     assert "Background result" in str(runtime.session.history)
     assert "execution context" in str([event.payload for event in events if event.type == "tool_result"])
 
@@ -427,7 +443,7 @@ def test_frontend_once_inherits_approval_and_workflow_does_not(runtime_factory):
         result = workflow_runtime.SubagentRunner(client=client).run("work")
     assert result.value == "workflow done"
     assert runtime.channel.next_approval() is None
-    assert not (host.core.WORKDIR / "unwanted").exists()
+    assert not (core.WORKDIR / "unwanted").exists()
 
 
 def test_close_waits_for_owned_persistent_thread(runtime_factory):
@@ -444,14 +460,14 @@ def test_close_waits_for_owned_persistent_thread(runtime_factory):
     runtime.close()
     closed, _ = until(runtime, "runtime_closed")
     assert closed.payload["saved"]
-    assert not host.subagent.active_subagents
-    assert not host.subagent._persistent_threads
+    assert not subagent_runtime.active_subagents
+    assert not subagent_runtime._persistent_threads
 
 
 @pytest.fixture
 def session_worktree(runtime_factory):
     runtime, host = runtime_factory(client=lambda **kwargs: response())
-    root = host.core.WORKDIR
+    root = core.WORKDIR
     def git(*args):
         return subprocess.run(["git", "-c", "user.name=Test", "-c",
                                "user.email=test@example.invalid", *args], cwd=root,
@@ -463,10 +479,11 @@ def session_worktree(runtime_factory):
     submission = runtime.submit("session A")
     until(runtime, "turn_finished", submission_id=submission.submission_id)
     with host.agent_lock:
-        task = host.create_task("session A task")
-        assert host.create_worktree("feature", task.id).startswith("Worktree")
-        assert host.claim_task(task.id).startswith("Claimed")
-        host.run_todo_write([{"content": "验证中文目录", "status": "pending"}])
+        task = tasks.create_task("session A task")
+        assert task_worktrees.create_worktree("feature", task.id).startswith("Worktree")
+        assert tasks.claim_task(task.id).startswith("Claimed")
+        file_tools.run_todo_write([{"content": "验证中文目录", "status": "pending"}]).content
+        runtime._checkpoint()
     return runtime, host, task, root / ".worktrees" / "feature"
 
 
@@ -510,7 +527,7 @@ def test_resume_mailbox_error_delivers_target_state_and_command_end(runtime_fact
     runtime, host = runtime_factory(client=lambda **kwargs: response())
     submission = runtime.submit("original")
     until(runtime, "turn_finished", submission_id=submission.submission_id)
-    root = host.core.WORKDIR / "target"
+    root = core.WORKDIR / "target"
     root.mkdir()
     mailbox = root / ".mailboxes" / "lead.jsonl"
     mailbox.parent.mkdir()
@@ -524,13 +541,13 @@ def test_resume_mailbox_error_delivers_target_state_and_command_end(runtime_fact
     assert result.payload["status"] == "failed"
     assert "post-resume processing failed" in result.payload["data"]["error"]
     assert runtime.session.session_id == target["id"]
-    assert host.core.WORKDIR == root and Path.cwd() == root
+    assert core.WORKDIR == root and Path.cwd() == root
     changed = next(event for event in events if event.type == "session_changed")
     state = [event for event in events if event.type == "state_snapshot"][-1]
     assert changed.payload["records"][0]["payload"]["text"] == "target history"
     assert result.generation == changed.generation == state.generation == 2
     assert state.payload["busy"] is False
-    assert host.scheduler._runtime_thread.is_alive()
+    assert scheduler._runtime_thread.is_alive()
     # Correct the damaged input, then continue the already restored session.
     mailbox.write_text("", encoding="utf-8")
     submission = runtime.submit("continue target")
@@ -546,35 +563,37 @@ def test_resume_isolates_task_directory_and_todos(session_worktree):
     assert saved["task_id"] == task.id
     assert saved["worktree"] == "feature"
     assert saved["todos"][0]["content"] == "验证中文目录"
-    assert host.load_task(task.id).session_id == a
+    assert tasks.load_task(task.id).session_id == a
     b = runtime.session.store.create()
     b["goal"] = host.GOAL.snapshot()
     runtime.session.store.save(b)
     result, _ = resume_command(runtime, b["id"])
     assert result.payload["status"] == "completed", result.payload
-    assert host.assignment_cwd("agent") == host.core.WORKDIR
-    assert not host.tasks.CURRENT_TODOS
+    assert tasks.assignment_cwd("agent") == core.WORKDIR
+    assert not runtime.lead_context.todos
     with host.agent_lock:
-        assert "another session" in host.complete_task(task.id)
-        assert "cannot claim" in host.claim_task(task.id)
-        other = host.create_task("session B task")
-        assert host.claim_task(other.id).startswith("Claimed")
+        with pytest.raises(ValueError, match="another session"):
+            tasks.complete_task(task.id)
+        with pytest.raises(ValueError, match="cannot claim"):
+            tasks.claim_task(task.id)
+        other = tasks.create_task("session B task")
+        assert tasks.claim_task(other.id).startswith("Claimed")
     result, events = resume_command(runtime, a)
     assert result.payload["status"] == "completed"
-    assert host.assignment_cwd("agent") == checkout
-    assert host.tasks.CURRENT_TODOS == saved["todos"]
-    assert host.load_task(other.id).status == "in_progress"
+    assert tasks.assignment_cwd("agent") == checkout
+    assert runtime.lead_context.todos == saved["todos"]
+    assert tasks.load_task(other.id).status == "in_progress"
     display = [e for e in events if e.type == "state_snapshot"][-1]
     assert display.payload["todos"] == saved["todos"]
-    assert host.run_agent_write("resumed.txt", "continued").startswith("Wrote")
+    assert file_tools.run_agent_write("resumed.txt", "continued").content.startswith("Wrote")
     assert (checkout / "resumed.txt").read_text() == "continued"
-    assert not (host.core.WORKDIR / "resumed.txt").exists()
+    assert not (core.WORKDIR / "resumed.txt").exists()
 
 
 def test_target_worktree_validation_uses_target_root_without_switching(session_worktree, monkeypatch):
     runtime, host, task, checkout = session_worktree
     target = runtime.session.session_id
-    target_root = host.core.WORKDIR
+    target_root = core.WORKDIR
     other_root = target_root / "other"
     other_root.mkdir()
     other = runtime.session.store.create()
@@ -584,15 +603,15 @@ def test_target_worktree_validation_uses_target_root_without_switching(session_w
     assert result.payload["status"] == "completed"
     observed = []
     def git(args, cwd):
-        observed.append((host.core.WORKDIR, Path.cwd(), cwd))
+        observed.append((core.WORKDIR, Path.cwd(), cwd))
         result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
         return result.returncode == 0, result.stdout + result.stderr
-    monkeypatch.setattr(host.worktrees, "run_git_impl", git)
+    monkeypatch.setattr(worktrees, "run_git_impl", git)
     result, _ = resume_command(runtime, target)
     assert result.payload["status"] == "completed", result.payload
     assert observed == [(other_root, other_root, target_root)]
-    assert host.assignment_cwd("agent") == checkout
-    assert host.load_task(task.id).session_id == target
+    assert tasks.assignment_cwd("agent") == checkout
+    assert tasks.load_task(task.id).session_id == target
 
 
 def test_cli_display_failure_closes_pending_approval(runtime_factory):
@@ -607,7 +626,7 @@ def test_cli_display_failure_closes_pending_approval(runtime_factory):
             raise OSError("terminal detached")
     CLIAdapter(runtime, reader, write).run()
     assert reads == [None]
-    assert not (host.core.WORKDIR / "unwanted").exists()
+    assert not (core.WORKDIR / "unwanted").exists()
     assert runtime.submit("next").status == "closed"
 
 
@@ -621,29 +640,29 @@ def test_resume_rejects_invalid_association_without_changing_current(session_wor
     switched, _ = resume_command(runtime, b["id"])
     assert switched.payload["status"] == "completed", switched.payload
     if change == "missing_task":
-        host.tasks._task_path(task.id).unlink()
+        tasks._task_path(task.id).unlink()
     elif change == "directory":
         checkout.rename(checkout.with_name("moved"))
     elif change == "startup":
         saved = runtime.session.store.load(a)
-        saved["workdir"] = str(host.core.WORKDIR / "other")
+        saved["workdir"] = str(core.WORKDIR / "other")
         runtime.session.store.save(saved)
     else:
-        saved_task = host.load_task(task.id)
+        saved_task = tasks.load_task(task.id)
         if change == "owner":
             saved_task.owner = "other"
         elif change == "session":
             saved_task.session_id = "20261009-000000-deadbeef"
         else:
             saved_task.worktree = None
-        host.save_task(saved_task)
+        tasks.save_task(saved_task)
     before = list(runtime.session.history)
     result, _ = resume_command(runtime, a)
     assert result.payload["status"] == "failed"
     assert runtime.session.session_id == b["id"]
     assert runtime.session.history == before
-    assert host.tasks.lead_session_id == b["id"]
-    assert host.assignment_cwd("agent") == host.core.WORKDIR
+    assert runtime.lead_context.session_id == b["id"]
+    assert tasks.assignment_cwd("agent") == core.WORKDIR
 
 
 @pytest.mark.parametrize("state", ["in_progress", "completed", "interrupted_completion"])
@@ -657,10 +676,10 @@ def test_restart_restores_task_and_retained_directory(session_worktree, monkeypa
         if state == "interrupted_completion":
             monkeypatch.setattr(runtime.session.store, "save", fail)
         if state != "in_progress":
-            assert host.complete_task(task.id).startswith("Completed")
+            assert tasks.complete_task(task.id).startswith("Completed")
             if state == "interrupted_completion":
                 assert runtime.session.store.load(a)["task_id"] == task.id
-            host.release_completed_assignment("agent")
+            tasks.release_completed_assignment("agent")
     # A failed final save leaves the pre-completion association on disk.
     runtime.close()
     until(runtime, "runtime_closed")
@@ -668,28 +687,31 @@ def test_restart_restores_task_and_retained_directory(session_worktree, monkeypa
     monkeypatch.setattr(runtime.session.store, "save", original_save)
     from agent_harness.runtime.interactive_runtime import InteractiveRuntime
     fresh = InteractiveRuntime()
+    scope = lead_context_scope(fresh.lead_context)
+    scope.__enter__()
     try:
         fresh.start()
         until(fresh, "state_snapshot")
-        assert host.assignment_cwd("agent") == host.core.WORKDIR
-        assert not host.tasks.CURRENT_TODOS
+        assert tasks.assignment_cwd("agent") == core.WORKDIR
+        assert not fresh.lead_context.todos
         submission = fresh.submit("new session after restart")
         until(fresh, "turn_finished", submission_id=submission.submission_id)
         with host.agent_lock:
-            other = host.create_task("new session task")
-            assert host.claim_task(other.id).startswith("Claimed")
-            assert host.assignment_cwd("agent") == host.core.WORKDIR
+            other = tasks.create_task("new session task")
+            assert tasks.claim_task(other.id).startswith("Claimed")
+            assert tasks.assignment_cwd("agent") == core.WORKDIR
         result, _ = resume_command(fresh, a)
         assert result.payload["status"] == "completed"
-        assert ("agent" in host.tasks.assignments) == (state == "in_progress")
-        assert host.assignment_cwd("agent") == checkout
+        assert ("agent" in tasks.assignments) == (state == "in_progress")
+        assert tasks.assignment_cwd("agent") == checkout
         assert fresh.session.store.load(a)["task_id"] == (task.id if state == "in_progress" else None)
-        assert host.load_task(task.id).status == ("in_progress" if state == "in_progress" else "completed")
-        assert host.tasks.CURRENT_TODOS[0]["content"] == "验证中文目录"
+        assert tasks.load_task(task.id).status == ("in_progress" if state == "in_progress" else "completed")
+        assert fresh.lead_context.todos[0]["content"] == "验证中文目录"
     finally:
         fresh.close()
         until(fresh, "runtime_closed")
         fresh._thread.join(timeout=5)
+        scope.__exit__(None, None, None)
 
 
 def test_worktree_removal_clears_current_directory_and_rejects_stale_context(session_worktree):
@@ -700,11 +722,12 @@ def test_worktree_removal_clears_current_directory_and_rejects_stale_context(ses
     stale["task_id"] = None
     runtime.session.store.save(stale)
     with host.agent_lock:
-        assert host.complete_task(task.id).startswith("Completed")
-        host.release_completed_assignment("agent")
-        assert host.assignment_cwd("agent") == checkout
-        assert host.remove_worktree("feature").startswith("Worktree")
-        assert host.assignment_cwd("agent") == host.core.WORKDIR
+        assert tasks.complete_task(task.id).startswith("Completed")
+        tasks.release_completed_assignment("agent")
+        assert tasks.assignment_cwd("agent") == checkout
+        assert task_worktrees.remove_worktree("feature").startswith("Worktree")
+        assert tasks.assignment_cwd("agent") == core.WORKDIR
+        runtime._checkpoint()
     saved = runtime.session.store.load(a)
     assert saved["worktree"] is None
     assert saved["task_id"] is None
@@ -722,26 +745,26 @@ def test_save_failure_keeps_all_current_associations(session_worktree, monkeypat
     runtime.session.store.save(target)
     before_history = list(runtime.session.history)
     before_goal = host.GOAL
-    before_assignment = dict(host.tasks.assignments["agent"])
+    before_assignment = dict(tasks.assignments["agent"])
     original_save = runtime.session.store.save
     def fail(snapshot):
         raise OSError("disk full")
     monkeypatch.setattr(runtime.session.store, "save", fail)
     result, _ = resume_command(runtime, target["id"])
     assert result.payload["status"] == "failed"
-    assert runtime.session.session_id == host.tasks.lead_session_id == a
+    assert runtime.session.session_id == runtime.lead_context.session_id == a
     assert runtime.session.history == before_history
     assert host.GOAL is before_goal
-    assert host.tasks.assignments["agent"] == before_assignment
-    assert host.assignment_cwd("agent") == checkout
-    assert host.tasks.CURRENT_TODOS == [{"content": "验证中文目录", "status": "pending"}]
+    assert tasks.assignments["agent"] == before_assignment
+    assert tasks.assignment_cwd("agent") == checkout
+    assert runtime.lead_context.todos == [{"content": "验证中文目录", "status": "pending"}]
     assert runtime._generation == 1
     monkeypatch.setattr(runtime.session.store, "save", original_save)
 
 
 def test_model_claim_and_todo_are_saved_before_next_request(runtime_factory, monkeypatch):
     runtime, host = runtime_factory()
-    task = host.create_task("model task")
+    task = tasks.create_task("model task")
     calls = []
     def create(**kwargs):
         calls.append(kwargs)
@@ -752,9 +775,9 @@ def test_model_claim_and_todo_are_saved_before_next_request(runtime_factory, mon
         saved = runtime.session.store.load(runtime.session.session_id)
         assert saved["task_id"] == task.id
         assert saved["todos"] == [{"content": "verify", "status": "in_progress"}]
-        assert host.load_task(task.id).session_id == runtime.session.session_id
+        assert tasks.load_task(task.id).session_id == runtime.session.session_id
         return response("Task retained")
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create, stream=fake_stream_for(create))))
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create, stream=fake_stream_for(create))))
     submission = runtime.submit("claim and track task")
     finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
     assert finished.payload["outcome"]["status"] == "completed"
@@ -764,7 +787,7 @@ def test_model_claim_and_todo_are_saved_before_next_request(runtime_factory, mon
 def test_restart_from_other_directory_finds_and_restores_session(session_worktree, monkeypatch):
     runtime, host, task, checkout = session_worktree
     session_id = runtime.session.session_id
-    original_root = host.core.WORKDIR
+    original_root = core.WORKDIR
     runtime.close()
     until(runtime, "runtime_closed")
     runtime._thread.join(timeout=5)
@@ -772,7 +795,7 @@ def test_restart_from_other_directory_finds_and_restores_session(session_worktre
     other_root = original_root / "其他启动目录"
     other_root.mkdir()
     monkeypatch.chdir(other_root)
-    host.core.WORKDIR = other_root
+    core.WORKDIR = other_root
     from agent_harness.runtime.interactive_runtime import InteractiveRuntime
     fresh = InteractiveRuntime()
     try:
@@ -783,11 +806,11 @@ def test_restart_from_other_directory_finds_and_restores_session(session_worktre
         assert session_id in [entry["id"] for entry in entries]
         result, _ = resume_command(fresh, session_id)
         assert result.payload["status"] == "completed", result.payload
-        assert Path.cwd() == host.core.WORKDIR == original_root
+        assert Path.cwd() == core.WORKDIR == original_root
         assert fresh.session.store.workdir == original_root
-        assert host.assignment_cwd("agent") == checkout
-        assert host.load_task(task.id).session_id == session_id
-        assert host.tasks.CURRENT_TODOS[0]["content"] == "验证中文目录"
+        assert tasks.assignment_cwd("agent") == checkout
+        assert tasks.load_task(task.id).session_id == session_id
+        assert runtime.lead_context.todos[0]["content"] == "验证中文目录"
         submission = fresh.submit("continue after moving")
         until(fresh, "turn_finished", submission_id=submission.submission_id)
         assert fresh.session.store.load(session_id)["workdir"] == str(original_root)
@@ -799,12 +822,12 @@ def test_restart_from_other_directory_finds_and_restores_session(session_worktre
 
 def test_switch_directory_reloads_cron_and_keeps_each_session_root(runtime_factory):
     runtime, host = runtime_factory(client=lambda **kwargs: response())
-    original_root = host.core.WORKDIR
+    original_root = core.WORKDIR
     submission = runtime.submit("original session")
     until(runtime, "turn_finished", submission_id=submission.submission_id)
     original_id = runtime.session.session_id
-    original_job = host.schedule_job("0 0 1 1 *", "original", durable=True)
-    transient_job = host.schedule_job("0 0 1 1 *", "transient", durable=False)
+    original_job = scheduler.schedule_job("0 0 1 1 *", "original", durable=True)
+    transient_job = scheduler.schedule_job("0 0 1 1 *", "transient", durable=False)
 
     other_root = original_root / "other"
     other_root.mkdir()
@@ -813,29 +836,29 @@ def test_switch_directory_reloads_cron_and_keeps_each_session_root(runtime_facto
     runtime.session.store.save(other)
     result, _ = resume_command(runtime, other["id"])
     assert result.payload["status"] == "completed", result.payload
-    assert Path.cwd() == host.core.WORKDIR == other_root
-    assert not host.scheduler.scheduled_jobs
-    assert host.assignment_cwd("agent") == other_root
-    assert host.run_agent_write("here.txt", "other").startswith("Wrote")
+    assert Path.cwd() == core.WORKDIR == other_root
+    assert not scheduler.scheduled_jobs
+    assert tasks.assignment_cwd("agent") == other_root
+    assert file_tools.run_agent_write("here.txt", "other").content.startswith("Wrote")
     assert (other_root / "here.txt").read_text() == "other"
-    other_job = host.schedule_job("0 0 1 1 *", "other", durable=True)
+    other_job = scheduler.schedule_job("0 0 1 1 *", "other", durable=True)
 
     result, _ = resume_command(runtime, original_id)
     assert result.payload["status"] == "completed", result.payload
-    assert Path.cwd() == host.core.WORKDIR == original_root
-    assert set(host.scheduler.scheduled_jobs) == {original_job.id}
-    assert transient_job.id not in host.scheduler.scheduled_jobs
+    assert Path.cwd() == core.WORKDIR == original_root
+    assert set(scheduler.scheduled_jobs) == {original_job.id}
+    assert transient_job.id not in scheduler.scheduled_jobs
     assert runtime.session.store.load(original_id)["workdir"] == str(original_root)
     assert runtime.session.store.load(other["id"])["workdir"] == str(other_root)
     result, _ = resume_command(runtime, other["id"])
     assert result.payload["status"] == "completed", result.payload
-    assert set(host.scheduler.scheduled_jobs) == {other_job.id}
+    assert set(scheduler.scheduled_jobs) == {other_job.id}
 
 
 @pytest.mark.parametrize("failure", ["save", "chdir", "task", "queued_cron"])
 def test_cross_directory_failure_preserves_current_context(runtime_factory, monkeypatch, failure):
     runtime, host = runtime_factory(client=lambda **kwargs: response())
-    original_root = host.core.WORKDIR
+    original_root = core.WORKDIR
     submission = runtime.submit("keep current")
     until(runtime, "turn_finished", submission_id=submission.submission_id)
     current_id = runtime.session.session_id
@@ -846,10 +869,10 @@ def test_cross_directory_failure_preserves_current_context(runtime_factory, monk
     if failure == "task":
         target["task_id"] = "task_deadbeef"
     runtime.session.store.save(target)
-    job = host.schedule_job("0 0 1 1 *", "keep scheduler", durable=True)
+    job = scheduler.schedule_job("0 0 1 1 *", "keep scheduler", durable=True)
     if failure == "queued_cron":
-        with host.scheduler.cron_lock:
-            host.scheduler._enqueue_due_job(job)
+        with scheduler.cron_lock:
+            scheduler._enqueue_due_job(job)
         runtime._background_paused = True
     def fail(*args):
         raise OSError("unavailable")
@@ -862,6 +885,6 @@ def test_cross_directory_failure_preserves_current_context(runtime_factory, monk
     assert result.payload["status"] == "failed", result.payload
     assert runtime.session.session_id == current_id
     assert runtime.session.history == before_history
-    assert Path.cwd() == host.core.WORKDIR == runtime.session.store.workdir == original_root
-    assert set(host.scheduler.scheduled_jobs) == {job.id}
-    assert host.scheduler._runtime_thread.is_alive()
+    assert Path.cwd() == core.WORKDIR == runtime.session.store.workdir == original_root
+    assert set(scheduler.scheduled_jobs) == {job.id}
+    assert scheduler._runtime_thread.is_alive()

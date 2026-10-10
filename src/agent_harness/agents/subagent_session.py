@@ -2,6 +2,8 @@
 
 from .. import core
 from ..tools import shared_tools
+from ..tools.tool_result import ToolResult
+from ..runtime.tool_execution import ToolExecution, execute_tool
 from ..runtime import hooks
 from ..workspace import tasks
 from ..context import compaction
@@ -114,25 +116,18 @@ class SubagentSession:
         self._reactive_claimed = False
 
 
-    def execute_tool(self, block) -> str:
-        """依次检查计划门禁和权限 hooks，再执行子 agent工具。
+    def execute_tool(self, block) -> ToolExecution:
+        """依次检查计划门禁和权限 hooks，再执行子 agent 工具。
 
-        输入：block 为包含 name 和 input 的模型工具请求。
-        返回：拒绝原因、工具结果或执行错误的字符串。
-            放行后调用处理器并触发 PostToolUse；拒绝时不执行处理器或后置 hook。
+        输入为原模型请求；拒绝不运行处理器或后置 Hook。
+        返回真实工具结果和单独的后置错误，由回合先记录再结束执行。
         """
-        self._last_tool_status = "returned"
         if block.name not in self.handlers:
-            self._last_tool_status = "failed"
-            return f"Error: Tool '{block.name}' is unavailable for this child"
+            return ToolExecution(ToolResult(f"Error: Tool '{block.name}' is unavailable for this child", "failed"))
         check = hooks.check_tool_use(block, authorize=self.authorize_tool)
         if check.status != "allowed":
-            self._last_tool_status = check.status
-            return check.text
-        def on_status(status):
-            self._last_tool_status = status
-        output = hooks.execute_tool(block, self.handlers.get(block.name), on_status=on_status)
-        return str(output)
+            return ToolExecution(ToolResult(check.text, check.status))
+        return execute_tool(block, self.handlers[block.name])
 
     def run(self, messages: list):
         """Request one response and append its paired tool results.
@@ -180,13 +175,22 @@ class SubagentSession:
                 context = interaction.current_context()
                 if context is not None and context.checkpoint is not None:
                     context.checkpoint()
-                for block in calls:
-                    output = self.execute_tool(block)
-                    result = {"type": "tool_result", "tool_use_id": block.id, "content": output}
+                for index, block in enumerate(calls):
+                    execution = self.execute_tool(block)
+                    result = execution.result.model_result(block.id)
                     results.append(result)
-                    interaction.publish("tool_result", **result, status=self._last_tool_status)
+                    interaction.publish("tool_result", **result, status=execution.result.status)
+                    if execution.post_error is not None:
+                        # 后置失败不执行后续工具，但必须补齐这批调用的配对结果。
+                        for pending in calls[index + 1:]:
+                            stopped = ToolResult("Interrupted before execution", "stopped").model_result(pending.id)
+                            results.append(stopped)
+                            interaction.publish("tool_result", **stopped, status="stopped")
+                        messages.append({"role": "user", "content": results})
                     if context is not None and context.checkpoint is not None:
                         context.checkpoint()
+                    if execution.post_error is not None:
+                        raise execution.post_error
             messages.append({"role": "user", "content": results})
         return response
 

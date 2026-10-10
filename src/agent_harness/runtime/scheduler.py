@@ -13,13 +13,14 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
+from ..tools.tool_result import ToolResult
 from .. import core
 from ..tools import file_tools
-from . import hooks
+from . import hooks, tool_execution
 from ..workspace import tasks
 from ..context import compaction
 from . import interaction
@@ -57,7 +58,8 @@ def start_background_task(block, handlers: dict) -> str:
     global _bg_counter
     command = block.input.get("command", block.name)
     parent_context = interaction.current_context()
-    context = parent_context.delegate("background", "background") if parent_context else None
+    context = replace(parent_context.delegate("background", "background"),
+                      model_call_id=parent_context.model_call_id, tool_call_id=block.id) if parent_context else None
 
     def worker():
         """在固定的任务目录执行后台命令，并登记最终结果。
@@ -66,30 +68,29 @@ def start_background_task(block, handlers: dict) -> str:
         返回：None。执行命令和 PostToolUse，写入 completed/failed 及文本结果；
             执行或 hook 错误会转换成失败结果，已被移除的登记不再写回。
         """
-        try:
+        def run_command(**arguments):
             if block.name != "bash":
                 raise ValueError("only bash can run in the background")
             if cwd_error:
-                raise ValueError(cwd_error.removeprefix("Error: "))
-            output, exit_code = file_tools._run_bash_process(
-                str(block.input["command"]), cwd)
-            result = file_tools._format_bash_result(output, exit_code)
-            status = "completed" if exit_code == 0 else "failed"
-        except Exception as exc:
-            result = f"Error: {type(exc).__name__}: {exc}"
-            status = "failed"
-        try:
-            hooks.trigger_hooks("PostToolUse", block, result)
-        except Exception as exc:
-            result = (f"Error: PostToolUse hook failed: "
-                      f"{type(exc).__name__}: {exc}\n{result}")
+                raise ValueError(cwd_error)
+            return file_tools.run_bash(str(arguments["command"]), cwd)
+        execution = tool_execution.execute_tool(block, run_command)
+        result = execution.result.content
+        status = "completed" if execution.result.status == "success" else "failed"
+        hook_error = ""
+        if execution.post_error is not None:
+            hook_error = f"{type(execution.post_error).__name__}: {execution.post_error}"
+            result = f"Error: PostToolUse hook failed: {hook_error}\n{result}"
             status = "failed"
         with background_lock:
             task = background_tasks.get(bg_id)
             if task is None:
                 return
             task["status"] = status
-            background_results[bg_id] = str(result)
+            task["command_status"] = execution.result.status
+            task["hook_error"] = hook_error
+            task["result"] = execution.result
+            background_results[bg_id] = result
 
     with tasks.task_lock:
         cwd, cwd_error = file_tools.tool_cwd("agent")
@@ -102,6 +103,7 @@ def start_background_task(block, handlers: dict) -> str:
                 "status": "running",
                 "cwd": str(cwd) if cwd else None,
                 "output_id": "background_" + uuid.uuid4().hex,
+                "context": context,
             }
     def run_worker():
         with interaction.execution_context(context):
@@ -157,10 +159,17 @@ def collect_background_results() -> list[str]:
                     path = compaction.save_output(task["output_id"], output, subdirectory="background")
                     saved_path = task["saved_output_path"] = str(path)
                 full_output = f"  <full_output>{saved_path}</full_output>\n"
+            result = task.get("result")
+            if result is not None and not task.get("result_published"):
+                with interaction.execution_context(task.get("context")):
+                    interaction.publish("tool_result", **result.model_result(task["tool_use_id"]), status=result.status)
+                task["result_published"] = True
             notifications.append(
                 f"<task_notification>\n"
                 f"  <task_id>{bg_id}</task_id>\n"
                 f"  <status>{task['status']}</status>\n"
+                f"  <command_status>{task.get('command_status', '')}</command_status>\n"
+                f"  <hook_error>{task.get('hook_error', '')}</hook_error>\n"
                 f"  <command>{task['command']}</command>\n"
                 f"  <summary>{output[:BACKGROUND_SUMMARY_CHARS]}</summary>\n"
                 f"{full_output}"
@@ -380,7 +389,8 @@ def cancel_job(job_id: str) -> str:
     """取消已登记的 cron，并移除队列中尚未消费的同 ID 投递。
 
     输入：job_id 为 cron 任务 ID。
-    返回：取消确认或未找到提示；持久化写入失败时恢复登记和队列，再抛出异常。
+    返回：取消确认文本；未找到时抛出 ValueError。
+        持久化写入失败时恢复登记和队列，再抛出异常。
     """
     with cron_lock:
         previous_queue = list(cron_queue)
@@ -394,7 +404,7 @@ def cancel_job(job_id: str) -> str:
                 cron_queue[:] = previous_queue
                 raise
     if not job:
-        return f"Job {job_id} not found"
+        raise ValueError(f"Job {job_id} not found")
     return f"Cancelled {job_id}"
 
 
@@ -489,7 +499,7 @@ def restore_cron_jobs(jobs: list[CronJob]):
 
 
 def run_schedule_cron(cron: str, prompt: str,
-                      recurring: bool = True, durable: bool = True) -> str:
+                      recurring: bool = True, durable: bool = True) -> ToolResult:
     """处理模型创建 cron 的工具请求。
 
     输入：cron/prompt 为时间表达式和提示词；recurring/durable 为重复和持久化开关。
@@ -497,11 +507,11 @@ def run_schedule_cron(cron: str, prompt: str,
     """
     result = schedule_job(cron, prompt, recurring, durable)
     if isinstance(result, str):
-        return f"Error: {result}"
-    return f"Scheduled {result.id}: '{cron}' -> {prompt}"
+        return ToolResult(f"Error: {result}", "failed")
+    return ToolResult(f"Scheduled {result.id}: '{cron}' -> {prompt}", "success")
 
 
-def run_list_crons() -> str:
+def run_list_crons() -> ToolResult:
     """生成当前定时任务列表。
 
     返回：任务 ID、表达式、提示词预览及重复/持久化标志的文本；无任务时给出提示。
@@ -509,21 +519,24 @@ def run_list_crons() -> str:
     with cron_lock:
         jobs = list(scheduled_jobs.values())
     if not jobs:
-        return "No cron jobs."
-    return "\n".join(
+        return ToolResult("No cron jobs.", "success")
+    return ToolResult("\n".join(
         f"  {job.id}: '{job.cron}' -> {job.prompt[:40]} "
         f"[{'recurring' if job.recurring else 'one-shot'}, "
         f"{'durable' if job.durable else 'session'}]"
-        for job in jobs)
+        for job in jobs), "success")
 
 
-def run_cancel_cron(job_id: str) -> str:
+def run_cancel_cron(job_id: str) -> ToolResult:
     """处理模型取消 cron 的工具请求。
 
     输入：job_id 为要取消的定时任务 ID。
-    返回：cancel_job 的取消结果文本，存储异常继续抛出。
+    返回：ToolResult，包含取消结果正文和明确状态，存储异常继续抛出。
     """
-    return cancel_job(job_id)
+    try:
+        return ToolResult(cancel_job(job_id), "success")
+    except ValueError as exc:
+        return ToolResult(str(exc), "failed")
 
 
 _runtime_services_started = False

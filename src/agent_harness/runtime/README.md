@@ -6,11 +6,13 @@
 | 文件 | 职责 |
 | --- | --- |
 | [interactive_runtime.py](interactive_runtime.py) | `InteractiveRuntime`：接收输入、执行本地命令、串行驱动 Lead 回合、消费后台输入、生成展示记录、统一保存与恢复交付、切换会话、停止和关闭 |
+| [lead_context.py](lead_context.py) | `LeadContext`：运行时拥有的 Todo、会话 ID 和保留工作树；防御性复制、显式激活和目录绑定；离线入口显式提供状态作用域 |
 | [interaction.py](interaction.py) | 执行上下文、事件通道、独立事实队列、稳定记录 ID、审批请求及展示确认，关联会话代次和停止状态 |
 | [local_commands.py](local_commands.py) | `LocalCommand`、命令元数据和查找；供运行时路由与前端补全共用 |
 | [session_store.py](session_store.py) | `SessionStore` 和 `InteractiveSession`：会话格式校验、原子保存、读取/列出/删除及上下文保存与恢复准备 |
 | [scheduler.py](scheduler.py) | 后台任务结果、cron 校验/持久化/调度、待消费队列和服务启动/停止 |
-| [hooks.py](hooks.py) | 用户输入、工具执行和停止边界的 hooks；权限检查、审批请求、日志及大结果处理；Lead/child 共用前置检查与同步执行 |
+| [hooks.py](hooks.py) | 用户输入、工具执行和停止边界的 hooks；权限检查、审批请求、日志及大结果处理 |
+| [tool_execution.py](tool_execution.py) | Lead/child/后台共用的 handler 执行、异常转明确失败、生命周期与 PostHook 结算；真实结果和 Hook 错误分别返回 |
 
 前端调用 `InteractiveRuntime`，后者调用根目录 [host.agent_loop](../host.py)。
 `start()` 在线程启动前调用 `host.initialize_runtime()`。配置失败可重试，不启动执行线程；重复配置保留已有 goal、runner 与注册器配置。导入模块和构造驱动不执行应用装配。
@@ -26,5 +28,6 @@
 `session_store.py` 负责会话存储与恢复准备，目标是否能激活由共享驱动协调。
 `InteractiveSession` 按 ID 追加展示记录，维护模型历史与展示历史的不同用途，失败保留内存待重试；`SessionStore` 只校验当前结构及操作文件。
 任务和工作树绑定的校验由 [workspace/](../workspace/README.md) 提供，子 agent 生命周期由 [agents/](../agents/README.md) 提供。
+状态与失败顺序的当前契约见 [职责收敛计划](../../../docs/plans/2026-10-10-03整体架构职责收敛实施计划.md)。
 
 包级入口与职责分组见 [上级 README](../README.md)。

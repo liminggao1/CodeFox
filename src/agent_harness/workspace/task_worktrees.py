@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import core
+from ..runtime.lead_context import current_lead_context
 from ..runtime import scheduler
 from . import tasks
 from . import worktrees
@@ -18,49 +19,49 @@ def create_worktree(name: str, task_id: str) -> str:
             ``wt/<name>``。
         task_id: 已存在、状态为 pending、无 owner 且未绑定 worktree 的任务 ID。
     返回：
-        成功、拒绝原因、Git 错误或部分操作结果的字符串。
+        成功确认字符串；拒绝、Git 错误或部分操作失败抛出 ValueError。
         成功时创建目录和分支，再保存 ``task.worktree``；全过程使用与任务认领
         相同的存储锁。部分失败时保留已产生的 Git 数据，供人工恢复。
     """
     error = worktrees.validate_worktree_name(name)
     if error:
-        return f"Error: {error}"
+        raise ValueError(f"Error: {error}")
     try:
         path = worktrees._worktree_path(name)
         task_path = tasks._task_path(task_id)
     except ValueError as exc:
-        return f"Error: {exc}"
+        raise ValueError(f"Error: {exc}")
     branch = worktrees._worktree_branch(name)
 
     with tasks.task_store_lock():
         if not task_path.exists():
-            return f"Error: Task {task_id} not found"
+            raise ValueError(f"Error: Task {task_id} not found")
         task = tasks.load_task(task_id)
         if task.status != "pending" or task.owner is not None:
-            return f"Error: Task {task_id} must be pending and unowned"
+            raise ValueError(f"Error: Task {task_id} must be pending and unowned")
         if task.worktree:
-            return f"Error: Task {task_id} already uses worktree '{task.worktree}'"
+            raise ValueError(f"Error: Task {task_id} already uses worktree '{task.worktree}'")
         if any(item.worktree == name for item in tasks.list_tasks()
                if item.id != task_id):
-            return f"Error: Worktree '{name}' is already bound to another task"
+            raise ValueError(f"Error: Worktree '{name}' is already bound to another task")
         if path.exists():
-            return f"Error: Worktree path already exists: {path}"
+            raise ValueError(f"Error: Worktree path already exists: {path}")
 
         ok, root = worktrees.run_git(["rev-parse", "--show-toplevel"])
         if not ok or Path(root).resolve() != core.WORKDIR.resolve():
-            return "Error: Working directory must be the root of a Git repository"
+            raise ValueError("Error: Working directory must be the root of a Git repository")
         ok, branch_check = worktrees.run_git(["check-ref-format", "--branch", branch])
         if not ok:
-            return f"Error: Invalid worktree branch '{branch}': {branch_check}"
+            raise ValueError(f"Error: Invalid worktree branch '{branch}': {branch_check}")
         exists, _ = worktrees.run_git(["show-ref", "--verify", "--quiet",
                                        f"refs/heads/{branch}"])
         if exists:
-            return f"Error: Branch '{branch}' already exists"
+            raise ValueError(f"Error: Branch '{branch}' already exists")
         entries, registry_error = worktrees._registered_worktrees()
         if registry_error:
-            return f"Error: {registry_error}"
+            raise ValueError(f"Error: {registry_error}")
         if path in entries:
-            return f"Error: Worktree path is already registered: {path}"
+            raise ValueError(f"Error: Worktree path is already registered: {path}")
 
         worktrees._worktrees_dir().mkdir(parents=True, exist_ok=True)
         ok, result = worktrees.run_git(["worktree", "add", "-b", branch,
@@ -78,21 +79,19 @@ def create_worktree(name: str, task_id: str) -> str:
             if branch_exists:
                 artifacts.append(f"branch '{branch}'")
             if artifacts:
-                return (
-                    "Partial operation: git worktree add reported an error "
+                raise ValueError("Partial operation: git worktree add reported an error "
                     f"after leaving {', '.join(artifacts)}. Task {task_id} "
                     "remains unbound and no Git data was deleted. Run "
                     f"`git worktree list`, inspect '{path}' and '{branch}', "
                     "then keep or remove those artifacts manually after "
-                    f"preserving any work. Git error: {result}"
-                )
-            return f"Git error: {result}"
+                    f"preserving any work. Git error: {result}")
+            raise ValueError(f"Git error: {result}")
 
         try:
             task.worktree = name
             tasks.save_task(task)
         except Exception as exc:
-            return (f"Partial success: Worktree '{name}' was created at "
+            raise ValueError(f"Partial success: Worktree '{name}' was created at "
                     f"{path} on branch '{branch}', but task binding failed: "
                     f"{exc}. Git data was retained for manual recovery.")
 
@@ -108,25 +107,25 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
         discard_changes: 是否允许 Git 丢弃未提交文件，包括未跟踪和被忽略的文件。
             默认为 False，目录存在这些文件或改动时拒绝移除。
     返回：
-        成功、拒绝原因、Git 错误或部分成功结果的字符串。
+        成功确认字符串；拒绝、Git 错误或部分操作失败抛出 ValueError。
         要求绑定任务均已完成、没有子 agent占用，且目录内没有运行中的后台命令。
         Lead 自己匹配的已完成分配可随清理释放；拒绝或 Git 失败时保留该分配。
         成功时删除目录并清空 ``task.worktree``，保留分支和任务记录。
-        Git 已移除目录但保存解绑信息失败时，会返回部分成功提示。
+        Git 已移除目录但保存解绑信息失败时，异常说明已经发生的目录变化。
     """
     error = worktrees.validate_worktree_name(name)
     if error:
-        return f"Error: {error}"
+        raise ValueError(f"Error: {error}")
     with tasks.task_store_lock():
         path, error = worktrees._registered_worktree(name)
         if error:
-            return f"Error: {error}"
+            raise ValueError(f"Error: {error}")
         bound = [task for task in tasks.list_tasks() if task.worktree == name]
         if not bound:
-            return f"Error: Worktree '{name}' is not bound to a task"
+            raise ValueError(f"Error: Worktree '{name}' is not bound to a task")
         active = [task for task in bound if task.status != "completed"]
         if active:
-            return (f"Error: Worktree '{name}' is bound to active task "
+            raise ValueError(f"Error: Worktree '{name}' is bound to active task "
                     f"{active[0].id}; complete it before removal")
         leased = [owner for owner, assignment in tasks.assignments.items()
                   if Path(assignment["cwd"]).resolve() == path.resolve()]
@@ -137,7 +136,7 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
         if release_lead:
             leased.remove("agent")
         if leased:
-            return (f"Error: Worktree '{name}' is still in use by "
+            raise ValueError(f"Error: Worktree '{name}' is still in use by "
                     f"{', '.join(sorted(leased))}; wait for the turn to end")
         with scheduler.background_lock:
             running = [item for item in scheduler.background_tasks.values()
@@ -145,17 +144,17 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
                        and item.get("cwd")
                        and Path(item["cwd"]).resolve() == path.resolve()]
             if running:
-                return (f"Error: Worktree '{name}' has a running background "
+                raise ValueError(f"Error: Worktree '{name}' has a running background "
                         "command; wait for it to finish")
 
             ok, status = worktrees.run_git(
                 ["status", "--porcelain", "--ignored"], cwd=path
             )
             if not ok:
-                return f"Error: Cannot verify worktree '{name}' status: {status}"
+                raise ValueError(f"Error: Cannot verify worktree '{name}' status: {status}")
             if status != "(no output)" and not discard_changes:
                 changed = len([line for line in status.splitlines() if line.strip()])
-                return (f"Error: Worktree '{name}' has {changed} uncommitted "
+                raise ValueError(f"Error: Worktree '{name}' has {changed} uncommitted "
                         "change(s); preserve or discard them manually")
 
             args = ["worktree", "remove"]
@@ -164,20 +163,18 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
             args.append(str(path))
             ok, result = worktrees.run_git(args)
             if not ok:
-                return f"Git error: {result}"
+                raise ValueError(f"Git error: {result}")
 
             try:
                 # 只有 Git 已移除目录后才结束 Lead 的分配，失败时保留原 cwd。
-                if tasks.lead_worktree == name:
-                    tasks.lead_worktree = None
+                current_lead_context().unbind_worktree(name)
                 if release_lead:
                     tasks.release_completed_assignment("agent")
                 for task in bound:
                     task.worktree = None
                     tasks.save_task(task)
-                tasks.checkpoint_lead()
             except Exception as exc:
-                return (f"Partial success: Worktree '{name}' was removed and "
+                raise ValueError(f"Partial success: Worktree '{name}' was removed and "
                         f"branch '{worktrees._worktree_branch(name)}' retained, "
                         f"but task cleanup failed: {exc}. Manual recovery is required.")
 

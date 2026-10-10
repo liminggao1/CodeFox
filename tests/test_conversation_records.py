@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import agent_harness.workspace.tasks as tasks
+import agent_harness.tools.file_tools as file_tools
+import agent_harness.context.compaction as compaction
+import agent_harness.core as core
+import agent_harness.runtime.scheduler as scheduler
+
+
 import copy
 import json
 import threading
@@ -99,7 +106,7 @@ def test_full_conversation_exit_resume_and_continue(runtime_factory):
     until(restored, "command_result", submission_id=submission.submission_id)
     historical = changed.payload["records"]
     assert [item["id"] for item in historical] == [item["id"] for item in original]
-    assert host.tasks.CURRENT_TODOS == todos
+    assert runtime.lead_context.todos == todos
     assert records(stored(restored), "approval_decided")[0]["payload"]["decision"] == "approve"
     assert all(item["payload"]["historical"] for item in historical)
     complete(restored, "Continue from that output")
@@ -128,7 +135,7 @@ def test_saved_records_match_live_order_and_contain_full_tool_payload(runtime_fa
     assert [item["payload"]["text"] for item in records(snapshot, "assistant_message")] == ["Before", "After"]
     result = records(snapshot, "tool_result")[0]
     assert result["payload"]["content"] == "Error: sample output"
-    assert result["payload"]["status"] == "returned"
+    assert result["payload"]["status"] == "success"
     assert result["payload"]["tool_use_id"] == "call"
     tool_lifecycle = [item["payload"]["state"] for item in records(snapshot, "execution_status")
                       if item["payload"].get("phase") == "tool"]
@@ -186,7 +193,7 @@ def test_approval_checkpoint_saves_request_and_background_while_waiting(runtime_
 def test_tool_request_and_approved_decision_are_saved_before_execution(runtime_factory, monkeypatch):
     runtime, host = runtime_factory([
         response(tools=[tool("bash", command="printf checked")], stop="tool_use"), response("Done")])
-    original = host.file_tools.run_bash
+    original = file_tools.run_bash
     observed = []
 
     def execute(*args, **kwargs):
@@ -198,7 +205,7 @@ def test_tool_request_and_approved_decision_are_saved_before_execution(runtime_f
         observed.append(True)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(host.file_tools, "run_bash", execute)
+    monkeypatch.setattr(file_tools, "run_bash", execute)
     submission = runtime.submit("execute")
     request, _ = displayed_approval(runtime)
     assert runtime.channel.respond(request.request_id, request.generation, "approve")
@@ -245,7 +252,7 @@ def test_compaction_changes_model_messages_without_erasing_display_history(runti
             return CompactionResult(True)
         return CompactionResult(False)
 
-    monkeypatch.setattr(host.compaction, "prepare_history", compact)
+    monkeypatch.setattr(compaction, "prepare_history", compact)
     complete(runtime, "next question")
     snapshot = stored(runtime)
     assert "original question" not in str(snapshot["messages"])
@@ -276,7 +283,7 @@ def test_resume_replays_records_without_model_execution_or_duplicate_interruptio
     runtime.session.store.save(snapshot)
     target = snapshot["id"]
     model_calls = []
-    monkeypatch.setattr(host.core.client.messages, "create", lambda **kwargs: model_calls.append(kwargs))
+    monkeypatch.setattr(core.client.messages, "create", lambda **kwargs: model_calls.append(kwargs))
     other = runtime.session.session_id
 
     def resume(session_id):
@@ -290,15 +297,15 @@ def test_resume_replays_records_without_model_execution_or_duplicate_interruptio
     assert first
     assert runtime.channel.next_approval() is None
     assert not model_calls
-    assert not (host.core.WORKDIR / "must-not-exist").exists()
+    assert not (core.WORKDIR / "must-not-exist").exists()
     resume(other)
     changed = resume(target)
     historical = [item for item in changed.payload["records"] if item["type"] != "command_result"]
     assert historical == [item for item in first if item["type"] != "command_result"]
     assert not model_calls
-    monkeypatch.setattr(host.core.client.messages, "create", lambda **kwargs: response("Continued safely"))
+    monkeypatch.setattr(core.client.messages, "create", lambda **kwargs: response("Continued safely"))
     complete(runtime, "continue from saved state")
-    assert not (host.core.WORKDIR / "must-not-exist").exists()
+    assert not (core.WORKDIR / "must-not-exist").exists()
     assert not any(item["payload"]["tool_use_id"] == "pending"
                    for item in records(stored(runtime), "tool_result"))
     model_results = [block for message in stored(runtime)["messages"]
@@ -368,16 +375,16 @@ def test_shutdown_saves_background_terminal_status_after_worker_join(runtime_fac
         assert release.wait(5)
         return "background result", 0
 
-    monkeypatch.setattr(host.file_tools, "_run_bash_process", process)
-    original_wait = host.scheduler.wait_for_background_tasks
+    monkeypatch.setattr(file_tools, "_run_bash_process", process)
+    original_wait = scheduler.wait_for_background_tasks
 
     def wait_background():
         release.set()
         original_wait()
 
-    monkeypatch.setattr(host.scheduler, "wait_for_background_tasks", wait_background)
+    monkeypatch.setattr(scheduler, "wait_for_background_tasks", wait_background)
     with host.agent_lock, execution_context(runtime._context(turn_id="background-final", origin="background")):
-        task_id = host.scheduler.start_background_task(tool("bash", command="wait offline"), {})
+        task_id = scheduler.start_background_task(tool("bash", command="wait offline"), {})
     assert started.wait(2)
     runtime.close()
     closed, _ = until(runtime, "runtime_closed")
@@ -385,6 +392,10 @@ def test_shutdown_saves_background_terminal_status_after_worker_join(runtime_fac
     states = [item["payload"]["status"] for item in records(stored(runtime), "background_status")
               if item["payload"]["task_id"] == task_id]
     assert states == ["running", "completed"]
+    results = records(stored(runtime), "tool_result")
+    assert any(item["payload"]["tool_use_id"] == "call"
+               and item["payload"]["status"] == "success" for item in results)
+    assert not scheduler.has_pending_background()
 
 
 def test_backend_fact_queue_is_independent_of_frontend_delivery_and_detached():
@@ -436,7 +447,7 @@ def test_todo_records_include_only_applied_updates(runtime_factory, invalid):
     assert len(updates) == 1
     assert updates[0]["payload"]["todos"] == todos
     assert stored(runtime)["todos"] == todos
-    assert host.tasks.CURRENT_TODOS == todos
+    assert runtime.lead_context.todos == todos
     results = requests[1][-1]["content"]
     assert [item["tool_use_id"] for item in results] == ["valid", "invalid"]
     assert results[0]["content"] == "已更新 1 项待办：完成 0 项，进行中 1 项，待处理 0 项。"
@@ -464,11 +475,11 @@ def test_model_owns_todo_updates_without_cross_round_reminders(runtime_factory):
 
     def model(**kwargs):
         requests.append(copy.deepcopy(kwargs["messages"]))
-        observed.append(copy.deepcopy(host.tasks.CURRENT_TODOS))
+        observed.append(copy.deepcopy(runtime.lead_context.todos))
         return next(values)
 
     runtime, host = runtime_factory(client=model)
-    (host.core.WORKDIR / "输入.txt").write_text("读取成功", encoding="utf-8")
+    (core.WORKDIR / "输入.txt").write_text("读取成功", encoding="utf-8")
     finished, _ = complete(runtime, "读取文件并记录计划")
     assert finished.payload["outcome"]["status"] == "completed"
     assert len(requests) == 10
@@ -493,7 +504,7 @@ def test_model_owns_todo_updates_without_cross_round_reminders(runtime_factory):
     assert requests[9][-1]["content"][0]["content"] == "已更新 0 项待办：完成 0 项，进行中 0 项，待处理 0 项。"
     updates = records(stored(runtime), "todo_updated")
     assert [item["payload"]["todos"] for item in updates] == [todos, completed, []]
-    assert stored(runtime)["todos"] == host.tasks.CURRENT_TODOS == []
+    assert stored(runtime)["todos"] == runtime.lead_context.todos == []
 
 
 @pytest.mark.parametrize("action,decision", [("stop", "deny"), ("close", "closed")])
@@ -511,7 +522,7 @@ def test_stop_and_close_save_one_terminal_approval_decision(runtime_factory, act
     terminal = records(stored(runtime), "approval_decided")
     assert len(terminal) == 1
     assert terminal[0]["payload"]["decision"] == decision
-    assert not (host.core.WORKDIR / "must-not-exist").exists()
+    assert not (core.WORKDIR / "must-not-exist").exists()
 
 
 def test_synchronous_model_queues_background_facts_until_next_checkpoint(runtime_factory):
@@ -586,14 +597,14 @@ def test_first_tool_result_is_displayed_while_second_tool_is_blocked(runtime_fac
     runtime, host = runtime_factory([
         response(tools=[tool("read_file", "first", path="first.txt"), tool("read_file", "second", path="second.txt")], stop="tool_use"),
         response("finished")])
-    (host.core.WORKDIR / "first.txt").write_text("first result", encoding="utf-8")
-    original = host.file_tools.run_read
+    (core.WORKDIR / "first.txt").write_text("first result", encoding="utf-8")
+    original = file_tools.run_read
     def read(path, **kwargs):
         if str(path).endswith("second.txt"):
             entered.set()
             assert release.wait(10)
         return original(path, **kwargs)
-    monkeypatch.setattr(host.file_tools, "run_read", read)
+    monkeypatch.setattr(file_tools, "run_read", read)
     submission = runtime.submit("read two")
     try:
         assert entered.wait(3)
@@ -612,7 +623,7 @@ def test_resume_uses_saved_result_for_settled_tool_and_interrupts_only_missing_i
     runtime, host = runtime_factory([
         response(tools=[tool("read_file", "done", path="saved.txt"), tool("bash", "missing", command="printf pending")], stop="tool_use"),
         response("next")])
-    (host.core.WORKDIR / "saved.txt").write_text("saved result", encoding="utf-8")
+    (core.WORKDIR / "saved.txt").write_text("saved result", encoding="utf-8")
     submission = runtime.submit("read then ask")
     request, _ = displayed_approval(runtime)
     snapshot = stored(runtime)

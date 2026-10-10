@@ -225,10 +225,13 @@ def _message_items(role: str, content) -> list:
                                         ensure_ascii=False),
             })
         elif kind == "tool_result":
+            output = _text_of(_field(block, "content", ""))
+            if _field(block, "is_error", False):
+                output = "[Tool execution failed]\n" + output
             items.append({
                 "type": "function_call_output",
                 "call_id": _field(block, "tool_use_id"),
-                "output": _text_of(_field(block, "content", "")),
+                "output": output,
             })
     return items
 

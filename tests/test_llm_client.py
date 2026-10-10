@@ -1,5 +1,12 @@
 """Protocol validation through the messages.create consumer interface."""
 
+import agent_harness.core as core
+import agent_harness.runtime.hooks as hooks
+import agent_harness.runtime.scheduler as scheduler
+import agent_harness.workflows.workflow_runtime as workflow_runtime
+import agent_harness.agents.goal as goal_module
+
+
 from types import SimpleNamespace
 import asyncio
 
@@ -23,6 +30,25 @@ def create(client):
     return client.messages.create(model="test", messages=[{"role": "user", "content": "go"}])
 
 
+def test_failed_tool_result_uses_supported_responses_output(monkeypatch):
+    from agent_harness.tools.tool_result import ToolResult
+    payloads = []
+    client = llm_client.ResponsesClient(api_key="fake")
+
+    def post(payload):
+        payloads.append(payload)
+        return {"status": "completed", "output": []}
+
+    monkeypatch.setattr(client, "_post", post)
+    client.messages.create(model="test", messages=[{"role": "user", "content": [
+        ToolResult("Blocked by dependencies", "failed").model_result("blocked"),
+        ToolResult("Error: successful output", "success").model_result("success")]}])
+    outputs = payloads[0]["input"]
+    assert outputs[0] == {"type": "function_call_output", "call_id": "blocked",
+                          "output": "[Tool execution failed]\nBlocked by dependencies"}
+    assert outputs[1]["output"] == "Error: successful output"
+
+
 def test_completed_text_tool_and_usage(monkeypatch):
     response = {"status": "completed", "output": [
         {"type": "message", "content": [{"type": "output_text", "text": "hello"}]},
@@ -42,12 +68,12 @@ def test_plain_json_text_is_not_executed_as_a_tool(host_factory, monkeypatch):
     client = client_for(monkeypatch, {"status": "completed", "output": [
         {"type": "message", "content": [{"type": "output_text", "text": text}]},
     ]})
-    monkeypatch.setattr(host.core, "client", client)
+    monkeypatch.setattr(core, "client", client)
     messages = [{"role": "user", "content": "展示工具调用格式"}]
     outcome = host.agent_loop(messages, "展示工具调用格式")
     assert outcome.status == "completed"
     assert messages[-1]["content"][0]["text"] == text
-    assert not (host.core.WORKDIR / "unwanted.txt").exists()
+    assert not (core.WORKDIR / "unwanted.txt").exists()
 
 
 @pytest.mark.parametrize("status", ["failed", "cancelled", "queued", "in_progress", None, "unknown", []])
@@ -120,16 +146,16 @@ def test_lead_protocol_failure_executes_no_tools_or_stop_and_restores_cron(host_
     client = client_for(monkeypatch, {"status": "incomplete",
         "incomplete_details": {"reason": "max_output_tokens"},
         "output": [tool('{"path":"bad.txt","content":"must not run"}', "write_file")]})
-    monkeypatch.setattr(host.core, "client", client)
+    monkeypatch.setattr(core, "client", client)
     stops = []
-    monkeypatch.setattr(host.hooks, "trigger_hooks", lambda event, *args: stops.append(event))
-    job = host.scheduler.schedule_job("* * * * *", "scheduled work", recurring=False)
-    host.scheduler._enqueue_due_job(job)
+    monkeypatch.setattr(hooks, "trigger_hooks", lambda event, *args: stops.append(event))
+    job = scheduler.schedule_job("* * * * *", "scheduled work", recurring=False)
+    scheduler._enqueue_due_job(job)
     messages = [{"role": "user", "content": "go"}]
     host.agent_loop(messages, "go")
     assert "Stop" not in stops
-    assert host.scheduler.cron_queue == [job]
-    assert not (host.core.WORKDIR / "bad.txt").exists()
+    assert scheduler.cron_queue == [job]
+    assert not (core.WORKDIR / "bad.txt").exists()
     assert "ProtocolResponseError" in messages[-1]["content"][0]["text"]
     assert not any("tool_use" in str(msg) for msg in messages)
 
@@ -137,7 +163,7 @@ def test_lead_protocol_failure_executes_no_tools_or_stop_and_restores_cron(host_
 def test_workflow_protocol_failure_writes_no_successful_agent_journal(host_factory, monkeypatch):
     host = host_factory()
     client = client_for(monkeypatch, {"status": "failed", "output": []})
-    runtime = host.workflow_runtime
+    runtime = workflow_runtime
     monkeypatch.setattr(runtime, "RUNNER_FACTORY", lambda: runtime.SubagentRunner(client, "test"))
 
     async def step(ctx, args):
@@ -154,8 +180,8 @@ def test_workflow_protocol_failure_writes_no_successful_agent_journal(host_facto
 def test_goal_protocol_failure_preserves_active_condition(host_factory, monkeypatch):
     host = host_factory()
     client = client_for(monkeypatch, {"status": "failed", "output": []})
-    evaluator = host.goal_module.PromptGoalEvaluator(client=client, model="test")
-    goal = host.goal_module.GoalController(evaluator=evaluator)
+    evaluator = goal_module.PromptGoalEvaluator(client=client, model="test")
+    goal = goal_module.GoalController(evaluator=evaluator)
     goal.set_goal("tests pass")
     result = asyncio.run(goal.evaluate_after_turn([]))
     assert result.action == "error"

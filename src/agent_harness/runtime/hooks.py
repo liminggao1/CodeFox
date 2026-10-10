@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .. import core
-from ..tools import file_tools, tool_registry
+from ..tools import tool_registry
 from . import interaction
 
 # -- Hooks 与权限检查 --
@@ -71,26 +71,6 @@ def check_tool_use(block, *, authorize=None, stopped=None):
         if denied is not None:
             return ToolCheck("denied", str(denied))
         return ToolCheck("allowed")
-
-
-def execute_tool(block, handler, *, on_status=None):
-    """Execute an approved synchronous call, then run its post-use hooks once."""
-    with interaction.operation_context(tool_call_id=getattr(block, "id", None)):
-        operation = interaction.operation_status("tool", block.name, "running") if handler is not None else None
-        try:
-            output = file_tools.call_tool_handler(
-                handler, block.input, block.name, on_status=on_status)
-            if operation is not None:
-                interaction.operation_status("tool", block.name, "postprocessing", operation_id=operation)
-            trigger_hooks("PostToolUse", block, output)
-            if operation is not None:
-                interaction.operation_status("tool", block.name, "completed", operation_id=operation)
-        except Exception as exc:
-            if operation is not None:
-                interaction.operation_status("tool", block.name, "failed", operation_id=operation,
-                                             reason=f"{type(exc).__name__}: {exc}")
-            raise
-        return output
 
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]

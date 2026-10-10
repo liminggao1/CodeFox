@@ -1,5 +1,10 @@
 """Compaction failures preserve history and do not terminate usable model turns."""
 
+import agent_harness.core as core
+import agent_harness.context.compaction as compaction
+import agent_harness.runtime.scheduler as scheduler
+
+
 import copy
 from types import SimpleNamespace
 
@@ -21,7 +26,7 @@ def tool_response(*calls):
 def test_automatic_failure_allows_main_call_without_repeat(host_factory, monkeypatch, context_error):
     host = host_factory()
     summaries, main_calls = [], []
-    history = [{"role": "user", "content": "x" * host.core.COMPACT_TRIGGER}]
+    history = [{"role": "user", "content": "x" * core.COMPACT_TRIGGER}]
     original = copy.deepcopy(history)
 
     def fail_summary(messages):
@@ -37,8 +42,8 @@ def test_automatic_failure_allows_main_call_without_repeat(host_factory, monkeyp
             return tool_response(("read", "read_file", {"path": "missing.txt"}))
         return text_response()
 
-    monkeypatch.setattr(host.compaction, "summarize_history", fail_summary)
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    monkeypatch.setattr(compaction, "summarize_history", fail_summary)
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
     host.agent_loop(history, "go")
     assert len(main_calls) == 2
     assert len(summaries) == (2 if context_error else 1)
@@ -63,13 +68,13 @@ def test_failed_candidate_preserves_nested_blocks_and_list_identity(host_factory
     def fail_archive(messages):
         raise OSError("archive failed")
 
-    monkeypatch.setattr(host.compaction, "tool_result_budget", mutate_candidate)
-    monkeypatch.setattr(host.compaction, "snip_compact", fail_archive)
-    result = host.compaction.prepare_history(history, "go")
+    monkeypatch.setattr(compaction, "tool_result_budget", mutate_candidate)
+    monkeypatch.setattr(compaction, "snip_compact", fail_archive)
+    result = compaction.prepare_history(history, "go")
     assert not result.applied and "archive failed" in result.reason
     assert history == before
     assert history[0]["content"][0] is block
-    assert host.compaction.prepare_history(history, "go", enabled=False).reason is None
+    assert compaction.prepare_history(history, "go", enabled=False).reason is None
 
 
 def test_manual_failure_preserves_other_results_and_never_reruns_tools(host_factory, monkeypatch):
@@ -87,22 +92,23 @@ def test_manual_failure_preserves_other_results_and_never_reruns_tools(host_fact
         summaries.append(copy.deepcopy(messages))
         raise RuntimeError("summary unavailable")
 
-    monkeypatch.setattr(host.compaction, "summarize_history", fail_summary)
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    monkeypatch.setattr(compaction, "summarize_history", fail_summary)
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
     history = [{"role": "user", "content": "write once"}]
     host.agent_loop(history, "write once")
     results = calls[1]["messages"][-1]["content"]
     assert "Wrote" in results[0]["content"]
     assert "Compaction failed" in results[1]["content"]
-    assert (host.core.WORKDIR / "once.txt").read_text() == "written"
+    assert results[1]["is_error"] is True
+    assert (core.WORKDIR / "once.txt").read_text() == "written"
     assert len(summaries) == 1
     assert all(tool["name"] != "compact" for tool in calls[1]["tools"])
 
 
 def test_reactive_archive_failure_ends_with_cron_restored(host_factory, monkeypatch):
     host = host_factory()
-    job = host.scheduler.schedule_job("* * * * *", "cron work", recurring=False)
-    host.scheduler._enqueue_due_job(job)
+    job = scheduler.schedule_job("* * * * *", "cron work", recurring=False)
+    scheduler._enqueue_due_job(job)
 
     def context_error(**kwargs):
         raise RuntimeError("context_length_exceeded")
@@ -110,12 +116,12 @@ def test_reactive_archive_failure_ends_with_cron_restored(host_factory, monkeypa
     def fail_archive(messages):
         raise OSError("disk unavailable")
 
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=context_error)))
-    monkeypatch.setattr(host.compaction, "write_transcript", fail_archive)
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=context_error)))
+    monkeypatch.setattr(compaction, "write_transcript", fail_archive)
     history = [{"role": "user", "content": "go"}]
     host.agent_loop(history, "go")
     assert "Reactive compaction failed" in history[-1]["content"][0]["text"]
-    assert host.scheduler.cron_queue == [job]
+    assert scheduler.cron_queue == [job]
     assert history[0]["content"] == "go"
 
 
@@ -123,6 +129,6 @@ def test_reactive_archive_failure_ends_with_cron_restored(host_factory, monkeypa
                                     tool_response(("tool", "read_file", {"path": "x"}))])
 def test_summary_requires_complete_nonempty_text(host_factory, monkeypatch, response):
     host = host_factory()
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: response)))
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: response)))
     with pytest.raises(ValueError, match="complete, non-empty"):
-        host.compaction.summarize_history([])
+        compaction.summarize_history([])

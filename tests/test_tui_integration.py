@@ -1,5 +1,10 @@
 """Exercise the optional UI against the real offline runtime."""
 
+import agent_harness.core as core
+import agent_harness.runtime.scheduler as scheduler
+import agent_harness.agents.subagent as subagent_runtime
+
+
 import asyncio
 import threading
 import time
@@ -73,7 +78,7 @@ def test_tui_stop_releases_approval_and_preserves_draft(runtime_factory):
             await wait_for(pilot, lambda: not app.busy)
             assert app.approval is None and len(app.screen_stack) == 1
             assert editor.text == "next draft"
-            assert not (host.core.WORKDIR / "unwanted").exists()
+            assert not (core.WORKDIR / "unwanted").exists()
             await pilot.press("ctrl+d")
             await wait_for(pilot, lambda: app.runtime_closed)
     asyncio.run(exercise())
@@ -110,19 +115,19 @@ def test_tui_cron_error_after_resume_keeps_current_session_generation(runtime_fa
     app = HarnessApp(runtime)
     logs = []
     monkeypatch.setattr(app, "_log", logs.append)
-    monkeypatch.setattr(host.core, "CRON_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(core, "CRON_POLL_SECONDS", 0.01)
     async def exercise():
         async with app.run_test(size=(100, 30)) as pilot:
             app._submit("/resume " + target["id"])
             await wait_for(pilot, lambda: app.generation == 2 and not app.busy)
-            with host.scheduler.cron_lock:
-                host.schedule_job("* * * * *", "cannot persist", recurring=False)
+            with scheduler.cron_lock:
+                scheduler.schedule_job("* * * * *", "cannot persist", recurring=False)
                 def fail():
                     raise OSError("cron disk unavailable")
-                monkeypatch.setattr(host.scheduler, "save_durable_jobs", fail)
+                monkeypatch.setattr(scheduler, "save_durable_jobs", fail)
             await wait_for(pilot, lambda: any("cron disk unavailable" in log for log in logs))
             assert app.generation == 2 and app.snapshot["session_id"] == target["id"]
-            assert not host.scheduler.cron_queue
+            assert not scheduler.cron_queue
             old = ExecutionContext(runtime.channel, "old", 1, "old-turn")
             old.publish("assistant_message", text="stale")
             await pilot.pause(0.15)
@@ -162,7 +167,7 @@ def test_tui_subagent_conversation_updates_while_background_lead_is_paused(runti
             assert any("helper · idle" in str(widget.content) for widget in app.query(Static))
             assert runtime._background_paused and not app.busy
             assert lead_calls == [True, True]
-            host.run_request_shutdown("helper")
+            subagent_runtime.run_request_shutdown("helper").content
             await wait_for(pilot, lambda: not app.snapshot["subagents"])
             await pilot.press("ctrl+d")
             await wait_for(pilot, lambda: app.runtime_closed)
@@ -494,7 +499,7 @@ def test_command_draft_survives_actual_background_wakeup(runtime_factory, monkey
             app._submit("initial")
             await wait_for(pilot, lambda: not app.busy)
             editor = await command_draft(app, pilot, "/goal clear")
-            host.subagent.BUS.send("child", "lead", "Background result")
+            subagent_runtime.BUS.send("child", "lead", "Background result")
             await wait_for(pilot, lambda: started.is_set() and app.busy)
             assert not app.query_one(CommandCandidates).display
             count = len(submissions)

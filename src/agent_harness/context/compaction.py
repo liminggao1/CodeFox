@@ -615,6 +615,7 @@ class ManualCompaction:
         self.accepted = False
         self.pending = False
         self._result = None
+        self._execution_context = None
 
     def available_tools(self, tools: list) -> list:
         """首次手动压缩请求被接受后，不再向模型提供 compact 工具。
@@ -649,6 +650,8 @@ class ManualCompaction:
             self.pending = True
             self.accepted = True
             self._result = result
+            from ..runtime import interaction
+            self._execution_context = interaction.current_context()
         return result
 
     def apply_after_results(self, messages: list, active_request: str) -> CompactionResult | None:
@@ -666,5 +669,12 @@ class ManualCompaction:
             result = _history_transaction(messages, lambda candidate: compact_history(candidate, active_request))
             if result.reason:
                 self._result["content"] = f"[Compaction failed: {result.reason}]"
+                self._result["is_error"] = True
+                # 已发布的接受记录不修改；用同一调用 ID 发布实际失败结算。
+                from ..runtime import interaction
+                with interaction.execution_context(self._execution_context):
+                    interaction.publish("tool_result", **self._result, status="failed", correction=True)
+                    if self._execution_context is not None and self._execution_context.checkpoint is not None:
+                        self._execution_context.checkpoint()
             return result
         return None

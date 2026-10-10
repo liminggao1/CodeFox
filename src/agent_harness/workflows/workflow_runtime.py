@@ -1027,9 +1027,13 @@ def run_workflow_sync(**tool_input):
     """将同步工具分发连接到异步工作流入口，并等待运行结果。
 
     输入：tool_input 为 name、args 和可选 resume_from_run_id 关键字参数。
-    返回：工作流结果的 JSON 字符串；WorkflowInputError 转成错误文本，其他异常继续抛出。
+    返回：ToolResult，正文为结果 JSON，状态来自原始运行结果。
+        WorkflowInputError 转成 failed 工具结果，其他异常继续抛出。
     """
+    from ..tools.tool_result import ToolResult
     try:
-        return json.dumps(asyncio.run(run_workflow(**tool_input)), default=str)
+        result = asyncio.run(run_workflow(**tool_input))
+        status = "success" if result["task"]["status"] == "completed" else "failed"
+        return ToolResult(json.dumps(result, default=str), status)
     except WorkflowInputError as exc:
-        return f"Error: {exc}"
+        return ToolResult(f"Error: {exc}", "failed")

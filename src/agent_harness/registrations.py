@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from .tools.tool_result import ToolResult
 from . import core
 
 import json
@@ -21,7 +22,7 @@ from .tools.tool_registry import ToolDefinition
 
 # -- Lead 的 worktree 工具 --
 
-def run_create_worktree(name: str, task_id: str) -> str:
+def run_create_worktree(name: str, task_id: str) -> ToolResult:
     """处理主模型发出的 ``create_worktree`` 工具请求。
 
     输入：
@@ -30,21 +31,27 @@ def run_create_worktree(name: str, task_id: str) -> str:
     返回：
         ``task_worktrees.create_worktree`` 返回的创建结果或错误文本。
     """
-    return task_worktrees.create_worktree(name, task_id)
+    try:
+        return ToolResult(task_worktrees.create_worktree(name, task_id), "success")
+    except ValueError as exc:
+        return ToolResult(str(exc), "failed")
 
 
-def run_remove_worktree(name: str) -> str:
+def run_remove_worktree(name: str) -> ToolResult:
     """处理 Lead 的非强制 worktree 清理请求。
 
     输入：name 为已注册且绑定任务的 worktree 名称。
     返回：移除结果或拒绝原因；成功时保留分支，释放 Lead 自己的已完成分配。
         不接受丢弃改动或释放子 agent分配的参数。
     """
-    return task_worktrees.remove_worktree(name)
+    try:
+        return ToolResult(task_worktrees.remove_worktree(name), "success")
+    except ValueError as exc:
+        return ToolResult(str(exc), "failed")
 
 # -- 基础工具处理器 --
 
-def run_create_task(subject: str, description: str = "") -> str:
+def run_create_task(subject: str, description: str = "") -> ToolResult:
     """处理 ``create_task`` 请求，将生成的任务 ID 返回给模型。
 
     输入：
@@ -56,10 +63,10 @@ def run_create_task(subject: str, description: str = "") -> str:
     """
     task = tasks.create_task(subject, description)
     core.terminal_print(f"  \033[34m[create] {task.subject}\033[0m")
-    return f"Created {task.id}: {task.subject}"
+    return ToolResult(f"Created {task.id}: {task.subject}", "success")
 
 
-def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
+def run_update_task(task_id: str, addBlockedBy: list[str]) -> ToolResult:
     """处理模型为尚未认领的任务添加依赖的工具请求。
 
     输入：
@@ -72,20 +79,20 @@ def run_update_task(task_id: str, addBlockedBy: list[str]) -> str:
     try:
         task = tasks.update_task(task_id, addBlockedBy)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return ToolResult(f"Error: {exc}", "failed")
     except FileNotFoundError:
-        return f"Error: Task {task_id} not found"
+        return ToolResult(f"Error: Task {task_id} not found", "failed")
     dependencies = ", ".join(task.blockedBy) or "(none)"
     core.terminal_print(f"  \033[34m[update] {task.subject} blockedBy: {dependencies}\033[0m")
-    return f"Updated {task.id} blockedBy: {dependencies}"
+    return ToolResult(f"Updated {task.id} blockedBy: {dependencies}", "success")
 
 
-def run_list_tasks() -> str:
+def run_list_tasks() -> ToolResult:
     """Return the shared task board text for the Lead."""
     return shared_tools.run_list_tasks()
 
 
-def run_get_task(task_id: str) -> str:
+def run_get_task(task_id: str) -> ToolResult:
     """处理模型读取任务完整字段的工具请求。
 
     输入：
@@ -95,46 +102,47 @@ def run_get_task(task_id: str) -> str:
         不修改任务或分配信息。
     """
     try:
-        return tasks.get_task_json(task_id)
+        return ToolResult(tasks.get_task_json(task_id), "success")
     except ValueError as exc:
-        return f"Error: {exc}"
+        return ToolResult(f"Error: {exc}", "failed")
     except FileNotFoundError:
-        return f"Error: task {task_id} not found"
+        return ToolResult(f"Error: task {task_id} not found", "failed")
 
-def run_claim_task(task_id: str) -> str:
+def run_claim_task(task_id: str) -> ToolResult:
     """Claim with Lead task ownership and the existing error text."""
     return shared_tools.run_claim_task(task_id)
 
 
-def run_complete_task(task_id: str) -> str:
+def run_complete_task(task_id: str) -> ToolResult:
     """Complete with Lead task ownership; tasks retains validation."""
     return shared_tools.run_complete_task(task_id)
 
 
 def run_spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
-                       task_id: str | None = None, require_plan: bool = False, tools=None) -> str:
+                       task_id: str | None = None, require_plan: bool = False, tools=None) -> ToolResult:
     """Serialize the unified runtime result for the Lead's creation tool."""
-    return json.dumps(subagent.spawn_subagent(
-        name, prompt, mode, role, task_id, require_plan, tools), ensure_ascii=False)
+    result = subagent.spawn_subagent(name, prompt, mode, role, task_id, require_plan, tools)
+    status = {"completed": "success", "started": "started", "failed": "failed"}[result["status"]]
+    return ToolResult(json.dumps(result, ensure_ascii=False), status)
 
 
-def run_list_subagents() -> str:
+def run_list_subagents() -> ToolResult:
     """List active names, roles, modes and states without returning history."""
-    return json.dumps(subagent.list_subagents(), ensure_ascii=False)
+    return ToolResult(json.dumps(subagent.list_subagents(), ensure_ascii=False), "success")
 
 
-def run_send_message(to: str, content: str) -> str:
+def run_send_message(to: str, content: str) -> ToolResult:
     """Deliver the Lead's chosen message to a live persistent child."""
-    return subagent.send_message("lead", to, content)
+    return ToolResult(subagent.send_message("lead", to, content), "success")
 
 
-def run_connect_mcp(name: str) -> str:
+def run_connect_mcp(name: str) -> ToolResult:
     """处理主模型连接模拟 MCP 服务器的请求。
 
     输入：name 为内置模拟服务器名称。
     返回：连接结果或错误文本；成功后工具在下一次装配时可见。
     """
-    return mcp_tools.connect_mcp(name)
+    return ToolResult(mcp_tools.connect_mcp(name), "success")
 
 
 # -- 工具定义 --
@@ -164,7 +172,7 @@ BUILTIN_DEFINITIONS = [
      "input_schema": {"type": "object",
                       "properties": {"name": {"type": "string"}},
                       "required": ["name"]}},
-                   skills.load_skill, "built-in tool 'load_skill'"),
+                   lambda name: ToolResult(skills.load_skill(name)), "built-in tool 'load_skill'"),
     ToolDefinition({"name": "compact",
      "description": "Summarize earlier conversation and continue with compacted context.",
      "input_schema": {"type": "object",

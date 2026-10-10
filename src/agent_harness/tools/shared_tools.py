@@ -1,5 +1,6 @@
 """Shared tool definitions and actor binding, without capability selection."""
 
+from .tool_result import ToolResult
 from copy import deepcopy
 from functools import partial
 
@@ -62,32 +63,32 @@ _CHILD_DESCRIPTIONS = {
 
 # -- Task board text and actor binding --
 
-def run_list_tasks() -> str:
+def run_list_tasks() -> ToolResult:
     """Return the existing board text without modifying tasks."""
     task_list = tasks.list_tasks()
     if not task_list:
-        return "No tasks."
-    return "\n".join(
+        return ToolResult("No tasks.")
+    return ToolResult("\n".join(
         f"  {task.id}: {task.subject} [{task.status}]"
         + (f" (wt:{task.worktree})" if task.worktree else "")
-        for task in task_list)
+        for task in task_list))
 
 
 def _run_task(action, task_id, owner, missing_label):
     try:
-        return action(task_id, owner=owner)
+        return ToolResult(action(task_id, owner=owner), "success")
     except ValueError as exc:
-        return f"Error: {exc}"
+        return ToolResult(f"Error: {exc}", "failed")
     except FileNotFoundError:
-        return f"Error: {missing_label} {task_id} not found"
+        return ToolResult(f"Error: {missing_label} {task_id} not found", "failed")
 
 
-def run_claim_task(task_id: str, *, owner="agent", missing_label="task") -> str:
+def run_claim_task(task_id: str, *, owner="agent", missing_label="task") -> ToolResult:
     """Claim using the supplied task owner and preserve the caller's error text."""
     return _run_task(tasks.claim_task, task_id, owner, missing_label)
 
 
-def run_complete_task(task_id: str, *, owner="agent", missing_label="task") -> str:
+def run_complete_task(task_id: str, *, owner="agent", missing_label="task") -> ToolResult:
     """Complete using the supplied task owner; tasks retains all validation."""
     return _run_task(tasks.complete_task, task_id, owner, missing_label)
 

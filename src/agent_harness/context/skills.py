@@ -93,10 +93,10 @@ def load_skill(name: str) -> str:
     """按已扫描名称加载 skill 全文，作为工具结果返回模型。
 
     输入：name 为 SKILL_REGISTRY 中的名称。
-    返回：SKILL.md 原文；未找到时返回错误及可用名称，不重新扫描目录。
+    返回：SKILL.md 原文；未找到时抛出 ValueError，包含可用名称，不重新扫描目录。
     """
     skill = SKILL_REGISTRY.get(name)
     if not skill:
         available = ", ".join(SKILL_REGISTRY.keys()) or "(none)"
-        return f"Skill not found: {name}. Available: {available}"
+        raise ValueError(f"Skill not found: {name}. Available: {available}")
     return skill["content"]

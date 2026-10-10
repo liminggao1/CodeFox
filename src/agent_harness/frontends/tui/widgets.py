@@ -118,7 +118,8 @@ class OperationEntry(Vertical):
         return max(0.0, (end - started_at).total_seconds())
 
     def refresh_elapsed(self, now):
-        if not self.is_mounted:
+        # 窗口重建时，容器可能仍挂载但其子控件已开始卸载。
+        if not self.is_mounted or not self.query(".operation-summary"):
             return
         summary = self.query_one(".operation-summary", Static).content
         if " · 耗时 " not in str(summary):

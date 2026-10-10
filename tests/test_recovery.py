@@ -1,5 +1,12 @@
 """Lead recovery trajectories use one owner for output and overload state."""
 
+import agent_harness.core as core
+import agent_harness.context.compaction as compaction
+import agent_harness.context.memory_runtime as memory_runtime
+import agent_harness.tools.mcp_tools as mcp_tools
+import agent_harness.runtime.scheduler as scheduler
+
+
 from types import SimpleNamespace
 
 import pytest
@@ -99,15 +106,15 @@ def test_lead_uses_state_limits_and_preserves_only_continuable_text(host_factory
         calls.append(kwargs["max_tokens"])
         return responses.pop(0)
 
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
     history = [{"role": "user", "content": "go"}]
     host.agent_loop(history, "go")
     assert "discarded" not in str(history)
     assert "partial" in str(history)
-    assert host.core.CONTINUATION_PROMPT in str(history)
+    assert core.CONTINUATION_PROMPT in str(history)
     host.agent_loop(history, "next")
-    assert calls == [host.core.DEFAULT_MAX_TOKENS, host.core.ESCALATED_MAX_TOKENS,
-                     host.core.ESCALATED_MAX_TOKENS, host.core.DEFAULT_MAX_TOKENS]
+    assert calls == [core.DEFAULT_MAX_TOKENS, core.ESCALATED_MAX_TOKENS,
+                     core.ESCALATED_MAX_TOKENS, core.DEFAULT_MAX_TOKENS]
 
 
 def test_lead_does_not_repeat_reactive_recovery(host_factory, monkeypatch):
@@ -123,8 +130,8 @@ def test_lead_does_not_repeat_reactive_recovery(host_factory, monkeypatch):
         summaries.append(True)
         return "summary"
 
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
-    monkeypatch.setattr(host.compaction, "summarize_history", summary)
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    monkeypatch.setattr(compaction, "summarize_history", summary)
     history = [{"role": "user", "content": "go"}]
     host.agent_loop(history, "go")
     assert calls == [True, True]
@@ -141,31 +148,31 @@ def test_preparation_failure_restores_cron_and_next_turn_can_deliver(host_factor
         calls.append(True)
         return SimpleNamespace(stop_reason="end_turn", content=[])
 
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
-    original_index = host.memory_runtime.read_memory_index
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    original_index = memory_runtime.read_memory_index
     if failure == "tools":
-        client = host.mcp_tools.MCPClient("invalid")
+        client = mcp_tools.MCPClient("invalid")
         client.register([{"name": "bad", "inputSchema": {"type": "array"}}], {"bad": lambda: "bad"})
-        host.mcp_clients["invalid"] = client
+        mcp_tools.mcp_clients["invalid"] = client
     else:
         def fail_index():
             raise OSError("context_length_exceeded" if failure == "preparation_context_error" else "memory unavailable")
 
-        monkeypatch.setattr(host.memory_runtime, "read_memory_index", fail_index)
+        monkeypatch.setattr(memory_runtime, "read_memory_index", fail_index)
 
-    monkeypatch.setattr(host.compaction, "reactive_compact", lambda *args: pytest.fail("Preparation was treated as a model context error"))
-    job = host.scheduler.schedule_job("* * * * *", "scheduled work", recurring=False, durable=False)
-    host.scheduler._enqueue_due_job(job)
+    monkeypatch.setattr(compaction, "reactive_compact", lambda *args: pytest.fail("Preparation was treated as a model context error"))
+    job = scheduler.schedule_job("* * * * *", "scheduled work", recurring=False, durable=False)
+    scheduler._enqueue_due_job(job)
     history = [{"role": "user", "content": "go"}]
     host.agent_loop(history, "go")
     assert calls == []
-    assert host.scheduler.cron_queue == [job]
-    assert host.scheduler.scheduled_jobs[job.id].pending_delivery
+    assert scheduler.cron_queue == [job]
+    assert scheduler.scheduled_jobs[job.id].pending_delivery
     assert "[Error]" in history[-1]["content"][0]["text"]
 
-    monkeypatch.setattr(host.memory_runtime, "read_memory_index", original_index)
-    host.mcp_clients.clear()
+    monkeypatch.setattr(memory_runtime, "read_memory_index", original_index)
+    mcp_tools.mcp_clients.clear()
     host.agent_loop(history, "retry")
     assert calls == [True]
-    assert host.scheduler.cron_queue == []
-    assert job.id not in host.scheduler.scheduled_jobs
+    assert scheduler.cron_queue == []
+    assert job.id not in scheduler.scheduled_jobs

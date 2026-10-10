@@ -1,5 +1,11 @@
 """Runtime snapshots refresh on the next model call without mutating old values."""
 
+import agent_harness.context.memory_runtime as memory_runtime
+import agent_harness.tools.mcp_tools as mcp_tools
+import agent_harness.agents.subagent as subagent_runtime
+import agent_harness.core as core
+
+
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
@@ -10,10 +16,10 @@ from agent_harness import runtime_context
 
 def test_snapshot_owns_its_values(host_factory, monkeypatch) -> None:
     host = host_factory()
-    monkeypatch.setattr(host.memory_runtime, "load_memories", lambda messages: "")
+    monkeypatch.setattr(memory_runtime, "load_memories", lambda messages: "")
     first = runtime_context.build_context([])
-    host.connect_mcp("docs")
-    host.subagent.active_subagents["alice"] = host.SubagentRecord("alice")
+    mcp_tools.connect_mcp("docs")
+    subagent_runtime.active_subagents["alice"] = subagent_runtime.SubagentRecord("alice")
     second = runtime_context.build_context([])
 
     assert first.connected_mcp == ()
@@ -28,14 +34,14 @@ def test_agent_refreshes_memory_mcp_and_subagents_after_tool_round(host_factory,
     host = host_factory(enable_memory=True)
     monkeypatch.setattr(host, "remember_after_turn", lambda messages: None)
     calls = []
-    monkeypatch.setattr(host.memory_runtime, "load_memories", lambda messages: "recalled")
+    monkeypatch.setattr(memory_runtime, "load_memories", lambda messages: "recalled")
 
     def create(**kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
-            host.memory_runtime.write_memory_file("Layout", "project", "src layout", "src/")
-            host.memory_runtime.rebuild_memory_index()
-            host.subagent.active_subagents["alice"] = "working"
+            memory_runtime.write_memory_file("Layout", "project", "src layout", "src/")
+            memory_runtime.rebuild_memory_index()
+            subagent_runtime.active_subagents["alice"] = "working"
             content = [SimpleNamespace(
                 type="tool_use", id="connect", name="connect_mcp", input={"name": "docs"}
             )]
@@ -44,7 +50,7 @@ def test_agent_refreshes_memory_mcp_and_subagents_after_tool_round(host_factory,
             content=[SimpleNamespace(type="text", text="Done")], stop_reason="end_turn"
         )
 
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
     host.agent_loop([{"role": "user", "content": "connect docs"}], "connect docs")
 
     assert len(calls) == 2

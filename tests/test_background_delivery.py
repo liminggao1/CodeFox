@@ -1,5 +1,15 @@
 """Full background output is retained before a batch is collected once."""
 
+import agent_harness.runtime.scheduler as scheduler
+import agent_harness.tools.file_tools as file_tools
+import agent_harness.runtime.hooks as hooks
+import agent_harness.core as core
+import agent_harness.registrations as registrations
+import agent_harness.workspace.worktrees as worktrees
+import agent_harness.workspace.tasks as tasks
+import agent_harness.context.compaction as compaction
+
+
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,10 +19,10 @@ import pytest
 
 
 def finish_task(host, monkeypatch, output, exit_code=0):
-    monkeypatch.setattr(host.scheduler.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
-    monkeypatch.setattr(host.file_tools, "_run_bash_process", lambda command, cwd: (output, exit_code))
+    monkeypatch.setattr(scheduler.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
+    monkeypatch.setattr(file_tools, "_run_bash_process", lambda command, cwd: (output, exit_code))
     block = SimpleNamespace(type="tool_use", id="tool", name="bash", input={"command": "fake"})
-    return host.scheduler.start_background_task(block, {})
+    return scheduler.start_background_task(block, {})
 
 
 def full_path(note):
@@ -27,31 +37,35 @@ def test_long_output_tail_is_readable(host_factory, monkeypatch, length, exit_co
     if hook_failure:
         def fail_hook(*args):
             raise RuntimeError("hook failed")
-        monkeypatch.setattr(host.hooks, "trigger_hooks", fail_hook)
+        monkeypatch.setattr(hooks, "trigger_hooks", fail_hook)
     task_id = finish_task(host, monkeypatch, output, exit_code)
-    expected = host.scheduler.background_results[task_id]
-    note, = host.scheduler.collect_background_results()
+    expected = scheduler.background_results[task_id]
+    result = scheduler.background_tasks[task_id]["result"]
+    assert result.status == ("failed" if exit_code else "success")
+    note, = scheduler.collect_background_results()
     path = full_path(note)
-    assert path.parent == host.core.tool_results_dir() / "background"
+    assert path.parent == core.tool_results_dir() / "background"
     assert path.read_text(encoding="utf-8") == expected
-    assert "TAIL" in host.registrations.BUILTIN_HANDLERS["read_file"](str(path))
+    assert "TAIL" in registrations.BUILTIN_HANDLERS["read_file"](str(path)).content
     assert expected[:200] in note
     assert f"<status>{'failed' if exit_code or hook_failure else 'completed'}</status>" in note
-    assert host.scheduler.collect_background_results() == []
+    assert f"<command_status>{result.status}</command_status>" in note
+    assert ("hook failed" in note) is hook_failure
+    assert scheduler.collect_background_results() == []
 
 
 def test_bound_lead_reads_background_full_output_through_tool_loop(host_factory, monkeypatch):
     host = host_factory()
-    checkout = host.core.WORKDIR / ".worktrees" / "feature"
+    checkout = core.WORKDIR / ".worktrees" / "feature"
     checkout.mkdir(parents=True)
-    monkeypatch.setattr(host.worktrees, "_registered_worktree", lambda name: (checkout, None))
-    task = host.tasks.create_task("Read background evidence")
+    monkeypatch.setattr(worktrees, "_registered_worktree", lambda name: (checkout, None))
+    task = tasks.create_task("Read background evidence")
     task.worktree = "feature"
-    host.tasks.save_task(task)
-    assert host.tasks.claim_task(task.id, owner="agent").startswith("Claimed")
+    tasks.save_task(task)
+    assert tasks.claim_task(task.id, owner="agent").startswith("Claimed")
     task_id = finish_task(host, monkeypatch, "中" * 250 + "\nTAIL")
-    assert host.scheduler.background_tasks[task_id]["cwd"] == str(checkout)
-    note, = host.scheduler.collect_background_results()
+    assert scheduler.background_tasks[task_id]["cwd"] == str(checkout)
+    note, = scheduler.collect_background_results()
     path = full_path(note)
     responses = [
         SimpleNamespace(stop_reason="tool_use", content=[SimpleNamespace(
@@ -59,7 +73,7 @@ def test_bound_lead_reads_background_full_output_through_tool_loop(host_factory,
             input={"path": str(path), "offset": 1, "limit": 1})]),
         SimpleNamespace(stop_reason="end_turn", content=[]),
     ]
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(
+    monkeypatch.setattr(core, "client", SimpleNamespace(
         messages=SimpleNamespace(create=lambda **kwargs: responses.pop(0))))
     history = [{"role": "user", "content": note}]
     host.agent_loop(history, "Read the full background evidence")
@@ -74,7 +88,7 @@ def test_batch_save_failure_keeps_records_and_reuses_saved_path(host_factory, mo
     host = host_factory()
     first = finish_task(host, monkeypatch, "a" * 250)
     second = finish_task(host, monkeypatch, "b" * 250)
-    save = host.compaction.save_output
+    save = compaction.save_output
     calls = []
 
     def fail_second(output_id, output, **kwargs):
@@ -83,16 +97,16 @@ def test_batch_save_failure_keeps_records_and_reuses_saved_path(host_factory, mo
             raise OSError("disk unavailable")
         return save(output_id, output, **kwargs)
 
-    monkeypatch.setattr(host.compaction, "save_output", fail_second)
+    monkeypatch.setattr(compaction, "save_output", fail_second)
     with pytest.raises(OSError, match="disk unavailable"):
-        host.scheduler.collect_background_results()
-    assert set(host.scheduler.background_tasks) == {first, second}
-    saved = host.scheduler.background_tasks[first]["saved_output_path"]
-    notes = host.scheduler.collect_background_results()
+        scheduler.collect_background_results()
+    assert set(scheduler.background_tasks) == {first, second}
+    saved = scheduler.background_tasks[first]["saved_output_path"]
+    notes = scheduler.collect_background_results()
     assert str(full_path(notes[0])) == saved
     assert len(calls) == 3
     assert calls[0] != calls[1] == calls[2]
-    assert not host.scheduler.background_results
+    assert not scheduler.background_results
 
 
 def test_two_collectors_deliver_each_result_once(host_factory, monkeypatch):
@@ -100,12 +114,12 @@ def test_two_collectors_deliver_each_result_once(host_factory, monkeypatch):
     real_thread = threading.Thread
     finish_task(host, monkeypatch, "ready")
     # Restore actual thread construction for the executor after finishing the worker.
-    monkeypatch.setattr(host.scheduler.threading, "Thread", real_thread)
+    monkeypatch.setattr(scheduler.threading, "Thread", real_thread)
     barrier = threading.Barrier(2)
 
     def collect():
         barrier.wait(timeout=5)
-        return host.scheduler.collect_background_results()
+        return scheduler.collect_background_results()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         left, right = list(executor.map(lambda _: collect(), range(2)))
@@ -115,11 +129,11 @@ def test_two_collectors_deliver_each_result_once(host_factory, monkeypatch):
 def test_reused_bg_id_never_overwrites_old_output(host_factory, monkeypatch):
     host = host_factory()
     first = finish_task(host, monkeypatch, "a" * 250)
-    old_path = full_path(host.scheduler.collect_background_results()[0])
+    old_path = full_path(scheduler.collect_background_results()[0])
     old_text = old_path.read_text()
-    monkeypatch.setattr(host.scheduler, "_bg_counter", int(first.removeprefix("bg_")) - 1)
+    monkeypatch.setattr(scheduler, "_bg_counter", int(first.removeprefix("bg_")) - 1)
     second = finish_task(host, monkeypatch, "b" * 250)
-    new_path = full_path(host.scheduler.collect_background_results()[0])
+    new_path = full_path(scheduler.collect_background_results()[0])
     assert first == second
     assert old_path != new_path
     assert old_path.read_text() == old_text
@@ -132,10 +146,10 @@ def test_notification_failure_keeps_sync_results_and_pending_batch(host_factory,
     def fail_save(*args, **kwargs):
         raise OSError("disk unavailable")
 
-    monkeypatch.setattr(host.compaction, "save_output", fail_save)
+    monkeypatch.setattr(compaction, "save_output", fail_save)
     results = [{"type": "tool_result", "tool_use_id": "sync", "content": "sync result"}]
     assert host.build_user_content(results) == results
     history = [{"role": "user", "content": "go"}]
     host.inject_background_notifications(history)
     assert history == [{"role": "user", "content": "go"}]
-    assert host.scheduler.has_pending_background()
+    assert scheduler.has_pending_background()

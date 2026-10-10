@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..tools.tool_result import ToolResult
 from .. import core
 from ..runtime import interaction
 from ..workspace import tasks
@@ -205,8 +206,8 @@ def create_subagent_session(name: str, system: str = "", *,
     return SubagentSession(
         name, core.client if client is None else client, core.MODEL if model is None else model, system,
         lambda block: authorize_subagent_tool(name, block),
-        lambda to, content: send_message(name, to, content),
-        lambda plan: submit_plan(name, plan),
+        lambda to, content: ToolResult(send_message(name, to, content)),
+        lambda plan: ToolResult(submit_plan(name, plan)),
         mode=mode, task_tools=task_tools, tools=tools, max_tokens=max_tokens,
         work_context=lambda: f"Plan status: {PROTOCOL.gate(name)}",
     )
@@ -253,9 +254,9 @@ def send_message(from_name: str, to: str, content: str) -> str:
     with subagent_lock:
         target = active_subagents.get(to)
         if to != "lead" and target is None:
-            return f"Agent '{to}' is not active"
+            raise ValueError(f"Agent '{to}' is not active")
         if to != "lead" and (target.mode != "persistent" or target.status == "stopping"):
-            return f"Agent '{to}' cannot receive messages in its current mode/status"
+            raise ValueError(f"Agent '{to}' cannot receive messages in its current mode/status")
         BUS.send(from_name, to, content)
     return f"Sent to {to}"
 
@@ -432,9 +433,7 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
     session = None
     try:
         if task_id is not None:
-            claimed = tasks.claim_task(task_id, owner=name)
-            if not claimed.startswith("Claimed "):
-                raise ValueError(claimed)
+            tasks.claim_task(task_id, owner=name)
         initial = prompt
         if task_id is not None:
             task = tasks.load_task(task_id)
@@ -509,10 +508,10 @@ def submit_plan(from_name: str, plan: str) -> str:
         with subagent_lock:
             record = active_subagents.get(from_name)
             if record is None or record.status == "stopping":
-                return f"Subagent '{from_name}' is not active"
+                raise ValueError(f"Subagent '{from_name}' is not active")
             state, notice = PROTOCOL.submit_plan(from_name, plan, identity)
             if state is None:
-                return notice
+                raise ValueError(notice)
             req_id = state.request_id
             record.status = "waiting_approval"
     BUS.send(from_name, "lead", plan,
@@ -524,7 +523,7 @@ def submit_plan(from_name: str, plan: str) -> str:
 
 # -- Lead 团队工具 --
 
-def run_request_shutdown(name: str) -> str:
+def run_request_shutdown(name: str) -> ToolResult:
     """以 Lead 身份向活跃子 agent发起有请求 ID 的关闭协议。
 
     输入：name 为目标子 agent名称。
@@ -534,19 +533,19 @@ def run_request_shutdown(name: str) -> str:
     with subagent_lock:
         record = active_subagents.get(name)
         if record is None:
-            return f"Subagent '{name}' is not active"
+            return ToolResult(f"Subagent '{name}' is not active", "failed")
         if record.mode != "persistent":
-            return f"Subagent '{name}' requires persistent mode"
+            return ToolResult(f"Subagent '{name}' requires persistent mode", "failed")
         req_id = PROTOCOL.request_shutdown(name).request_id
     BUS.send("lead", name, "Finish the current step and shut down.",
              "shutdown_request",
              {"request_id": req_id})
     core.terminal_print(f"  \033[35m[protocol] shutdown_request -> {name} "
           f"({req_id})\033[0m")
-    return f"Shutdown requested from {name} ({req_id})"
+    return ToolResult(f"Shutdown requested from {name} ({req_id})", "success")
 
 
-def run_request_plan(name: str, task: str) -> str:
+def run_request_plan(name: str, task: str) -> ToolResult:
     """以 Lead 身份要求子 agent先为指定工作提交计划。
 
     输入：name 为目标子 agent；task 为计划要求的正文，不是任务 ID。
@@ -556,16 +555,16 @@ def run_request_plan(name: str, task: str) -> str:
     with subagent_lock:
         record = active_subagents.get(name)
         if record is None:
-            return f"Subagent '{name}' is not active"
+            return ToolResult(f"Subagent '{name}' is not active", "failed")
         if record.mode != "persistent":
-            return f"Subagent '{name}' requires persistent mode"
+            return ToolResult(f"Subagent '{name}' requires persistent mode", "failed")
         PROTOCOL.require_plan(name)
     BUS.send("lead", name, task, "plan_request")
-    return f"Plan requested from {name}"
+    return ToolResult(f"Plan requested from {name}", "success")
 
 
 def run_review_plan(request_id: str, approve: bool,
-                    feedback: str = "") -> str:
+                    feedback: str = "") -> ToolResult:
     """审核子 agent当前分配的待处理计划，并发送批准或拒绝回复。
 
     输入：request_id 为计划请求 ID；approve 为是否批准；feedback 为可选反馈正文。
@@ -574,11 +573,11 @@ def run_review_plan(request_id: str, approve: bool,
     """
     state = PROTOCOL.request(request_id)
     if not state:
-        return f"Request {request_id} not found"
+        return ToolResult(f"Request {request_id} not found", "failed")
     with tasks.task_lock:
         state, notice = PROTOCOL.review_plan(request_id, approve, tasks.assignment_identity(state.sender))
         if state is None:
-            return notice
+            return ToolResult(notice, "failed")
     content = feedback or ("Plan approved." if approve
                            else "Revise the plan and submit it again.")
     BUS.send("lead", state.sender, content,
@@ -586,4 +585,4 @@ def run_review_plan(request_id: str, approve: bool,
              {"request_id": request_id, "approve": approve})
     icon = "approved" if approve else "rejected"
     core.terminal_print(f"  \033[32m[protocol] plan {icon} ({request_id})\033[0m")
-    return f"Plan {state.status} ({request_id})"
+    return ToolResult(f"Plan {state.status} ({request_id})", "success")

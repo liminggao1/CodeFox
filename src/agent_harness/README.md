@@ -28,6 +28,8 @@
 | [registrations.py](registrations.py) | 组合 Lead 工具清单与专有定义，共用工具定义委托 `tools/shared_tools.py` |
 | [runtime_context.py](runtime_context.py) | 每次模型调用前，从 memory、MCP 和子 agent 状态构造上下文快照 |
 
+能力调用直接导入所属模块，例如 `workspace.tasks`、`runtime.scheduler` 和 `tools.file_tools`；host 不再重导出工具与任务 API。
+
 ## 主要执行关系
 
 ```mermaid

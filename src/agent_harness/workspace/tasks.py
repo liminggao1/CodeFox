@@ -16,6 +16,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 
 from .. import core
+from ..runtime.lead_context import current_lead_context
 from . import worktrees
 
 fcntl = core.fcntl
@@ -44,15 +45,11 @@ def _tasks_root(workdir: Path | None = None) -> Path:
 TASK_ID_PATTERN = re.compile(r"^task_[0-9a-f]{8}$")
 task_lock = threading.RLock()
 _task_store_state = threading.local()
-CURRENT_TODOS: list[dict] = []
 
 # owner -> {"task_id": str, "cwd": Path}。每个子 agent一次只领取一个任务，
 # 文件系统工具都通过该映射确定 cwd。
 assignments: dict[str, dict[str, object]] = {}
 assignment_versions: dict[str, int] = {}
-lead_session_id: str | None = None
-lead_worktree: str | None = None
-save_lead_context = None
 
 
 def assignment_identity(owner: str) -> tuple[int, str | None]:
@@ -63,13 +60,12 @@ def assignment_identity(owner: str) -> tuple[int, str | None]:
         return assignment_versions.get(owner, 0), task_id
 
 
-def lead_context() -> dict:
-    """Return only the session's task, directory and TODO associations."""
+def active_lead_task_id():
+    """只读当前 Lead 分配，不修改会话关联或保存。"""
     with task_lock:
         assignment = assignments.get("agent")
         task = load_task(str(assignment["task_id"])) if assignment else None
-        return {"task_id": task.id if task and task.status == "in_progress" else None,
-                "worktree": lead_worktree, "todos": CURRENT_TODOS}
+        return task.id if task and task.status == "in_progress" else None
 
 
 def validate_lead_context(session_id: str, context: dict, *, workdir: Path) -> dict | None:
@@ -93,22 +89,13 @@ def validate_lead_context(session_id: str, context: dict, *, workdir: Path) -> d
         return {"task_id": task.id, "cwd": cwd} if task.status == "in_progress" else None
 
 
-def activate_lead_context(session_id, context, assignment=None):
-    """Replace only Lead memory; keep other sessions' persisted tasks intact."""
-    global lead_session_id, lead_worktree, CURRENT_TODOS
+def activate_lead_assignment(assignment=None):
+    """显式替换 Lead 分配；会话状态由运行时单独激活。"""
     with task_lock:
-        lead_session_id = session_id
-        lead_worktree = context["worktree"]
-        CURRENT_TODOS = context["todos"]
         assignments.pop("agent", None)
         if assignment is not None:
-            assignments["agent"] = assignment
+            assignments["agent"] = dict(assignment)
         advance_assignment_version("agent")
-
-
-def checkpoint_lead(owner="agent"):
-    if owner == "agent" and save_lead_context is not None:
-        save_lead_context()
 
 
 @contextmanager
@@ -395,7 +382,7 @@ def _owner_in_progress(owner: str) -> Task | None:
     """
     return next((task for task in list_tasks()
                  if task.status == "in_progress" and task.owner == owner
-                 and (owner != "agent" or task.session_id == lead_session_id)), None)
+                 and (owner != "agent" or task.session_id == current_lead_context().session_id)), None)
 
 
 def _incomplete_dependencies(task: Task) -> list[str]:
@@ -425,40 +412,38 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
         task_id: 待办、无 owner 且依赖已完成的任务 ID。
         owner: 主 agent 的身份 ``'agent'``，或认领任务的子 agent名称。
     返回：
-        认领成功或拒绝原因的字符串。成功时在存储锁内保存 ``in_progress``
+        认领成功的字符串；拒绝抛出 ValueError。成功时在存储锁内保存 ``in_progress``
         和 owner，将任务目录登记到 ``assignments``，并递增分配版本。
         ID 不合法、记录缺失或保存失败时，异常会继续抛出。
     """
-    global lead_worktree
     with task_store_lock():
         task = load_task(task_id)
         if task.status != "pending":
-            return f"Task {task_id} is {task.status}, cannot claim"
+            raise ValueError(f"Task {task_id} is {task.status}, cannot claim")
         if task.owner or task.session_id:
-            return f"Task {task_id} is already owned by {task.owner}"
+            raise ValueError(f"Task {task_id} is already owned by {task.owner}")
         assignment = assignments.get(owner)
         if assignment:
-            return (f"Owner {owner} must finish the current work turn for "
+            raise ValueError(f"Owner {owner} must finish the current work turn for "
                     f"{assignment['task_id']} before claiming another task")
         current = _owner_in_progress(owner)
         if current:
-            return (f"Owner {owner} must complete {current.id} before "
+            raise ValueError(f"Owner {owner} must complete {current.id} before "
                     "claiming another task")
         if not can_start(task_id):
-            return f"Blocked by: {_incomplete_dependencies(task)}"
+            raise ValueError(f"Blocked by: {_incomplete_dependencies(task)}")
         cwd, error = task_worktree_cwd(task)
         if error:
-            return f"Cannot claim {task_id}: {error}"
+            raise ValueError(f"Cannot claim {task_id}: {error}")
         task.owner = owner
         task.status = "in_progress"
         if owner == "agent":
-            task.session_id = lead_session_id
+            task.session_id = current_lead_context().session_id
         save_task(task)
         assignments[owner] = {"task_id": task.id, "cwd": cwd}
         advance_assignment_version(owner)
         if owner == "agent":
-            lead_worktree = task.worktree
-        checkpoint_lead(owner)
+            current_lead_context().bind_worktree(task.worktree)
     core.terminal_print(f"  \033[36m[claim] {task.subject} -> in_progress (owner: {owner})\033[0m")
     return f"Claimed {task.id} ({task.subject})"
 
@@ -470,32 +455,30 @@ def complete_task(task_id: str, owner: str = "agent") -> str:
         task_id: 要完成的任务 ID。
         owner: 必须与任务记录中的认领者一致。
     返回：
-        完成成功或拒绝原因的字符串；成功时附带已满足依赖条件的任务标题。
+        完成成功的字符串；拒绝抛出 ValueError。成功时附带已满足依赖条件的任务标题。
         保存 ``completed``，保留任务文件和分配目录；回合结束或成功移除 worktree 后释放分配。
         这里只记录完成状态，不独立验收工作成果。
         ID 不合法、记录缺失或保存失败时，异常会继续抛出。
     """
-    global lead_worktree
     with task_store_lock():
         task = load_task(task_id)
         if task.status != "in_progress":
-            return f"Task {task_id} is {task.status}, cannot complete"
+            raise ValueError(f"Task {task_id} is {task.status}, cannot complete")
         if task.owner != owner:
-            return (f"Task {task_id} is owned by {task.owner}, "
+            raise ValueError(f"Task {task_id} is owned by {task.owner}, "
                     f"not {owner}; cannot complete")
-        if owner == "agent" and task.session_id != lead_session_id:
-            return f"Task {task_id} belongs to another session; cannot complete"
+        if owner == "agent" and task.session_id != current_lead_context().session_id:
+            raise ValueError(f"Task {task_id} belongs to another session; cannot complete")
         assignment = assignments.get(owner)
         if not assignment or assignment.get("task_id") != task.id:
             cwd, error = task_worktree_cwd(task)
             if error:
-                return f"Task {task_id} cannot complete: {error}"
+                raise ValueError(f"Task {task_id} cannot complete: {error}")
             assignments[owner] = {"task_id": task.id, "cwd": cwd}
             if owner == "agent":
-                lead_worktree = task.worktree
+                current_lead_context().bind_worktree(task.worktree)
         task.status = "completed"
         save_task(task)
-        checkpoint_lead(owner)
         unblocked = [t.subject for t in list_tasks()
                      if t.status == "pending" and t.blockedBy and can_start(t.id)]
     core.terminal_print(f"  \033[32m[complete] {task.subject}\033[0m")
@@ -535,7 +518,6 @@ def assignment_cwd(owner: str) -> Path:
         ValueError: owner、任务状态或绑定目录不合法，或目录发生变化。
         任务文件缺失等读取异常也会继续抛出。
     """
-    global lead_worktree
     with task_lock:
         assignment = assignments.get(owner)
         task = _owner_in_progress(owner)
@@ -546,10 +528,10 @@ def assignment_cwd(owner: str) -> Path:
             assignment = {"task_id": task.id, "cwd": cwd}
             assignments[owner] = assignment
             if owner == "agent":
-                lead_worktree = task.worktree
+                current_lead_context().bind_worktree(task.worktree)
         elif not assignment:
-            if owner == "agent" and lead_worktree is not None:
-                cwd, error = worktrees._registered_worktree(lead_worktree)
+            if owner == "agent" and current_lead_context().worktree is not None:
+                cwd, error = worktrees._registered_worktree(current_lead_context().worktree)
                 if error:
                     raise ValueError(error)
                 return cwd
@@ -557,7 +539,7 @@ def assignment_cwd(owner: str) -> Path:
         task = load_task(str(assignment["task_id"]))
         if task.status not in {"in_progress", "completed"} or task.owner != owner:
             raise ValueError(f"Assignment for {owner} is no longer active")
-        if owner == "agent" and task.session_id != lead_session_id:
+        if owner == "agent" and task.session_id != current_lead_context().session_id:
             raise ValueError(f"Assignment for {owner} belongs to another session")
         cwd, error = task_worktree_cwd(task)
         if error:
@@ -585,7 +567,6 @@ def release_completed_assignment(owner: str) -> bool:
             return False
         assignments.pop(owner, None)
         advance_assignment_version(owner)
-        checkpoint_lead(owner)
         return True
 
 
@@ -609,4 +590,3 @@ def release_assignment(owner: str):
         finally:
             assignments.pop(owner, None)
             advance_assignment_version(owner)
-            checkpoint_lead(owner)

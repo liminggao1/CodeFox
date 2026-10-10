@@ -1,5 +1,11 @@
 """Workflow steps cross the real child interface with fake model responses."""
 
+import agent_harness.workflows.workflow_runtime as workflow_runtime
+import agent_harness.core as core
+import agent_harness.agents.subagent as subagent_runtime
+import agent_harness.runtime.hooks as hooks
+
+
 import asyncio
 import json
 import threading
@@ -18,7 +24,7 @@ def reply(value="done", tokens=5, block=None, stop="end_turn"):
 
 
 def install(host, monkeypatch, create):
-    wf = host.workflow_runtime
+    wf = workflow_runtime
     client = S(messages=S(create=create))
     monkeypatch.setattr(wf, "RUNNER_FACTORY", lambda: wf.SubagentRunner(client, "injected"))
     return wf
@@ -26,15 +32,15 @@ def install(host, monkeypatch, create):
 
 def test_actual_workflow_tool_executes_child_tools_and_replays(host_factory, monkeypatch):
     host = host_factory()
-    globals_before = (host.core.client, host.core.MODEL, host.core.DEFAULT_MAX_TOKENS)
+    globals_before = (core.client, core.MODEL, core.DEFAULT_MAX_TOKENS)
     calls = []
     responses = iter([reply(tokens=7, block=S(type="tool_use", id="w", name="write_file",
                           input={"path": "workflow.txt", "content": "saved"})), reply(tokens=11)])
     def create(**kw):
-        assert len(host.active_subagents) == 1
-        record = next(iter(host.active_subagents.values()))
+        assert len(subagent_runtime.active_subagents) == 1
+        record = next(iter(subagent_runtime.active_subagents.values()))
         assert record.mode == "once" and record.role == "workflow"
-        assert host.is_valid_agent_name(record.name)
+        assert subagent_runtime.is_valid_agent_name(record.name)
         calls.append(kw)
         return next(responses)
     wf = install(host, monkeypatch, create)
@@ -42,17 +48,17 @@ def test_actual_workflow_tool_executes_child_tools_and_replays(host_factory, mon
         return await ctx.agent("Save the result", label="写入：结果")
     monkeypatch.setitem(wf.WORKFLOWS, "child-tools", ({"name": "child-tools", "description": "test"}, step))
     handler = host.assemble_tool_pool()[1]["Workflow"]
-    first = json.loads(handler(name="child-tools"))
-    resumed = json.loads(handler(name="child-tools", resume_from_run_id=first["task"]["runId"]))
+    first = json.loads(handler(name="child-tools").content)
+    resumed = json.loads(handler(name="child-tools", resume_from_run_id=first["task"]["runId"]).content)
     assert first["task"]["status"] == "completed"
     assert first["task"]["usage"] == {"agents": 1, "tokens": 18}
     assert resumed["task"]["usage"] == {"agents": 0, "tokens": 0}
-    assert len(calls) == 2 and not host.active_subagents
-    assert {t["name"] for t in calls[0]["tools"]} == set(host.subagent.selected_tool_names(None))
-    assert all(r["model"] == "injected" and r["max_tokens"] == host.core.WORKFLOW_AGENT_MAX_TOKENS
+    assert len(calls) == 2 and not subagent_runtime.active_subagents
+    assert {t["name"] for t in calls[0]["tools"]} == set(subagent_runtime.selected_tool_names(None))
+    assert all(r["model"] == "injected" and r["max_tokens"] == core.WORKFLOW_AGENT_MAX_TOKENS
                for r in calls)
-    assert (host.core.WORKDIR / "workflow.txt").read_text() == "saved"
-    assert (host.core.client, host.core.MODEL, host.core.DEFAULT_MAX_TOKENS) == globals_before
+    assert (core.WORKDIR / "workflow.txt").read_text() == "saved"
+    assert (core.client, core.MODEL, core.DEFAULT_MAX_TOKENS) == globals_before
 
 
 @pytest.mark.parametrize("tools", [[], ["read_file"]])
@@ -69,7 +75,7 @@ def test_workflow_tool_restriction_blocks_unavailable_writes(host_factory, monke
     out = asyncio.run(wf.WorkflowTool().call({"name": "restricted", "description": "test"}, step))
     assert out["task"].status == "completed"
     assert [t["name"] for t in calls[0].get("tools", [])] == tools
-    assert not (host.core.WORKDIR / "forbidden.txt").exists()
+    assert not (core.WORKDIR / "forbidden.txt").exists()
     assert "unavailable" in str(calls[1]["messages"])
 
 
@@ -91,8 +97,8 @@ def test_format_repair_does_not_repeat_file_operations(host_factory, monkeypatch
     assert "tools" not in calls[2]
     assert "invalid result" in calls[2]["messages"][0]["content"]
     assert "Correct only" in calls[2]["messages"][0]["content"]
-    assert (host.core.WORKDIR / "once.txt").read_text() == "saved"
-    assert not host.active_subagents
+    assert (core.WORKDIR / "once.txt").read_text() == "saved"
+    assert not subagent_runtime.active_subagents
 
 
 @pytest.mark.parametrize("failure", ["truncated", "exception", "invalid_json"])
@@ -121,7 +127,7 @@ def test_failed_step_is_billed_without_cache_and_resume_keeps_usage(host_factory
     assert resumed["task"].status == "failed"
     assert resumed["task"].usage == {"agents": 0, "tokens": 0}
     assert resumed["task"].cumulative_usage == {"agents": 1, "tokens": total}
-    assert not host.active_subagents
+    assert not subagent_runtime.active_subagents
 
 
 def test_tools_are_part_of_the_cache_identity(host_factory, monkeypatch):
@@ -136,7 +142,7 @@ def test_tools_are_part_of_the_cache_identity(host_factory, monkeypatch):
         return await ctx.agent("Same instructions", label="same", tools=tools)
     meta = {"name": "tool-cache", "description": "test"}
     first = asyncio.run(wf.WorkflowTool().call(meta, step))
-    tools = list(reversed(host.subagent.selected_tool_names(None)))
+    tools = list(reversed(subagent_runtime.selected_tool_names(None)))
     cached = asyncio.run(wf.WorkflowTool().call(meta, step, resume_from_run_id=first["task"].run_id))
     assert cached["task"].usage == {"agents": 0, "tokens": 0}
     tools = []
@@ -174,7 +180,7 @@ def test_parallel_format_retries_respect_concurrency_and_unique_names(host_facto
     assert out["task"].status == "completed", out["result"]
     assert maximum == 2 and len(names) == 8
     assert out["task"].usage == {"agents": 4, "tokens": 40}
-    assert not host.active_subagents
+    assert not subagent_runtime.active_subagents
 
 
 @pytest.mark.parametrize("budget", [1, 5])
@@ -195,7 +201,7 @@ def test_overspend_or_exhaustion_blocks_format_retry_and_records_consumption(hos
     assert expected in first["result"]["error"]
     resumed = asyncio.run(wf.WorkflowTool().call(meta, step, resume_from_run_id=first["task"].run_id))
     assert resumed["task"].usage == {"agents": 0, "tokens": 0}
-    assert len(calls) == 1 and not host.active_subagents
+    assert len(calls) == 1 and not subagent_runtime.active_subagents
 
 
 def test_invalid_workflow_tools_fail_without_child_or_model(host_factory, monkeypatch):
@@ -205,20 +211,20 @@ def test_invalid_workflow_tools_fail_without_child_or_model(host_factory, monkey
         return await ctx.agent("Inspect", tools=["send_message"])
     out = asyncio.run(wf.WorkflowTool().call({"name": "bad-tools", "description": "test"}, step))
     assert out["task"].status == "failed" and out["task"].usage == {"agents": 0, "tokens": 0}
-    assert not host.active_subagents
+    assert not subagent_runtime.active_subagents
 
 
 def test_workflow_write_rejection_does_not_execute_or_run_post_hook(host_factory, monkeypatch):
     host = host_factory()
     events = []
-    original_hooks = host.hooks.trigger_hooks
-    def hooks(event, block, *args):
+    original_hooks = hooks.trigger_hooks
+    def traced_hooks(event, block, *args):
         if event in {"PreToolUse", "PostToolUse"}:
             events.append(event)
             if event == "PreToolUse":
                 return "Denied by test hook"
         return original_hooks(event, block, *args)
-    monkeypatch.setattr(host.hooks, "trigger_hooks", hooks)
+    monkeypatch.setattr(hooks, "trigger_hooks", traced_hooks)
     responses = iter([reply(block=S(type="tool_use", id="w", name="write_file",
                                   input={"path": "denied.txt", "content": "no"})), reply()])
     calls = []
@@ -232,4 +238,4 @@ def test_workflow_write_rejection_does_not_execute_or_run_post_hook(host_factory
     assert out["task"].status == "completed"
     assert events == ["PreToolUse"]
     assert "Denied by test hook" in str(calls[1]["messages"])
-    assert not (host.core.WORKDIR / "denied.txt").exists()
+    assert not (core.WORKDIR / "denied.txt").exists()

@@ -1,5 +1,9 @@
 """Shared child execution, context recovery and tool side effects."""
 
+import agent_harness.core as core
+import agent_harness.context.compaction as compaction
+
+
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +31,7 @@ def test_truncated_tool_never_writes_or_appends(host_factory, mode):
     with pytest.raises(RuntimeError, match="truncated"):
         session.run(messages)
     assert len(messages) == 1
-    assert not (host.core.WORKDIR / "partial.txt").exists()
+    assert not (core.WORKDIR / "partial.txt").exists()
 
 
 @pytest.mark.parametrize("mode", ["once", "persistent"])
@@ -35,18 +39,18 @@ def test_unassigned_workspace_uses_startup_directory(host_factory, mode):
     host = host_factory()
     session = SubagentSession("child", None, "test", "", mode=mode)
     result = session.execute_tool(SimpleNamespace(
-        name="write_file", input={"path": "result.txt", "content": "done"}))
+        name="write_file", input={"path": "result.txt", "content": "done"})).result.content
     assert "Wrote" in result
-    assert (host.core.WORKDIR / "result.txt").read_text() == "done"
+    assert (core.WORKDIR / "result.txt").read_text() == "done"
 
 
 def test_child_compaction_uses_injected_client_and_keeps_recent_tool_pair(
     host_factory, monkeypatch,
 ):
     host = host_factory()
-    monkeypatch.setattr(host.core, "COMPACT_TRIGGER", 30)
-    monkeypatch.setattr(host.core, "COMPACT_TARGET", 20)
-    monkeypatch.setattr(host.core, "COMPACTION_TAIL_MESSAGES", 1)
+    monkeypatch.setattr(core, "COMPACT_TRIGGER", 30)
+    monkeypatch.setattr(core, "COMPACT_TARGET", 20)
+    monkeypatch.setattr(core, "COMPACTION_TAIL_MESSAGES", 1)
     calls = []
     def create(**kwargs):
         calls.append(kwargs)
@@ -58,7 +62,7 @@ def test_child_compaction_uses_injected_client_and_keeps_recent_tool_pair(
                 {"role": "user", "content": [{"type": "tool_result",
                     "tool_use_id": "read", "content": "recent evidence"}]}]
     identity = id(messages)
-    result = host.compaction.prepare_history(
+    result = compaction.prepare_history(
         messages, "New delegation B", client=client, model="child-model",
         preserve_tail=True)
     assert result.applied and result.reason is None
@@ -71,7 +75,7 @@ def test_child_compaction_uses_injected_client_and_keeps_recent_tool_pair(
 
 def test_context_recovery_is_once_per_delegation(host_factory, monkeypatch):
     host = host_factory()
-    monkeypatch.setattr(host.core, "COMPACTION_TAIL_MESSAGES", 1)
+    monkeypatch.setattr(core, "COMPACTION_TAIL_MESSAGES", 1)
     calls = []
     def create(**kwargs):
         calls.append(kwargs)
@@ -135,4 +139,4 @@ def test_current_delegation_survives_middle_history_archive(host_factory, mode):
     assert "Current delegation B" in calls[0]["system"]
     assert "Old delegation A" not in calls[0]["system"]
     assert "No assigned Task" in calls[0]["system"]
-    assert list((host.core.WORKDIR / ".transcripts").glob("*.jsonl"))
+    assert list((core.WORKDIR / ".transcripts").glob("*.jsonl"))

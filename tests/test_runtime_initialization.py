@@ -1,5 +1,8 @@
 """Application configuration is explicit and preserves caller-selected runners."""
 
+import agent_harness.workflows.workflow_runtime as workflow_runtime
+
+
 import os
 from pathlib import Path
 import subprocess
@@ -24,6 +27,7 @@ def test_import_and_initialization_preserve_injected_runner(tmp_path):
         chosen = lambda: None
         workflow.RUNNER_FACTORY = chosen
         import agent_harness.host as host
+        import agent_harness.workflows.workflow_runtime as workflow_runtime
         assert workflow.RUNNER_FACTORY is chosen
         assert host.GOAL is None
         assert not workflow.WORKFLOWS
@@ -51,6 +55,7 @@ def test_failed_start_leaves_configuration_unpublished_and_can_retry(tmp_path):
         from pathlib import Path
         from agent_harness.runtime.interactive_runtime import InteractiveRuntime
         from agent_harness import host
+        import agent_harness.workflows.workflow_runtime as workflow_runtime
         from agent_harness.workflows import workflow_runtime as workflow
         chosen = lambda: None
         workflow.RUNNER_FACTORY = chosen
@@ -90,6 +95,7 @@ def test_explicit_goal_and_registry_survive_repeated_initialization(tmp_path):
         import os
         from pathlib import Path
         from agent_harness import host
+        import agent_harness.workflows.workflow_runtime as workflow_runtime
         from agent_harness.tools import tool_registry
         from agent_harness.workflows import workflow_runtime as workflow
         chosen = lambda: None
@@ -141,7 +147,8 @@ def test_frontend_import_does_not_configure_or_start_application(tmp_path, entry
     ''') + textwrap.dedent(block) + f'''
 importlib.import_module("agent_harness.frontends.{entry if entry == "cli" else "tui.app"}")
 from agent_harness import host
-assert host.GOAL is None and not host.workflow_runtime.WORKFLOWS
+import agent_harness.workflows.workflow_runtime as workflow_runtime
+assert host.GOAL is None and not workflow_runtime.WORKFLOWS
 assert host.assemble_tool_pool() == ([], {{}})
 assert set(threading.enumerate()) == threads
 ''', tmp_path)
