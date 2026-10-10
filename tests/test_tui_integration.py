@@ -3,6 +3,7 @@
 import asyncio
 import threading
 import time
+from xml.etree import ElementTree
 
 import pytest
 
@@ -131,7 +132,7 @@ def test_tui_cron_error_after_resume_keeps_current_session_generation(runtime_fa
     asyncio.run(exercise())
 
 
-def test_tui_subagent_panel_updates_while_background_lead_is_paused(runtime_factory):
+def test_tui_subagent_conversation_updates_while_background_lead_is_paused(runtime_factory):
     child_started, child_release = threading.Event(), threading.Event()
     lead_started, lead_release = threading.Event(), threading.Event()
     lead_calls = []
@@ -158,7 +159,7 @@ def test_tui_subagent_panel_updates_while_background_lead_is_paused(runtime_fact
             await wait_for(pilot, lambda: not app.busy)
             child_release.set()
             await wait_for(pilot, lambda: any(child["status"] == "idle" for child in app.snapshot["subagents"]))
-            assert "helper · idle" in str(app.query_one("#state", Static).content)
+            assert any("helper · idle" in str(widget.content) for widget in app.query(Static))
             assert runtime._background_paused and not app.busy
             assert lead_calls == [True, True]
             host.run_request_shutdown("helper")
@@ -179,8 +180,8 @@ def test_tui_failed_command_finishes_status_and_accepts_next_input(runtime_facto
         async with app.run_test(size=(100, 30)) as pilot:
             app._submit("/resume invalid")
             await wait_for(pilot, lambda: not app.busy)
-            assert "失败" in str(app.query_one("#status", Static).content)
-            assert "执行中" not in str(app.query_one("#status", Static).content)
+            assert any("失败" in str(widget.content) for widget in app.query(Static))
+            assert not app.query("#status")
             app._submit("next")
             await wait_for(pilot, lambda: len(app.query(Markdown)) == 1 and not app.busy)
             await pilot.press("ctrl+d")
@@ -387,7 +388,7 @@ def test_command_menu_mouse_small_layout_and_modal_focus(runtime_factory, monkey
         async with app.run_test(size=size) as pilot:
             editor = await command_draft(app, pilot, "/")
             panel = app.query_one(CommandCandidates)
-            assert not app.query_one("#side").display
+            assert not app.query("#side")
             assert panel.region.height >= 1
             assert panel.region.bottom <= editor.region.y
             assert editor.region.bottom <= size[1] and app.focused is editor
@@ -541,11 +542,7 @@ def test_tui_narrow_layout_input_and_conversation_scroll(runtime_factory):
             assert editor.text == " \n " and not app.busy
             await pilot.press("ctrl+l")
             assert not editor.text
-            side = app.query_one("#side")
-            assert not side.display
-            await pilot.press("f2")
-            assert side.display
-            await pilot.press("f2")
+            assert not app.query("#side")
             editor.load_text("你好\n多行请求")
             await pilot.press("ctrl+enter")
             await wait_for(pilot, lambda: len(app.query(Markdown)) == 1 and not app.busy)
@@ -562,3 +559,67 @@ def test_tui_narrow_layout_input_and_conversation_scroll(runtime_factory):
             await pilot.press("ctrl+d")
             await wait_for(pilot, lambda: app.runtime_closed)
     asyncio.run(exercise())
+def test_pure_conversation_shows_accepted_input_while_model_is_blocked(runtime_factory):
+    started, release = threading.Event(), threading.Event()
+    def create(**kwargs):
+        started.set()
+        assert release.wait(10)
+        return response("done")
+    runtime, _ = runtime_factory(client=create)
+    app = HarnessApp(runtime)
+    async def exercise():
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._submit("实时输入")
+            await wait_for(pilot, started.is_set)
+            assert not app.query("#status, #side, #state, #events, Footer")
+            image = ElementTree.fromstring(app.export_screenshot())
+            text = "".join(image.itertext())
+            assert "实时输入" in text and "正在处理请求" in text
+            release.set()
+            await wait_for(pilot, lambda: not app.busy)
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+def test_lead_stream_is_visible_before_final_confirmation_and_saved_once(runtime_factory):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    started, release = threading.Event(), threading.Event()
+    @contextmanager
+    def stream(**kwargs):
+        class Stream:
+            def __iter__(self):
+                yield SimpleNamespace(type="content_block_start", index=0, content_block=SimpleNamespace(type="text"))
+                yield SimpleNamespace(type="content_block_delta", index=0, delta=SimpleNamespace(type="text_delta", text="你好"))
+                started.set()
+                assert release.wait(10)
+                yield SimpleNamespace(type="content_block_delta", index=0, delta=SimpleNamespace(type="text_delta", text="，完成"))
+                yield SimpleNamespace(type="content_block_stop", index=0)
+                yield SimpleNamespace(type="message_stop")
+            def get_final_message(self):
+                return response("你好，完成")
+        yield Stream()
+    runtime, _ = runtime_factory(stream=stream)
+    app = HarnessApp(runtime)
+    async def exercise():
+        async with app.run_test(size=(85, 30)) as pilot:
+            app._submit("流式问候")
+            await wait_for(pilot, lambda: started.is_set() and len(app.query(Markdown)) == 1)
+            text = "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
+            assert "你好" in text and "，完成" not in text
+            snapshot = runtime.session.store.load(runtime.session.session_id)
+            assert not any(e["type"] == "assistant_message" for e in snapshot["events"])
+            release.set()
+            await wait_for(pilot, lambda: not app.busy)
+            assert len(app.query(Markdown)) == 1
+            snapshot = runtime.session.store.load(runtime.session.session_id)
+            assert len([e for e in snapshot["events"] if e["type"] == "assistant_message"]) == 1
+            assert not any(e["type"] == "assistant_text_delta" for e in snapshot["events"])
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()

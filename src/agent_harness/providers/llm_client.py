@@ -19,10 +19,11 @@
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 
-__all__ = ["Anthropic", "ProtocolResponseError"]
+__all__ = ["Anthropic", "ProtocolResponseError", "StreamStopped", "stream_message"]
 
 DEFAULT_TIMEOUT = 300.0
 ERROR_BODY_PREVIEW_CHARS = 500
@@ -81,6 +82,10 @@ class ProtocolResponseError(LLMClientError):
         self.reason = reason
         self.tool_name = tool_name
         self.tool_call_id = tool_call_id
+
+
+class StreamStopped(LLMClientError):
+    """The caller cancelled before accepting a complete response."""
 
 
 class APIStatusError(LLMClientError):
@@ -286,11 +291,13 @@ def _to_message(response: dict, fallback_model) -> Message:
             raise ProtocolResponseError(status, "incomplete function call batch")
     blocks = []
     has_tool_call = False
-    for item in output:
+    text_indices = {}
+    for output_index, item in enumerate(output):
         kind = item.get("type")
         if kind == "message":
-            for part in item.get("content") or []:
+            for content_index, part in enumerate(item.get("content") or []):
                 if part.get("type") in ("output_text", "text"):
+                    text_indices[len(blocks)] = f"{output_index}:{content_index}"
                     blocks.append(Block(type="text", text=part.get("text", "")))
         elif kind == "function_call":
             name = item.get("name")
@@ -309,7 +316,7 @@ def _to_message(response: dict, fallback_model) -> Message:
                                        tool_name=name, tool_call_id=call_id),
             ))
     usage = response.get("usage") or {}
-    return Message(
+    message = Message(
         content=blocks,
         stop_reason=_stop_reason(response, has_tool_call),
         usage=Block(input_tokens=usage.get("input_tokens", 0),
@@ -317,6 +324,43 @@ def _to_message(response: dict, fallback_model) -> Message:
         model=response.get("model") or fallback_model,
         id=response.get("id"),
     )
+    message.stream_indices = text_indices
+    return message
+
+
+def _sse_events(response, stopped):
+    """Read complete UTF-8 SSE lines across arbitrary network boundaries."""
+    buffer, data = b"", []
+    while True:
+        if stopped():
+            raise StreamStopped("Stopped while waiting for model output")
+        chunk = response.read1(4096)
+        if stopped():
+            raise StreamStopped("Stopped while receiving model output")
+        buffer += chunk
+        while match := re.search(br"\r\n|\r|\n", buffer):
+            if match.end() == len(buffer) and buffer.endswith(b"\r") and chunk:
+                break
+            raw, buffer = buffer[:match.start()], buffer[match.end():]
+            try:
+                line = raw.decode("utf-8")
+            except UnicodeError as exc:
+                raise ProtocolResponseError("stream", "invalid UTF-8 event") from exc
+            if not line:
+                if data:
+                    try:
+                        value = json.loads("\n".join(data))
+                    except ValueError as exc:
+                        raise ProtocolResponseError("stream", "invalid event JSON") from exc
+                    if not isinstance(value, dict):
+                        raise ProtocolResponseError("stream", "event must be an object")
+                    yield value
+                    data = []
+            elif line.startswith("data:"):
+                value = line[5:]
+                data.append(value[1:] if value.startswith(" ") else value)
+        if not chunk:
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +407,42 @@ class ResponsesClient:
         payload = _to_responses_request(model, messages, system, tools, max_tokens)
         return _to_message(self._post(payload), model)
 
+    def stream(self, *, on_text, stopped, model, messages, system=None, tools=None,
+               max_tokens=None, **_ignored):
+        payload = _to_responses_request(model, messages, system, tools, max_tokens)
+        payload["stream"] = True
+        headers = dict(self._headers(), Accept="text/event-stream")
+        request = urllib.request.Request(self._endpoint(), data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                                         headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                for event in _sse_events(response, stopped):
+                    kind = event.get("type")
+                    if kind == "response.output_text.delta":
+                        output, content, text = event.get("output_index"), event.get("content_index"), event.get("delta")
+                        if (type(output) is not int or output < 0 or type(content) is not int or content < 0
+                                or not isinstance(text, str)):
+                            raise ProtocolResponseError("stream", "invalid text delta")
+                        if text:
+                            on_text(f"{output}:{content}", text)
+                    elif kind in {"response.completed", "response.incomplete", "response.failed"}:
+                        final = event.get("response")
+                        if not isinstance(final, dict) or final.get("status") != kind.split(".")[1]:
+                            raise ProtocolResponseError("stream", "terminal event/status mismatch")
+                        return _to_message(final, model)
+                    elif kind == "error":
+                        code, message = event.get("code"), event.get("message", "stream error")
+                        if code == "rate_limit_exceeded":
+                            raise _error_for(429, message)
+                        if code == "overloaded":
+                            raise _error_for(529, message)
+                        raise ProtocolResponseError("failed", str(message))
+        except urllib.error.HTTPError as error:
+            raise _error_for(error.code, _describe(error)) from None
+        except urllib.error.URLError as error:
+            raise APIConnectionError(f"Cannot reach {self._endpoint()}: {error.reason}") from None
+        raise ProtocolResponseError("stream", "stream ended without a terminal response")
+
     def _endpoint(self) -> str:
         if self.base_url:
             return _responses_url(self.base_url)
@@ -403,6 +483,52 @@ class ResponsesClient:
 # ---------------------------------------------------------------------------
 # 公开入口
 # ---------------------------------------------------------------------------
+
+def stream_message(client, *, on_text, stopped, **request):
+    """Stream visible text synchronously and return only a validated full message."""
+    if stopped():
+        raise StreamStopped("Stopped before requesting model")
+    if isinstance(client, ResponsesClient):
+        return client.stream(on_text=on_text, stopped=stopped, **request)
+    if hasattr(client, "with_options"):
+        # Recovery owns each observable attempt; disable hidden SDK retries.
+        client = client.with_options(max_retries=0)
+    # The SDK assembles the message; raw deltas also let us require a real end
+    # and validate complete tool JSON rather than its partial JSON snapshot.
+    finished, inputs, opened = False, {}, set()
+    with client.messages.stream(**request) as stream:
+        for event in stream:
+            if stopped():
+                raise StreamStopped("Stopped while receiving model output")
+            if event.type == "content_block_start":
+                opened.add(event.index)
+                if event.content_block.type == "tool_use":
+                    inputs[event.index] = ""
+            elif event.type == "content_block_delta":
+                if event.delta.type == "text_delta":
+                    on_text(event.index, event.delta.text)
+                elif event.delta.type == "input_json_delta":
+                    inputs[event.index] = inputs.get(event.index, "") + event.delta.partial_json
+            elif event.type == "content_block_stop":
+                opened.discard(event.index)
+            elif event.type == "message_stop":
+                finished = True
+        if stopped():
+            raise StreamStopped("Stopped before accepting model output")
+        if not finished or opened:
+            raise ProtocolResponseError("stream", "stream ended without a complete message")
+        message = stream.get_final_message()
+        if message.stop_reason not in {"end_turn", "tool_use", "max_tokens", "stop_sequence", "refusal", "pause_turn"}:
+            raise ProtocolResponseError(message.stop_reason, "missing or invalid stop reason")
+        for index, raw in inputs.items():
+            block = message.content[index]
+            if message.stop_reason == "max_tokens":
+                raise ProtocolResponseError("max_tokens", "incomplete tool batch", block.name, block.id)
+            if not isinstance(block.id, str) or not block.id.strip() or not isinstance(block.name, str) or not block.name.strip():
+                raise ProtocolResponseError(message.stop_reason, "invalid tool identity")
+            _parse_arguments(raw or "{}", status=message.stop_reason, tool_name=block.name, tool_call_id=block.id)
+        return message
+
 
 def Anthropic(*args, **kwargs):
     """返回提供 ``messages.create`` 接口的客户端。"""

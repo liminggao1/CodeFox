@@ -36,7 +36,17 @@ def trigger_hooks(event: str, *args):
         回调异常继续抛出。工具执行入口将拒绝结果转为工具结果文本。
     """
     for callback in HOOKS[event]:
-        result = callback(*args)
+        name = getattr(callback, "__qualname__", type(callback).__name__)
+        operation = interaction.operation_status("hook", name, "running", event=event)
+        try:
+            result = callback(*args)
+        except Exception as exc:
+            interaction.operation_status("hook", name, "failed", operation_id=operation,
+                                         event=event, reason=f"{type(exc).__name__}: {exc}")
+            raise
+        state = "denied" if event == "PreToolUse" and result is not None else "completed"
+        interaction.operation_status("hook", name, state, operation_id=operation,
+                                     event=event, **({"reason": str(result)} if result is not None else {}))
         if result is not None:
             return result
     return None
@@ -50,24 +60,37 @@ class ToolCheck:
 
 def check_tool_use(block, *, authorize=None, stopped=None):
     """Return allowed/denied/stopped after authorization and the pre-use hooks."""
-    if authorize is not None:
-        denied = authorize(block)
+    with interaction.operation_context(tool_call_id=getattr(block, "id", None)):
+        if authorize is not None:
+            denied = authorize(block)
+            if denied is not None:
+                return ToolCheck("denied", str(denied))
+        denied = trigger_hooks("PreToolUse", block)
+        if stopped is not None and stopped():
+            return ToolCheck("stopped", "Interrupted before execution")
         if denied is not None:
             return ToolCheck("denied", str(denied))
-    denied = trigger_hooks("PreToolUse", block)
-    if stopped is not None and stopped():
-        return ToolCheck("stopped", "Interrupted before execution")
-    if denied is not None:
-        return ToolCheck("denied", str(denied))
-    return ToolCheck("allowed")
+        return ToolCheck("allowed")
 
 
 def execute_tool(block, handler, *, on_status=None):
     """Execute an approved synchronous call, then run its post-use hooks once."""
-    output = file_tools.call_tool_handler(
-        handler, block.input, block.name, on_status=on_status)
-    trigger_hooks("PostToolUse", block, output)
-    return output
+    with interaction.operation_context(tool_call_id=getattr(block, "id", None)):
+        operation = interaction.operation_status("tool", block.name, "running") if handler is not None else None
+        try:
+            output = file_tools.call_tool_handler(
+                handler, block.input, block.name, on_status=on_status)
+            if operation is not None:
+                interaction.operation_status("tool", block.name, "postprocessing", operation_id=operation)
+            trigger_hooks("PostToolUse", block, output)
+            if operation is not None:
+                interaction.operation_status("tool", block.name, "completed", operation_id=operation)
+        except Exception as exc:
+            if operation is not None:
+                interaction.operation_status("tool", block.name, "failed", operation_id=operation,
+                                             reason=f"{type(exc).__name__}: {exc}")
+            raise
+        return output
 
 
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
@@ -113,23 +136,27 @@ def permission_hook(block):
 
 
 def log_hook(block):
-    core.terminal_print(f"\033[90m[HOOK] {block.name}\033[0m")
+    if interaction.current_context() is None:
+        core.terminal_print(f"\033[90m[HOOK] {block.name}\033[0m")
     return None
 
 
 def large_output_hook(block, output):
-    if len(str(output)) > core.LARGE_OUTPUT_WARNING_CHARS:
+    if interaction.current_context() is None and len(str(output)) > core.LARGE_OUTPUT_WARNING_CHARS:
         core.terminal_print(f"\033[33m[HOOK] large output from {block.name}: "
               f"{len(str(output))} chars\033[0m")
     return None
 
 
 def user_prompt_hook(query: str):
-    core.terminal_print(f"\033[90m[HOOK] UserPromptSubmit: {core.WORKDIR}\033[0m")
+    if interaction.current_context() is None:
+        core.terminal_print(f"\033[90m[HOOK] UserPromptSubmit: {core.WORKDIR}\033[0m")
     return None
 
 
 def stop_hook(messages: list):
+    if interaction.current_context() is not None:
+        return None
     tool_count = 0
     for msg in messages:
         content = msg.get("content")

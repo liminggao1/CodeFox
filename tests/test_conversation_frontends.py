@@ -37,7 +37,7 @@ def test_cli_record_replay_details_status_and_dedup():
     adapter.render(event("assistant_message", {"text": "raw duplicate"}))
     text = "\n".join(output)
     assert len(output) == len(records)
-    assert "read_file · 已返回结果" in text and "x" * 500 in text
+    assert "read_file · 已返回结果" in text and "Error is normal content" in text and "x" * 500 not in text
     assert "文件.txt" in text and "上次中断，未继续执行" in text
     assert "raw duplicate" not in text
     assert "1.5s" in text and "请求 2" in text
@@ -137,3 +137,69 @@ def test_tui_inline_approval_only_enables_delivered_request(monkeypatch):
             assert all(button.disabled for button in card.query(Button))
             assert app.approval is None
     asyncio.run(exercise())
+def test_tool_summary_is_visible_before_expanding_details():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from textual.widgets import Collapsible
+    app = HarnessApp(DisplayRuntime())
+    async def exercise():
+        async with app.run_test(size=(85, 30)) as pilot:
+            await app._display_record(record(1, "tool_call", {"id": "read", "name": "read_file",
+                                     "input": {"path": "说明.md"}}))
+            await app._display_record(record(2, "tool_result", {"tool_use_id": "read", "status": "returned",
+                                     "content": "读取成功\n" + "long output\n" * 100}))
+            await pilot.pause()
+            text = "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
+            assert "说明.md" in text and "读取成功" in text
+            assert all(item.collapsed for item in app.query(Collapsible))
+    asyncio.run(exercise())
+def test_many_tools_share_scrollable_group_and_update_in_place():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import OperationEntry, ProcessGroup
+    from textual.containers import VerticalScroll
+    from textual.events import MouseScrollDown
+    app = HarnessApp(DisplayRuntime())
+    async def exercise():
+        async with app.run_test(size=(85, 32)) as pilot:
+            for index in range(20):
+                await app._display_record(record(100 + index, "tool_call", {
+                    "id": f"tool-{index}", "name": "read_file", "input": {"path": f"file-{index}.txt"},
+                    "model_call_id": "model-1"}))
+                await app._display_record(record(200 + index, "tool_result", {
+                    "tool_use_id": f"tool-{index}", "content": f"result-{index}", "status": "returned",
+                    "model_call_id": "model-1"}))
+            await pilot.pause()
+            assert len(app.query(ProcessGroup)) == 1
+            assert len(app.query(OperationEntry)) == 20
+            scroll = app.query_one(ProcessGroup).query_one(VerticalScroll)
+            assert scroll.region.height <= 14 and scroll.max_scroll_y > 0
+            scroll.scroll_home(animate=False)
+            await pilot.pause()
+            await pilot.hover(scroll, offset=(3, 2))
+            outer = app.query_one("#chat", VerticalScroll)
+            position = outer.scroll_y
+            await pilot._post_mouse_events([MouseScrollDown], scroll, offset=(3, 2))
+            await pilot.pause()
+            assert scroll.scroll_y > 0 and outer.scroll_y == position
+            bar = scroll.vertical_scrollbar
+            await pilot.click(bar, offset=(0, bar.region.height - 2))
+            await pilot.pause()
+            assert scroll.scroll_y > 0
+            scroll.scroll_end(animate=False)
+            await pilot.pause()
+            text = "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
+            assert "file-19.txt" in text and "result-19" in text
+    asyncio.run(exercise())
+def test_cli_stream_confirms_without_duplicate_body_and_marks_discarded_attempt():
+    output, chunks = [], []
+    adapter = CLIAdapter(None, write=output.append, write_chunk=chunks.append)
+    adapter.render(event("assistant_text_delta", {"model_call_id": "one", "block_index": 0, "sequence": 1, "delta": "你好"}))
+    adapter.render(event("log", {"text": "background update"}))
+    adapter.render(event("assistant_text_delta", {"model_call_id": "one", "block_index": 0, "sequence": 2, "delta": "完成"}))
+    adapter.render(event("display_record", {"record": record(1, "assistant_message", {
+        "model_call_id": "one", "block_index": 0, "text": "你好完成"})}))
+    adapter.render(event("display_record", {"record": record(2, "execution_status", {
+        "phase": "model", "name": "请求模型", "state": "discarded", "operation_id": "old", "model_call_id": "one"})}))
+    assert "你好" in "".join(chunks) and "完成" in "".join(chunks)
+    assert not any("你好完成" in text for text in output)
+    assert sum("本次输出未采用" in text for text in output) >= 2
+    assert output[0] == "background update"

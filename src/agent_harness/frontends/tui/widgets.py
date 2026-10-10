@@ -6,11 +6,123 @@ import json
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.message import Message
 from textual.widgets import Button, Collapsible, Label, ListItem, ListView, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
+from ..presentation import STATUS_LABELS, arguments_summary, full_text, lifecycle_summary, short_text
+
+
+class DetailScroll(VerticalScroll):
+    DEFAULT_CSS = """
+    DetailScroll { height: auto; max-height: 10; }
+    DetailScroll Static { height: auto; }
+    """
+
+
+class ProcessGroup(Vertical):
+    """One model call's operations, with bounded independent scrolling."""
+    DEFAULT_CSS = """
+    ProcessGroup { height: auto; margin: 1 0; }
+    ProcessGroup > Static { height: 1; color: #999fa5; }
+    ProcessGroup > VerticalScroll { height: auto; max-height: 14; }
+    """
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+    def compose(self):
+        yield Static(f"{self.source} · 操作", markup=False)
+        yield VerticalScroll(classes="process-content")
+
+
+class OperationEntry(Vertical):
+    """Update one operation in place while preserving its expanded details."""
+    DEFAULT_CSS = """
+    OperationEntry { height: auto; }
+    OperationEntry Static { height: auto; }
+    OperationEntry Collapsible { height: auto; padding: 0; background: transparent; }
+    OperationEntry .operation-preview { color: #999fa5; padding-left: 2; }
+    """
+
+    def __init__(self, record):
+        super().__init__()
+        self.record = record
+        self.tool_name = record["payload"].get("name", "工具")
+        self.arguments = record["payload"].get("input", {})
+        self.state = "pending"
+        self.output = ""
+
+    def compose(self):
+        yield Static(classes="operation-summary", markup=False)
+        yield Static(classes="operation-preview", markup=False)
+        yield Collapsible(DetailScroll(Static(classes="operation-detail", markup=False)),
+                          title="详情", collapsed=True)
+
+    def apply(self, record):
+        self.record = record
+        data, kind = record["payload"], record["type"]
+        if kind == "tool_call":
+            self.tool_name, self.arguments = data["name"], data["input"]
+            if data.get("historical") and data.get("result_missing"):
+                self.state = "interrupted"
+        elif kind == "tool_result":
+            self.state = data.get("status", "returned")
+            self.output = full_text(data.get("content", ""))
+        else:
+            self.state = data["state"]
+            if data.get("historical") and self.state == "running":
+                self.state = "interrupted"
+                data = dict(data, state="interrupted", reason="上次中断，结束状态未记录")
+            self.output = data.get("reason", "")
+        if kind == "execution_status" and data["phase"] != "tool":
+            summary = lifecycle_summary(data)
+        else:
+            summary = f"工具 · {self.tool_name} · {arguments_summary(self.arguments)} · {STATUS_LABELS.get(self.state, self.state)}"
+        self.query_one(".operation-summary", Static).update(summary)
+        preview = self.query_one(".operation-preview", Static)
+        preview.update(short_text(self.output) if self.output else "")
+        preview.display = bool(self.output)
+        self.query_one(".operation-detail", Static).update(full_text(self.arguments) + "\n" + self.output)
+
+
+class StreamingText(Vertical):
+    DEFAULT_CSS = "StreamingText { height: auto; } StreamingText Static { height: auto; color: #999fa5; }"
+
+    def __init__(self):
+        super().__init__()
+        self.text = ""
+        self.sequence = 0
+        self.confirmed = False
+        self.discarded = False
+
+    def compose(self):
+        yield Static("Lead", markup=False)
+        yield Collapsible(Markdown(""), title="本次输出未采用", collapsed=False)
+
+    def on_mount(self):
+        self.query_one("CollapsibleTitle").display = False
+
+    def append(self, data):
+        if self.confirmed or data["sequence"] <= self.sequence:
+            return
+        self.sequence = data["sequence"]
+        self.text += data["delta"]
+        self.query_one(Markdown).update(self.text)
+
+    def confirm(self, text):
+        self.confirmed = True
+        self.text = text
+        self.query_one(Markdown).update(text)
+
+    def discard(self):
+        self.confirmed = True
+        self.discarded = True
+        detail = self.query_one(Collapsible)
+        self.query_one("CollapsibleTitle").display = True
+        detail.collapsed = True
 
 
 class CommandCandidates(OptionList):
@@ -109,8 +221,9 @@ class ConversationRecord(Vertical):
             return
         yield Static(source, classes="record-source", markup=False)
         if kind == "tool_call":
-            yield Collapsible(Static(json.dumps(data.get("input", {}), ensure_ascii=False, indent=2), markup=False),
-                              title=f"工具 · {data['name']}", collapsed=True)
+            yield Static(f"工具 · {data['name']} · {arguments_summary(data.get('input', {}))} · 待执行", markup=False)
+            yield Collapsible(DetailScroll(Static(full_text(data.get("input", {})), markup=False)),
+                              title="参数详情", collapsed=True)
             if data.get("result_missing"):
                 yield Static("结果未记录，请核对当前状态", markup=False)
         elif kind == "tool_result":
@@ -120,7 +233,12 @@ class ConversationRecord(Vertical):
             content = data.get("content", "")
             if not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False, indent=2)
-            yield Collapsible(Static(content, markup=False), title=f"{self.tool_name or '工具'} · {status}", collapsed=True)
+            yield Static(f"{self.tool_name or '工具'} · {status}\n{short_text(content)}", markup=False)
+            yield Collapsible(DetailScroll(Static(content, markup=False)), title="完整结果", collapsed=True)
+        elif kind == "execution_status":
+            yield Static(lifecycle_summary(data), markup=False)
+            if data.get("reason"):
+                yield Static(short_text(data["reason"]), markup=False)
         elif kind == "approval_requested":
             yield ApprovalCard(data)
         elif kind == "approval_decided":
@@ -133,8 +251,8 @@ class ConversationRecord(Vertical):
             yield Static("TODO\n" + text, markup=False)
         elif kind in {"subagent_status", "background_status"}:
             name = data.get("name") or data.get("task_id", "后台任务")
-            suffix = " · 历史记录" if data.get("historical") else ""
-            yield Static(f"{name} · {data['status']}{suffix}", markup=False)
+            status = "上次中断，结束状态未记录" if data.get("interrupted") else data["status"]
+            yield Static(f"{name} · {status}", markup=False)
         elif kind == "command_result":
             result = data.get("data", {})
             yield Static(str(result.get("text") or result.get("error") or data.get("command", "")), markup=False)

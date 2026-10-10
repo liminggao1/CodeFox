@@ -7,6 +7,8 @@ from ..workspace import tasks
 from ..context import compaction
 from . import recovery
 from ..providers import message_content
+from ..runtime import interaction
+import uuid
 
 
 BASE_TOOL_NAMES = shared_tools.FILE_TOOL_NAMES
@@ -119,12 +121,17 @@ class SubagentSession:
         返回：拒绝原因、工具结果或执行错误的字符串。
             放行后调用处理器并触发 PostToolUse；拒绝时不执行处理器或后置 hook。
         """
+        self._last_tool_status = "returned"
         if block.name not in self.handlers:
+            self._last_tool_status = "failed"
             return f"Error: Tool '{block.name}' is unavailable for this child"
         check = hooks.check_tool_use(block, authorize=self.authorize_tool)
         if check.status != "allowed":
+            self._last_tool_status = check.status
             return check.text
-        output = hooks.execute_tool(block, self.handlers.get(block.name))
+        def on_status(status):
+            self._last_tool_status = status
+        output = hooks.execute_tool(block, self.handlers.get(block.name), on_status=on_status)
         return str(output)
 
     def run(self, messages: list):
@@ -166,14 +173,37 @@ class SubagentSession:
         messages.append({"role": "assistant", "content": response.content})
         calls = [block for block in response.content if block.type == "tool_use"]
         if calls:
-            results = [{"type": "tool_result", "tool_use_id": block.id,
-                        "content": self.execute_tool(block)} for block in calls]
+            results = []
+            with interaction.operation_context(model_call_id=self._model_call_id):
+                for block in calls:
+                    interaction.publish("tool_call", id=block.id, name=block.name, input=block.input)
+                context = interaction.current_context()
+                if context is not None and context.checkpoint is not None:
+                    context.checkpoint()
+                for block in calls:
+                    output = self.execute_tool(block)
+                    result = {"type": "tool_result", "tool_use_id": block.id, "content": output}
+                    results.append(result)
+                    interaction.publish("tool_result", **result, status=self._last_tool_status)
+                    if context is not None and context.checkpoint is not None:
+                        context.checkpoint()
             messages.append({"role": "user", "content": results})
         return response
 
     def _request(self, messages, request):
-        return self.client.messages.create(
-            model=self.model, system=(f"{self.system}\n\n[Current delegation]\n{request}\n\n"
-                                     "Earlier delegations in history are reference only; follow the current delegation."),
-            messages=messages,
-            **({"tools": self.tools} if self.tools else {}), max_tokens=self.max_tokens)
+        self._model_call_id = uuid.uuid4().hex
+        with interaction.operation_context(model_call_id=self._model_call_id):
+            operation = interaction.operation_status("model", "请求模型", "running")
+            try:
+                response = self.client.messages.create(
+                    model=self.model, system=(f"{self.system}\n\n[Current delegation]\n{request}\n\n"
+                                             "Earlier delegations in history are reference only; follow the current delegation."),
+                    messages=messages,
+                    **({"tools": self.tools} if self.tools else {}), max_tokens=self.max_tokens)
+            except Exception as exc:
+                interaction.operation_status("model", "请求模型", "failed", operation_id=operation,
+                                             reason=f"{type(exc).__name__}: {exc}")
+                raise
+            interaction.operation_status("model", "请求模型", "truncated" if getattr(response, "stop_reason", None) == "max_tokens" else "completed",
+                                         operation_id=operation)
+            return response

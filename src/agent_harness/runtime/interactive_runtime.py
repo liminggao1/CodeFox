@@ -20,6 +20,7 @@ from .session_store import InteractiveSession, SessionError, SessionStore, json_
 class InteractiveRuntime:
     def __init__(self, *, channel=None, store=None):
         self.channel = channel or interaction.InteractionChannel()
+        self.channel.set_projector(self._display_record)
         self.session = InteractiveSession(store or SessionStore(core.WORKDIR), [],
                                           lambda: host.GOAL, core.terminal_print,
                                           self._session_context)
@@ -114,9 +115,22 @@ class InteractiveRuntime:
         return fired or host.subagent.BUS.peek("lead") or host.scheduler.has_pending_background()
 
     def _record_usage(self, usage):
-        self._usage["model_calls"] += 1
         for key in ("input_tokens", "output_tokens"):
             self._usage[key] += usage.get(key, 0) or 0
+
+    @staticmethod
+    def _display_record(fact):
+        """Project accepted JSON facts without accessing runtime or business state."""
+        if fact.session_id is None:
+            return None
+        if fact.type == "command_result" and "sessions" in fact.payload.get("data", {}):
+            return None
+        record = {"id": fact.id, "at": fact.at, "kind": "display",
+                  "type": fact.type, "source": fact.source,
+                  "turn_id": fact.turn_id, "payload": interaction.data_copy(fact.payload)}
+        if fact.type == "tool_result":
+            record["payload"].setdefault("status", "failed" if fact.payload.get("is_error") else "returned")
+        return record
 
     def _checkpoint(self, *, poll=False):
         facts = self.channel.drain_facts()
@@ -125,25 +139,12 @@ class InteractiveRuntime:
             if (fact.session_id != self.session.session_id or fact.session_id is None
                     or fact.generation != self._generation):
                 continue
-            if fact.type == "command_result" and "sessions" in fact.payload.get("data", {}):
-                continue
-            record = {"id": fact.id, "at": fact.at, "kind": "display",
-                      "type": fact.type, "source": fact.source,
-                      "turn_id": fact.turn_id, "payload": json_value(fact.payload)}
-            if fact.type == "tool_result":
-                record["payload"].setdefault("status", "failed" if fact.payload.get("is_error") else "returned")
-            if fact.type in {"subagent_status", "background_status"}:
-                key = "name" if fact.type == "subagent_status" else "task_id"
-                previous = next((r for r in reversed(self.session.display_records())
-                                 if r["type"] == fact.type and r["source"] == fact.source
-                                 and r["payload"].get(key) == fact.payload.get(key)), None)
-                if previous and previous["payload"].get("status") == fact.payload.get("status"):
-                    continue
+            record = fact.payload["record"]
             if self.session.append_record(record):
                 changed = True
-                context = interaction.current_context()
-                if context is not None:
-                    context.publish("display_record", record=record)
+                if (record["type"] == "execution_status" and record["source"] == "lead"
+                        and record["payload"]["phase"] == "model" and record["payload"]["state"] == "running"):
+                    self._usage["model_calls"] += 1
         if poll and not changed:
             return True
         saved = self.session.save()
@@ -250,7 +251,6 @@ class InteractiveRuntime:
                             text = "\n".join(f"Run scheduled task: {job.prompt}" for job in fired)
                         self.session.record("background_notification", text, save=False)
                     else:
-                        host.trigger_hooks("UserPromptSubmit", text)
                         self.session.finish_pending_tools()
                         self.session.history.append({"role": "user", "content": text})
                         self.session.record("user_input", text, save=False)
@@ -263,6 +263,7 @@ class InteractiveRuntime:
                                         turn_id=context.turn_id, recorded=True)
                     if kind != "background":
                         context.publish("user_message", text=text, submission_id=submission_id)
+                        host.trigger_hooks("UserPromptSubmit", text)
                     context.publish("turn_started", submission_id=submission_id)
                     self._checkpoint()
                     self._snapshot(context)
@@ -275,6 +276,7 @@ class InteractiveRuntime:
                             outcome = interaction.TurnOutcome("stopped", "Stop requested")
                         self._turn = None
                         self._stop = None
+                    self._checkpoint(poll=True)
                     summary = self._turn_summary(context, outcome)
                     self.session.record("turn_complete", text, outcome.status, save=False)
                     with self._lifecycle:

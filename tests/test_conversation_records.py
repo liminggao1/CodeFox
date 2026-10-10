@@ -34,6 +34,39 @@ def wait_stored(runtime, predicate, timeout=3):
     raise AssertionError(f"Conversation record not saved: {stored(runtime)}")
 
 
+def test_historical_running_operations_are_marked_interrupted(runtime_factory):
+    runtime, _ = runtime_factory()
+    runtime.session.activate(runtime.session.store.create())
+    runtime.session.snapshot["events"] = [
+        {"id": "running", "kind": "display", "type": "execution_status", "source": "lead",
+         "turn_id": "turn", "payload": {"phase": "model", "name": "请求模型", "state": "running",
+                                           "operation_id": "op", "model_call_id": "call"}},
+        {"id": "child", "kind": "display", "type": "subagent_status", "source": "helper",
+         "turn_id": "turn", "payload": {"name": "helper", "mode": "task", "status": "working"}},
+        {"id": "background", "kind": "display", "type": "background_status", "source": "lead",
+         "turn_id": "turn", "payload": {"task_id": "task", "status": "running"}},
+    ]
+    historical = runtime.session.display_records(historical=True)
+    assert historical[0]["payload"]["state"] == "interrupted"
+    assert historical[0]["payload"]["reason"] == "上次中断，结束状态未记录"
+    assert historical[1]["payload"]["status"] == "interrupted"
+    assert historical[2]["payload"]["status"] == "interrupted"
+
+
+def test_historical_idle_subagent_is_not_marked_interrupted(runtime_factory):
+    runtime, _ = runtime_factory()
+    runtime.session.activate(runtime.session.store.create())
+    runtime.session.snapshot["events"] = [
+        {"id": "working", "kind": "display", "type": "subagent_status", "source": "helper",
+         "turn_id": "turn", "payload": {"name": "helper", "mode": "persistent", "status": "working"}},
+        {"id": "idle", "kind": "display", "type": "subagent_status", "source": "helper",
+         "turn_id": "turn", "payload": {"name": "helper", "mode": "persistent", "status": "idle"}},
+    ]
+    historical = runtime.session.display_records(historical=True)
+    assert historical[0]["payload"]["status"] == "working"
+    assert historical[1]["payload"]["status"] == "idle"
+
+
 def complete(runtime, text):
     submission = runtime.submit(text)
     assert submission.status == "accepted"
@@ -97,6 +130,9 @@ def test_saved_records_match_live_order_and_contain_full_tool_payload(runtime_fa
     assert result["payload"]["content"] == "Error: sample output"
     assert result["payload"]["status"] == "returned"
     assert result["payload"]["tool_use_id"] == "call"
+    tool_lifecycle = [item["payload"]["state"] for item in records(snapshot, "execution_status")
+                      if item["payload"].get("phase") == "tool"]
+    assert tool_lifecycle == ["running", "postprocessing", "completed"]
     summary = finished.payload["summary"]
     assert summary["tool_calls"] == summary["approvals"] == 1
     assert summary["elapsed_seconds"] >= 0
@@ -441,3 +477,123 @@ def test_failed_approval_checkpoint_does_not_retry_empty_polls(runtime_factory, 
     assert runtime.channel.respond(request.request_id, request.generation, "deny")
     until(runtime, "turn_finished", submission_id=submission.submission_id)
     assert len(attempts) > settled
+def test_background_fact_is_visible_before_blocked_lead_checkpoint(runtime_factory):
+    from agent_harness.runtime.interaction import ExecutionContext
+
+    started, release = threading.Event(), threading.Event()
+    def create(**kwargs):
+        started.set()
+        assert release.wait(10)
+        return response("done")
+    runtime, _ = runtime_factory(client=create)
+    submission = runtime.submit("work")
+    try:
+        assert started.wait(2)
+        context = ExecutionContext(runtime.channel, runtime.session.session_id,
+                                   runtime._generation, source="helper", origin="persistent")
+        fact = context.publish("background_status", task_id="running-job", status="completed")
+        _, events = until(runtime, "background_status")
+        displayed = runtime.channel.next_event(timeout=1)
+        assert displayed is not None and displayed.type == "display_record"
+        assert displayed.payload["record"]["id"] == fact.id
+        assert displayed.payload["record"]["source"] == "helper"
+        runtime.channel.acknowledge_event(displayed.sequence)
+        assert not release.is_set()
+    finally:
+        release.set()
+    until(runtime, "turn_finished", submission_id=submission.submission_id)
+    assert any(item["id"] == fact.id for item in records(stored(runtime)))
+
+def test_first_tool_result_is_displayed_while_second_tool_is_blocked(runtime_factory, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    runtime, host = runtime_factory([
+        response(tools=[tool("read_file", "first", path="first.txt"), tool("read_file", "second", path="second.txt")], stop="tool_use"),
+        response("finished")])
+    (host.core.WORKDIR / "first.txt").write_text("first result", encoding="utf-8")
+    original = host.file_tools.run_read
+    def read(path, **kwargs):
+        if str(path).endswith("second.txt"):
+            entered.set()
+            assert release.wait(10)
+        return original(path, **kwargs)
+    monkeypatch.setattr(host.file_tools, "run_read", read)
+    submission = runtime.submit("read two")
+    try:
+        assert entered.wait(3)
+        _, events = until(runtime, "tool_result", timeout=2)
+        assert events[-1].payload["tool_use_id"] == "first"
+        assert "first result" in events[-1].payload["content"]
+        saved = stored(runtime)
+        assert len(records(saved, "tool_result")) == 1
+        assert saved["messages"][-1]["role"] == "assistant"
+    finally:
+        release.set()
+    until(runtime, "turn_finished", submission_id=submission.submission_id)
+    assert len(records(stored(runtime), "tool_result")) == 2
+def test_resume_uses_saved_result_for_settled_tool_and_interrupts_only_missing_item(runtime_factory):
+    entered, release = threading.Event(), threading.Event()
+    runtime, host = runtime_factory([
+        response(tools=[tool("read_file", "done", path="saved.txt"), tool("bash", "missing", command="printf pending")], stop="tool_use"),
+        response("next")])
+    (host.core.WORKDIR / "saved.txt").write_text("saved result", encoding="utf-8")
+    submission = runtime.submit("read then ask")
+    request, _ = displayed_approval(runtime)
+    snapshot = stored(runtime)
+    assert len(records(snapshot, "tool_result")) == 1
+    assert snapshot["messages"][-1]["role"] == "assistant"
+    runtime.channel.respond(request.request_id, request.generation, "deny")
+    until(runtime, "turn_finished", submission_id=submission.submission_id)
+    # A separate durable snapshot models a process lost while waiting for approval.
+    target = runtime.session.store.create()
+    snapshot.update(id=target["id"], created_at=target["created_at"])
+    runtime.session.store.save(snapshot)
+    submission = runtime.submit("/resume " + target["id"])
+    until(runtime, "command_result", submission_id=submission.submission_id)
+    complete(runtime, "continue")
+    history = stored(runtime)["messages"]
+    paired = [b for m in history if isinstance(m["content"], list) for b in m["content"] if b["type"] == "tool_result"]
+    assert len(paired) == 2
+    assert "saved result" in paired[0]["content"] and not paired[0].get("is_error")
+    assert paired[1]["tool_use_id"] == "missing" and paired[1]["is_error"]
+def test_stream_stop_discards_partial_body_without_retry_or_saved_message(runtime_factory):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    started, release = threading.Event(), threading.Event()
+    attempts = []
+    @contextmanager
+    def stream(**kwargs):
+        attempts.append(True)
+        class Stream:
+            def __iter__(self):
+                yield SimpleNamespace(type="content_block_start", index=0, content_block=SimpleNamespace(type="text"))
+                yield SimpleNamespace(type="content_block_delta", index=0, delta=SimpleNamespace(type="text_delta", text="partial"))
+                started.set()
+                assert release.wait(10)
+                yield SimpleNamespace(type="content_block_stop", index=0)
+                yield SimpleNamespace(type="message_stop")
+            def get_final_message(self):
+                return response("partial")
+        yield Stream()
+    runtime, _ = runtime_factory(stream=stream)
+    submission = runtime.submit("stop during text")
+    try:
+        assert started.wait(2)
+        delta, _ = until(runtime, "assistant_text_delta")
+        assert runtime.request_stop(delta.turn_id)
+    finally:
+        release.set()
+    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    assert finished.payload["outcome"]["status"] == "stopped"
+    assert finished.payload["summary"]["lead_usage"]["model_calls"] == 1
+    assert attempts == [True]
+    assert not records(stored(runtime), "assistant_message")
+    assert any(e["payload"]["state"] == "stopped" for e in records(stored(runtime), "execution_status"))
+
+
+def test_truncated_retry_uses_distinct_identity_and_saves_only_accepted_text(runtime_factory):
+    runtime, _ = runtime_factory([response("discard this", stop="max_tokens"), response("accepted")])
+    finished, events = complete(runtime, "retry safely")
+    calls = [r for r in records(stored(runtime), "execution_status") if r["payload"]["phase"] == "model"]
+    assert len({r["payload"]["model_call_id"] for r in calls}) == 2
+    assert any(r["payload"]["state"] == "discarded" for r in calls)
+    assert [r["payload"]["text"] for r in records(stored(runtime), "assistant_message")] == ["accepted"]

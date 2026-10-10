@@ -13,6 +13,7 @@ import json
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from . import core
@@ -23,6 +24,7 @@ from .context import skills
 from .context import prompts
 from .tools import file_tools
 from .runtime import hooks
+from .providers.llm_client import StreamStopped, stream_message
 from .agents import subagent
 from .providers import message_content
 from .context import compaction
@@ -159,8 +161,13 @@ def remember_after_turn(messages: list) -> None:
     Returns:
         ``None``。
     """
-    if not interaction.stopped() and memory_runtime.extract_memories(messages) and not interaction.stopped():
-        memory_runtime.consolidate_memories()
+    if interaction.stopped():
+        return
+    with interaction.observe_operation("memory", "记忆检查"):
+        extracted = memory_runtime.extract_memories(messages)
+    if extracted and not interaction.stopped():
+        with interaction.observe_operation("memory", "记忆整理"):
+            memory_runtime.consolidate_memories()
 
 
 # -- Agent 主循环 --
@@ -222,17 +229,40 @@ def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: lis
         state: 本轮模型重试和恢复状态。
 
     Returns:
-        模型客户端返回的响应对象。
+        完整响应、调用 ID 和生命周期 ID；无交互上下文时后两个为 None。
     """
     system = prompts.assemble_system_prompt(context.prompt_values())
-    return recovery.with_retry(
-        lambda: core.client.messages.create(
+    def request():
+        if interaction.stopped():
+            raise StreamStopped("Stopped before requesting model")
+        execution = interaction.current_context()
+        call_id = uuid.uuid4().hex if execution is not None else None
+        operation = interaction.operation_status("model", "请求模型", "running", model_call_id=call_id) if call_id else None
+        sequence = 0
+        def on_text(index, text):
+            nonlocal sequence
+            if text and not interaction.stopped():
+                sequence += 1
+                interaction.publish("assistant_text_delta", model_call_id=call_id,
+                                    block_index=index, sequence=sequence, delta=text)
+        kwargs = dict(
             model=state.current_model,
             system=system,
             messages=messages,
             tools=tools,
-            max_tokens=state.max_tokens),
-        state)
+            max_tokens=state.max_tokens)
+        try:
+            response = (stream_message(core.client, on_text=on_text, stopped=interaction.stopped, **kwargs)
+                        if execution is not None and execution.source == "lead"
+                        else core.client.messages.create(**kwargs))
+        except Exception as exc:
+            if call_id:
+                interaction.operation_status("model", "请求模型", "stopped" if isinstance(exc, StreamStopped) else "failed",
+                                             operation_id=operation, model_call_id=call_id,
+                                             reason=f"{type(exc).__name__}: {exc}")
+            raise exc
+        return response, call_id, operation
+    return recovery.with_retry(request, state, stopped=interaction.stopped)
 
 
 def evaluate_goal(messages: list):
@@ -247,12 +277,18 @@ def evaluate_goal(messages: list):
     if GOAL is None or GOAL.active is None:
         # 返回 None，让 agent_loop 按普通回答完成路径继续处理。
         return None
+    operation = interaction.operation_status("goal", "目标检查", "running")
     try:
         # evaluate_after_turn 是异步函数；这里在同步的 agent_loop 中运行它。
-        return asyncio.run(GOAL.evaluate_after_turn(
+        decision = asyncio.run(GOAL.evaluate_after_turn(
             # 传入完整对话，让独立评估器根据对话证据判断目标是否完成。
             messages, background_running=scheduler.has_pending_background()))
+        interaction.operation_status("goal", "目标检查", "failed" if decision.action == "error" else "completed",
+                                     operation_id=operation, reason=decision.reason)
+        return decision
     except Exception as exc:
+        interaction.operation_status("goal", "目标检查", "failed", operation_id=operation,
+                                     reason=f"{type(exc).__name__}: {exc}")
         # 评估器异常不应中断主循环，先把异常类型和信息打印出来。
         core.terminal_print(f"  \033[31m[goal] evaluator error: "
               f"{type(exc).__name__}: {exc}\033[0m")
@@ -271,20 +307,24 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
     """
     global rounds_since_todo
     result_states = {}
+    model_call_id = None
+    text_indices = {}
 
     def checkpoint():
         if save_context:
             save_context()
 
-    def append(message):
+    def append(message, *, publish_results=True):
         messages.append(message)
         if message.get("role") == "assistant":
-            for block in json_value(message["content"]):
+            for index, block in enumerate(json_value(message["content"])):
+                identity = {"model_call_id": model_call_id} if model_call_id else {}
                 if block.get("type") == "text":
-                    interaction.publish("assistant_message", text=block["text"])
+                    interaction.publish("assistant_message", text=block["text"],
+                                        block_index=text_indices.get(index, index), **identity)
                 elif block.get("type") == "tool_use":
-                    interaction.publish("tool_call", **block)
-        elif isinstance(message.get("content"), list):
+                    interaction.publish("tool_call", **block, **identity)
+        elif publish_results and isinstance(message.get("content"), list):
             for block in json_value(message["content"]):
                 if block.get("type") == "tool_result":
                     interaction.publish("tool_result", **block,
@@ -296,6 +336,13 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
         scheduler.restore_cron_jobs(unacknowledged_cron_jobs)
         tasks.release_completed_assignment("agent")
         return interaction.TurnOutcome("stopped", "Stop requested")
+
+    def settle(result):
+        results.append(result)
+        status = result_states.pop(result["tool_use_id"], "failed" if result.get("is_error") else "returned")
+        interaction.publish("tool_result", **json_value(result), status=status,
+                            **({"model_call_id": model_call_id} if model_call_id else {}))
+        checkpoint()
 
     # 保存本轮 API 重试、模型降级和上下文恢复状态。
     state = recovery.RecoveryState()
@@ -361,9 +408,14 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
 
             model_call_started = True
             # 重试策略和模型降级由 call_llm 内部处理。
-            response = call_llm(messages, context, tools, state)
+            model_call_id = None
+            text_indices = {}
+            response, model_call_id, model_operation = call_llm(messages, context, tools, state)
+            text_indices = getattr(response, "stream_indices", {})
         # Restore unacknowledged jobs if preparation or the model call fails.
         except Exception as e:
+            if isinstance(e, StreamStopped):
+                return stopped_result()
             # 首次遇到提示过长错误时压缩历史，再重新调用模型。
             if (not interaction.stopped() and model_call_started and recovery.is_prompt_too_long_error(e)
                     and state.claim_reactive_compaction()):
@@ -403,6 +455,10 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             interaction.publish("lead_usage", usage=usage)
 
         action = state.accept_response(response.stop_reason)
+        if model_call_id:
+            interaction.operation_status("model", "请求模型", "discarded" if action == "retry" else
+                                         "truncated" if action in {"continue", "stop"} else "completed",
+                                         operation_id=model_operation, model_call_id=model_call_id)
         if interaction.stopped() and action in {"retry", "continue", "stop"}:
             # Truncated tool requests remain unsafe to execute or persist.
             text = message_content.extract_text(response.content)
@@ -483,7 +539,7 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
                 continue
             if interaction.stopped():
                 result_states[block.id] = "stopped"
-                results.append({"type": "tool_result", "tool_use_id": block.id,
+                settle({"type": "tool_result", "tool_use_id": block.id,
                                 "content": "Interrupted before execution", "is_error": True})
                 continue
             # 在终端显示当前工具名称。
@@ -495,31 +551,33 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             # compact 不经过普通工具钩子和执行器。
             if compact_result is not None:
                 # 保留与模型工具调用对应的结果。
-                results.append(compact_result)
+                settle(compact_result)
                 # 其他工具继续按原有路径执行。
                 continue
 
-            check = hooks.check_tool_use(block, stopped=interaction.stopped)
+            with interaction.operation_context(model_call_id=model_call_id):
+                check = hooks.check_tool_use(block, stopped=interaction.stopped)
             if check.status != "allowed":
                 result_states[block.id] = check.status
                 rejected = {"type": "tool_result", "tool_use_id": block.id,
                             "content": check.text}
                 if check.status == "stopped":
                     rejected["is_error"] = True
-                results.append(rejected)
+                settle(rejected)
                 continue
 
             # 可后台执行的工具不阻塞当前模型轮次。
             if scheduler.should_run_background(block.name, block.input):
                 if interaction.stopped():
                     result_states[block.id] = "stopped"
-                    results.append({"type": "tool_result", "tool_use_id": block.id,
+                    settle({"type": "tool_result", "tool_use_id": block.id,
                                     "content": "Interrupted before execution", "is_error": True})
                     continue
                 # 启动后台任务；失败时也要返回工具结果。
                 try:
                     # 将工具调用交给后台任务调度器。
-                    bg_id = scheduler.start_background_task(block, handlers)
+                    with interaction.operation_context(model_call_id=model_call_id, tool_call_id=block.id):
+                        bg_id = scheduler.start_background_task(block, handlers)
                     result_states[block.id] = "started"
                     # 告知模型结果稍后通过任务通知送达。
                     output = (f"[Background task {bg_id} started] "
@@ -531,7 +589,7 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
                     output = (f"Error: Failed to start background task: "
                               f"{type(exc).__name__}: {exc}")
                 # 为本次后台工具调用登记返回内容。
-                results.append({"type": "tool_result",
+                settle({"type": "tool_result",
                                 "tool_use_id": block.id,
                                 "content": output})
                 # 后台工具不再进入同步执行路径。
@@ -540,9 +598,10 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
             # 根据工具名查找同步处理函数。
             handler = handlers.get(block.name)
             # 执行工具，并把未知工具或执行异常转成结果文本。
-            output = hooks.execute_tool(
-                block, handler,
-                on_status=lambda status: result_states.update({block.id: status}))
+            with interaction.operation_context(model_call_id=model_call_id):
+                output = hooks.execute_tool(
+                    block, handler,
+                    on_status=lambda status: result_states.update({block.id: status}))
             # 在终端显示截短的执行结果。
             if interaction.current_context() is None:
                 print(str(output)[:300])
@@ -557,11 +616,11 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
                 rounds_since_todo += 1
 
             # 将同步工具输出与原调用 ID 配对。
-            results.append({"type": "tool_result",
+            settle({"type": "tool_result",
                             "tool_use_id": block.id, "content": output})
 
         # 把所有工具结果及已完成的后台通知写入历史。
-        append({"role": "user", "content": build_user_content(results)})
+        append({"role": "user", "content": build_user_content(results)}, publish_results=False)
         if interaction.stopped():
             return stopped_result()
         # 如本轮请求了手动压缩，在工具结果回填后生成摘要。

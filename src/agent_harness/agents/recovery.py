@@ -9,7 +9,7 @@ import random
 import time
 
 from .. import core
-from ..providers.llm_client import ProtocolResponseError
+from ..providers.llm_client import ProtocolResponseError, StreamStopped
 
 # -- 错误恢复 --
 
@@ -92,7 +92,7 @@ def retry_delay(attempt: int) -> float:
     return base + random.uniform(0, base * core.RETRY_JITTER_RATIO)
 
 
-def with_retry(fn, state: RecoveryState):
+def with_retry(fn, state: RecoveryState, *, stopped=None):
     """带重试与故障降级的包装器，执行目标函数，针对429限流、529服务过载做重试处理。
     Args:
         fn: 无参可调用对象，待执行的业务函数
@@ -115,12 +115,14 @@ def with_retry(fn, state: RecoveryState):
             state.note_call_success()
             return result
         except Exception as e:
-            if isinstance(e, ProtocolResponseError):
+            if isinstance(e, (ProtocolResponseError, StreamStopped)):
                 raise
             name = type(e).__name__.lower()
             msg = str(e).lower()
             # 捕获429限流错误，延时后重试
             if "ratelimit" in name or "429" in msg:
+                if stopped is not None and stopped():
+                    raise StreamStopped("Stopped before retrying model") from e
                 state.note_rate_limit()
                 delay = retry_delay(attempt)
                 core.terminal_print(f"  \033[33m[429] retry {attempt + 1}/{core.MAX_RETRIES} "
@@ -129,6 +131,8 @@ def with_retry(fn, state: RecoveryState):
                 continue
             # 捕获529服务过载错误，累计失败次数，达到阈值切换备用模型
             if "overloaded" in name or "529" in msg or "overloaded" in msg:
+                if stopped is not None and stopped():
+                    raise StreamStopped("Stopped before retrying model") from e
                 if state.note_overload():
                     core.terminal_print(f"  \033[31m[529] switching to {state.current_model}\033[0m")
                 delay = retry_delay(attempt)

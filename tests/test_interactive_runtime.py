@@ -7,6 +7,7 @@ import time
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from contextlib import contextmanager
 
 import pytest
 
@@ -18,6 +19,27 @@ def response(text="Done", *, tools=(), stop="end_turn"):
 
 def tool(tool_name, call_id="call", **arguments):
     return SimpleNamespace(type="tool_use", name=tool_name, id=call_id, input=arguments)
+
+
+def fake_stream_for(client):
+    @contextmanager
+    def stream(**kwargs):
+        value = client(**kwargs)
+        events = []
+        for index, block in enumerate(value.content):
+            if block.type == "text":
+                events.extend([SimpleNamespace(type="content_block_start", index=index, content_block=block),
+                               SimpleNamespace(type="content_block_delta", index=index,
+                                               delta=SimpleNamespace(type="text_delta", text=block.text)),
+                               SimpleNamespace(type="content_block_stop", index=index)])
+        events.append(SimpleNamespace(type="message_stop"))
+        class Stream:
+            def __iter__(self):
+                return iter(events)
+            def get_final_message(self):
+                return value
+        yield Stream()
+    return stream
 
 
 def add_display_messages(snapshot):
@@ -65,12 +87,14 @@ def runtime_factory(host_factory, monkeypatch):
     monkeypatch.setattr(host.core, "ASYNC_EVENT_POLL_SECONDS", 0.01)
     runtimes = []
 
-    def create(responses=None, client=None, enable_memory=False):
+    def create(responses=None, client=None, enable_memory=False, stream=None):
         monkeypatch.setattr(host, "remember_after_turn", remember if enable_memory else lambda messages: None)
         if client is None:
             values = iter(responses or [response()])
             client = lambda **kwargs: next(values)
-        monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=client)))
+        messages = SimpleNamespace(create=client)
+        messages.stream = stream or fake_stream_for(lambda **kwargs: messages.create(**kwargs))
+        monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=messages))
         runtime = interactive_runtime.InteractiveRuntime()
         runtimes.append(runtime)
         runtime.start()
@@ -336,14 +360,14 @@ def test_stop_during_real_memory_extraction_preserves_writes_without_consolidati
     assert host.memory_runtime.list_memory_files()[0]["name"] == "language"
 
 
-@pytest.mark.parametrize("boundary", ["before_model", "after_response"])
+@pytest.mark.parametrize("boundary", ["before_model", "during_model"])
 def test_stop_cron_delivery_boundary(runtime_factory, monkeypatch, boundary):
     started, release = threading.Event(), threading.Event()
     def block():
         started.set()
         assert release.wait(3)
     def create(**kwargs):
-        if boundary == "after_response":
+        if boundary == "during_model":
             block()
         return response()
     runtime, host = runtime_factory(client=create)
@@ -363,12 +387,9 @@ def test_stop_cron_delivery_boundary(runtime_factory, monkeypatch, boundary):
     finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
     assert finished.payload["outcome"]["status"] == "stopped"
     assert runtime._background_paused
-    if boundary == "before_model":
-        assert host.scheduler.cron_queue == [job]
-        assert host.scheduler.scheduled_jobs[job.id].pending_delivery
-    else:
-        assert not host.scheduler.cron_queue
-        assert job.id not in host.scheduler.scheduled_jobs
+    # A cancelled stream has no accepted response to confirm cron delivery.
+    assert host.scheduler.cron_queue == [job]
+    assert host.scheduler.scheduled_jobs[job.id].pending_delivery
 
 
 def test_background_delivery_runs_with_noninteractive_permissions(runtime_factory):
@@ -733,7 +754,7 @@ def test_model_claim_and_todo_are_saved_before_next_request(runtime_factory, mon
         assert saved["todos"] == [{"content": "verify", "status": "in_progress"}]
         assert host.load_task(task.id).session_id == runtime.session.session_id
         return response("Task retained")
-    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    monkeypatch.setattr(host.core, "client", SimpleNamespace(messages=SimpleNamespace(create=create, stream=fake_stream_for(create))))
     submission = runtime.submit("claim and track task")
     finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
     assert finished.payload["outcome"]["status"] == "completed"

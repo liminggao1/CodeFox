@@ -182,9 +182,16 @@ class SessionStore:
                                  "tool_call_id": str, "decision": str},
             "command_result": {"command": str, "status": str, "data": dict},
             "turn_finished": {"outcome": dict, "summary": dict},
+            "execution_status": {"operation_id": str, "phase": str, "name": str, "state": str},
         }[kind]
         if not all(isinstance(payload.get(key), expected) for key, expected in required.items()):
             raise SessionError(f"Invalid {kind} display payload")
+        if kind == "execution_status" and (payload["phase"] not in {"model", "tool", "hook", "goal", "memory"}
+                or payload["state"] not in {"running", "postprocessing", "completed", "failed", "denied", "stopped", "discarded", "truncated"}
+                or not payload["operation_id"]):
+            raise SessionError("Invalid execution lifecycle")
+        if "model_call_id" in payload and (not isinstance(payload["model_call_id"], str) or not payload["model_call_id"]):
+            raise SessionError("Invalid model call identity")
         if kind == "tool_result" and ("content" not in payload or payload.get("status") not in
                 {"returned", "success", "failed", "denied", "stopped", "started"}):
             raise SessionError("Invalid tool result display state")
@@ -284,6 +291,22 @@ class InteractiveSession:
             decided = {r["payload"]["request_id"] for r in records if r["type"] == "approval_decided"}
             results = {(r["turn_id"], r["source"], r["payload"]["tool_use_id"])
                        for r in records if r["type"] == "tool_result"}
+            terminal_operations = set()
+            terminal_tasks = set()
+            terminal_background = set()
+            for record in records:
+                payload = record["payload"]
+                if record["type"] == "execution_status" and payload.get("state") in {
+                        "completed", "failed", "stopped", "discarded", "truncated"}:
+                    terminal_operations.add((record["turn_id"], record["source"],
+                                             payload.get("model_call_id"), payload.get("operation_id")))
+                elif record["type"] == "subagent_status" and payload.get("status") in {
+                        "completed", "failed", "stopped", "denied", "idle", "closed"}:
+                    terminal_tasks.add((record["turn_id"], record["source"],
+                                        payload.get("name"), payload.get("task_id")))
+                elif record["type"] == "background_status" and payload.get("status") in {
+                        "completed", "failed", "stopped", "denied"}:
+                    terminal_background.add((record["turn_id"], record["source"], payload.get("task_id")))
             for record in records:
                 payload = record["payload"]
                 payload["historical"] = True
@@ -291,6 +314,20 @@ class InteractiveSession:
                     payload["interrupted"] = True
                 if record["type"] == "tool_call" and (record["turn_id"], record["source"], payload["id"]) not in results:
                     payload["result_missing"] = True
+                if record["type"] == "execution_status" and payload.get("state") in {"running", "working", "pending", "postprocessing"}:
+                    key = (record["turn_id"], record["source"], payload.get("model_call_id"), payload.get("operation_id"))
+                    if key not in terminal_operations:
+                        payload.update(state="interrupted", interrupted=True,
+                                       reason="上次中断，结束状态未记录")
+                if record["type"] == "subagent_status" and payload.get("status") in {
+                        "running", "working", "pending", "waiting_approval", "stopping"}:
+                    key = (record["turn_id"], record["source"], payload.get("name"), payload.get("task_id"))
+                    if key not in terminal_tasks:
+                        payload.update(status="interrupted", interrupted=True)
+                if record["type"] == "background_status" and payload.get("status") in {"running", "working", "pending"}:
+                    key = (record["turn_id"], record["source"], payload.get("task_id"))
+                    if key not in terminal_background:
+                        payload.update(status="interrupted", interrupted=True)
         return records
 
     def save(self) -> bool:
@@ -330,10 +367,27 @@ class InteractiveSession:
         if last.get("role") != "assistant" or not isinstance(last.get("content"), list):
             return
         content = json_value(last["content"])
-        results = [{"type": "tool_result", "tool_use_id": block["id"],
-                    "content": "Interrupted before the tool result was saved; verify current state before retrying.",
-                    "is_error": True}
-                   for block in content if block.get("type") == "tool_use"]
+        records = self.display_records()
+        results = []
+        for block in content:
+            if block.get("type") != "tool_use":
+                continue
+            call = next((r for r in reversed(records) if r["type"] == "tool_call" and r["source"] == "lead"
+                         and r["payload"]["id"] == block["id"]), None)
+            saved = next((r for r in reversed(records) if call is not None and r["type"] == "tool_result"
+                          and r["source"] == "lead" and r["turn_id"] == call["turn_id"]
+                          and r["payload"]["tool_use_id"] == block["id"]
+                          and r["payload"].get("model_call_id") == call["payload"].get("model_call_id")), None)
+            if saved is not None:
+                data = saved["payload"]
+                result = {"type": "tool_result", "tool_use_id": block["id"], "content": data["content"]}
+                if "is_error" in data:
+                    result["is_error"] = data["is_error"]
+            else:
+                result = {"type": "tool_result", "tool_use_id": block["id"],
+                          "content": "Interrupted before the tool result was saved; verify current state before retrying.",
+                          "is_error": True}
+            results.append(result)
         if results:
             self.history.append({"role": "user", "content": results})
             self.dirty = True

@@ -25,6 +25,7 @@ DISPLAY_FACT_TYPES = frozenset({
     "user_message", "assistant_message", "tool_call", "tool_result",
     "todo_updated", "subagent_status", "background_status",
     "approval_requested", "approval_decided", "command_result", "turn_finished",
+    "execution_status",
 })
 
 @dataclass(frozen=True)
@@ -82,6 +83,8 @@ class ExecutionContext:
     stop_event: threading.Event | None = None
     scope: EventScope = "session"
     checkpoint: object = None
+    model_call_id: str | None = None
+    tool_call_id: str | None = None
 
     def stopped(self) -> bool:
         return self.stop_event is not None and self.stop_event.is_set()
@@ -89,7 +92,8 @@ class ExecutionContext:
     def delegate(self, source: str, origin: ExecutionOrigin | None = None):
         """Synchronous once inherits origin; independent work sets it explicitly."""
         return replace(self, source=source, origin=origin or self.origin,
-                       checkpoint=self.checkpoint if origin is None else None)
+                       checkpoint=self.checkpoint if origin is None else None,
+                       model_call_id=None, tool_call_id=None)
 
     def publish(self, event_type: str, **payload) -> InteractionEvent:
         return self.channel.publish(self, event_type, payload)
@@ -118,6 +122,33 @@ def publish(event_type: str, **payload) -> InteractionEvent | None:
     return None
 
 
+@contextmanager
+def operation_context(**fields):
+    context = current_context()
+    with execution_context(replace(context, **fields) if context is not None else None):
+        yield
+
+
+def operation_status(phase, name, state, *, operation_id=None, **payload):
+    identity = operation_id or uuid.uuid4().hex
+    publish("execution_status", phase=phase, name=name, state=state,
+            operation_id=identity, **payload)
+    return identity
+
+
+@contextmanager
+def observe_operation(phase, name):
+    """Report an actual synchronous operation without changing its result."""
+    identity = operation_status(phase, name, "running")
+    try:
+        yield
+    except Exception as exc:
+        operation_status(phase, name, "failed", operation_id=identity, reason=f"{type(exc).__name__}: {exc}")
+        raise
+    else:
+        operation_status(phase, name, "completed", operation_id=identity)
+
+
 def data_copy(value):
     """Reject live SDK/business objects and detach nested mutable JSON values."""
     return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
@@ -140,6 +171,12 @@ class InteractionChannel:
         self._generation = 0
         self._closed = False
         self._approvals_closed = False
+        self._projector = None
+
+    def set_projector(self, projector):
+        """Install the runtime's pure fact projection before starting execution."""
+        with self._changed:
+            self._projector = projector
 
     def _stale(self, item) -> bool:
         return item.generation < self._generation
@@ -161,6 +198,10 @@ class InteractionChannel:
     def publish(self, context: ExecutionContext, event_type: str,
                 payload: dict, *, deliver=True, capture=True) -> InteractionEvent:
         copied = data_copy(payload)
+        for key in ("model_call_id", "tool_call_id"):
+            value = getattr(context, key)
+            if value is not None:
+                copied.setdefault(key, value)
         with self._changed:
             if self._closed:
                 raise RuntimeError("Interaction channel is closed")
@@ -174,7 +215,16 @@ class InteractionChannel:
                     self._events.append(event)
                     self._unacknowledged[event.sequence] = event
                 if capture and event.scope == "session" and event.type in DISPLAY_FACT_TYPES:
-                    self._facts.append(replace(event, payload=data_copy(event.payload)))
+                    record = self._projector(event) if self._projector is not None else None
+                    if record is not None:
+                        self._sequence += 1
+                        display = replace(event, sequence=self._sequence, type="display_record",
+                                          payload={"record": data_copy(record)})
+                        self._events.append(display)
+                        self._unacknowledged[display.sequence] = display
+                        self._facts.append(replace(display, payload=data_copy(display.payload)))
+                    elif self._projector is None:
+                        self._facts.append(replace(event, payload=data_copy(event.payload)))
             self._changed.notify_all()
             return replace(event, payload=data_copy(event.payload))
 

@@ -1,6 +1,6 @@
 # 开发笔记：运行与调试
 
-> 记录时间：2026-10-04
+> 初次记录：2026-10-04；最后核对：2026-10-10
 > 定位：**本机个人笔记** —— 怎么跑、怎么调。
 > 通用安装步骤见 [env-setup.md](env-setup.md)；本机环境约定（WSL / conda / 命令）见 [AGENTS.md](../AGENTS.md)；
 > 对外命令清单见 [README.md](../README.md)。
@@ -82,12 +82,15 @@ PYTHONPATH=src /home/gaogao/miniconda3/envs/learncc/bin/python -m agent_harness 
 /home/gaogao/miniconda3/envs/learncc/bin/python -m pip install 'textual>=8.2.8,<9'
 ```
 
-**对话与布局：**顶部显示会话、模型和执行状态；左侧是对话和输入框，助手回复按 Markdown 显示；
-主对话依次显示消息、工具调用与结果、TODO、后台进度、审批和回合摘要，执行者标明来源。
-工具参数和结果全文默认收起，点击展开。右侧保留 goal、最新 TODO、子 Agent、Lead 用量和原始事件。
-默认挂载最近 80 条记录，点击「加载更早记录」继续查看；事件区保留最近 1000 行。显示上限不删除会话记录。
-终端宽度小于 85 列时默认隐藏右侧面板，可以按 F2 打开。点击对话区后用 Home/End、方向键、
-PageUp/PageDown 或鼠标滚轮查看历史。
+**对话与布局：**只有会话区与底部输入区，没有顶部状态栏、右栏和固定底栏。
+输入接受后立即显示消息与处理提示。模型等待、实际 hook、工具、TODO、后台进度、审批和结束摘要进入同一会话。
+Lead 正文在文字片段到达时增量显示；子 agent 与记忆、目标等内部调用仍使用完整响应。
+工具名称、关键参数、状态和短结果默认可见，点击「详情」展开完整参数与输出。
+同次模型调用的工具与 hook 归在同一过程组，内容过多时在组内滚动；全文展开区也有独立滚动条。
+鼠标滚轮先移动所在的内部区域，到边界后继续移动外层会话。审批按钮位于组外的内联条目。
+恢复先挂载最近一段记录，点击「加载更早记录」继续查看；分组使用完整关联，显示上限不删除保存记录。
+点击会话区后用 Home/End、方向键、PageUp/PageDown 或鼠标滚轮查看历史。
+主动上翻时新记录不强制滚到底部；首次有效审批会滚到可操作的位置。
 
 输入框支持中文和多行粘贴。普通消息 Enter 换行，点击「发送」或按 Ctrl+Enter 提交。
 部分终端不能区分 Ctrl+Enter，此时使用发送按钮。空白提交会忽略。
@@ -109,10 +112,14 @@ PageUp/PageDown 或鼠标滚轮查看历史。
 | 会话列表 | Ctrl+R | 空闲时打开会话列表 |
 | 停止回合 | Ctrl+C / 停止 | 请求停止当前回合，保留已有结果和输入草稿 |
 | 退出 | Ctrl+D | 请求关闭，等待保存与资源清理后退出 |
-| 右侧面板 | F2 | 显示或隐藏状态和事件 |
 
 **审批：**Bash 和策略要求确认的 MCP 工具在主对话显示来源、工具名和可展开的完整参数。
 按钮启用后选择「批准」或「拒绝」；Ctrl+C 停止回合，Ctrl+D 退出，两者都会解除审批等待。
+
+**流式与恢复：**断流、停止或重试的临时正文会标明「本次输出未采用」，不会存为正式回复。
+停止在下一网络读取/处理安全点生效，仍受请求超时限制。停止后不会自动重新请求模型。
+真实工具结果逐项显示与保存，供模型的结果消息仍整批追加；中断恢复使用已保存结果，只为缺失项补中断信息。
+后台事件即时显示，到下一安全检查点保存；显示完成不等于已经落盘。CLI 使用同一摘要，失败尝试以追加提示区分。
 前台 Lead 及其同步 once 子 Agent 可以申请确认；后台 Lead、persistent 子 Agent、workflow 和
 无交互上下文的调用会直接拒绝需要确认的工具。文件路径、拒绝列表和工具白名单仍先行检查。
 
@@ -128,7 +135,7 @@ PageUp/PageDown 或鼠标滚轮查看历史。
 | `/delete <id>` | 删除非活动会话；列表也提供删除按钮 |
 | `/quit` | 空闲时请求退出；执行期间使用 Ctrl+D |
 
-会话保存位置和恢复限制见上方「真实 API 交互」。恢复会重建对话显示，清空当前事件区和 Lead 用量。
+会话保存位置和恢复限制见上方「真实 API 交互」。恢复会重建会话记录，并重置当前激活期间的 Lead 用量。
 历史审批只读，工具结果未记录时提示核对当前状态；恢复不会重执行工具或启动旧后台线程。
 历史回合摘要按保存内容展示，模型压缩不删除展示历史。
 用量只统计当前激活期间 Lead 主模型的输入/输出 token 和请求数；不含 goal、memory、压缩、
@@ -137,9 +144,9 @@ PageUp/PageDown 或鼠标滚轮查看历史。
 **停止与退出：**停止是合作式请求。等待审批会立即解除；已开始的同步模型、重试、工具、
 goal 评估或记忆抽取需要先返回，再到检查点停止。已完成的文件操作和记忆写入保留。
 它不递归取消独立子 Agent 或 workflow。停止后暂停后台结果自动唤醒 Lead，下一次显式提交恢复。
-子 Agent 状态仍会更新侧栏。主模型报上下文过长错误时，已请求停止不会再启动恢复摘要；
+子 Agent 状态仍会进入会话记录。主模型报上下文过长错误时，已请求停止不会再启动恢复摘要；
 原始模型异常仍报告失败。cron 通知属于当前运行实例，恢复会话后仍显示新的调度错误。
-Ctrl+D 进入「正在关闭」，拒绝新输入，停止 cron，清理 shell，等待所属后台线程退出并保存会话；
+Ctrl+D 在会话中显示「正在关闭」，拒绝新输入，停止 cron，清理 shell，等待所属后台线程退出并保存会话；
 关闭期间界面继续响应。保存失败会报告错误，TUI 退出码为 1。
 
 **离线验证：**下面使用 fake client 和 Textual 无头测试，不联网；实际 TUI 启动仍使用真实 API。
@@ -316,7 +323,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 ### 按观察点调试
 
-先点击函数链接下断点，再选择上面的现成配置。凡是下面写了测试路径的，在
+先点击函数链接下断点，再选择上面的现成配置。源码链接采用相对路径和 `#L行号`，以当前函数与调用位置为准。凡是下面写了测试路径的，在
 [.vscode/launch.json](../.vscode/launch.json) 里找到「pytest（当前文件）」，仅把
 `"args": ["-q", "${file}"]` 中的 `"${file}"` 换成给出的路径；其他字段不用改。
 写了两个测试路径的，分别替换并运行一次。配置中的解释器已固定为 WSL 的 `learncc`。
@@ -324,7 +331,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 表中的“调用身份”区分函数在这条路径中的用途；“同文件 / 跨文件”指调用位置与实现位置，
 不表示 Python 强制限制了访问范围。LLM 请求的是工具名，Python 运行时再执行对应函数。
 
-- **工具处理器**：已登记到工具池的入口，例如 `write_file` 对应 `run_agent_write`。
+- **工具处理器**：已登记到工具池的入口，例如 `write_file` 对应 `bind_file_tools` 返回的 `write` 闭包。
 - **工具底层**：由处理器继续调用的业务函数，LLM 不直接按这个 Python 函数名请求。
 - **内部 / 局部函数**：由程序直接调用；局部函数定义在另一个函数里面。
 - **回调 / 线程入口 / CLI 入口**：分别由注册器、hooks、线程或命令行流程触发。
@@ -334,27 +341,26 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 1. 一轮对话的完整流程
 
-入口是 `agent_loop`，实现位于 [host.py:259](../src/agent_harness/host.py#L259)。
-它由 CLI 或后台事件调用；本节表中的辅助函数由程序驱动，不是提供给 LLM 的工具入口。
-选择「端到端自检（离线）」，在 [host.py:312](../src/agent_harness/host.py#L312) 下断点，按下面的主要调用顺序单步查看。
+入口是 `agent_loop`，实现位于 [host.py:300](../src/agent_harness/host.py#L300)。
+它由共享驱动执行用户回合或后台唤醒回合；本节表中的辅助函数由程序驱动，不是提供给 LLM 的工具入口。
+选择「端到端自检（离线）」，在 [host.py:392](../src/agent_harness/host.py#L392) 下断点，按下面的主要调用顺序单步查看。
 
 | 顺序 | 函数                 | 调用身份    | 调用 / 触发位置                                  | 实现位置                                                             | 作用                                                                               |
 | ---- | -------------------- | ----------- | ------------------------------------------------ | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| 1    | `prepare_history`    | 内部·跨文件 | [host.py:312](../src/agent_harness/host.py#L312) | [compaction.py:44](../src/agent_harness/context/compaction.py#L44)           | 按预算整理或压缩历史                                                               |
-| 2    | `build_context`      | 内部·跨文件 | [host.py:318](../src/agent_harness/host.py#L318) | [runtime_context.py:31](../src/agent_harness/runtime_context.py#L31) | 刷新记忆、MCP 和子 agent 信息，见第 2 节                                           |
-| 3    | `assemble_tool_pool` | 内部·同文件 | [host.py:320](../src/agent_harness/host.py#L320) | [host.py:119](../src/agent_harness/host.py#L119)                     | 装配本轮工具；内部调用注册器 [snapshot](../src/agent_harness/tools/tool_registry.py#L36) |
-| 4    | `call_llm`           | 内部·同文件 | [host.py:326](../src/agent_harness/host.py#L326) | [host.py:210](../src/agent_harness/host.py#L210)                     | 拼接系统提示词并请求模型                                                           |
-| 5    | `has_tool_use`       | 内部·跨文件 | [host.py:378](../src/agent_harness/host.py#L378) | [message_content.py:17](../src/agent_harness/providers/message_content.py#L17) | 判断模型是否请求工具，决定进入下面哪个分支                                         |
+| 1    | `prepare_history`    | 内部·跨文件 | [host.py:392](../src/agent_harness/host.py#L392) | [compaction.py:44](../src/agent_harness/context/compaction.py#L44)           | 按预算整理或压缩历史                                                               |
+| 2    | `build_context`      | 内部·跨文件 | [host.py:400](../src/agent_harness/host.py#L400) | [runtime_context.py:31](../src/agent_harness/runtime_context.py#L31) | 刷新记忆、MCP 和子 agent 信息，见第 2 节                                           |
+| 3    | `assemble_tool_pool` | 内部·同文件 | [host.py:402](../src/agent_harness/host.py#L402) | [host.py:101](../src/agent_harness/host.py#L101)                     | 装配本轮工具；内部调用注册器 [snapshot](../src/agent_harness/tools/tool_registry.py#L36) |
+| 4    | `call_llm`           | 内部·同文件 | [host.py:413](../src/agent_harness/host.py#L413) | [host.py:221](../src/agent_harness/host.py#L221)                     | 拼接系统提示词并请求模型                                                           |
+| 5    | `has_tool_use`       | 内部·跨文件 | [host.py:487](../src/agent_harness/host.py#L487) | [message_content.py:17](../src/agent_harness/providers/message_content.py#L17) | 判断模型是否请求工具，决定进入下面哪个分支                                         |
 
 **有普通同步工具请求时：**
 
-| 顺序 | 函数                  | 调用身份    | 调用 / 触发位置                                  | 实现位置                                                     | 作用                            |
-| ---- | --------------------- | ----------- | ------------------------------------------------ | ------------------------------------------------------------ | ------------------------------- |
-| 6    | `trigger_hooks`       | 内部·跨文件 | [host.py:432](../src/agent_harness/host.py#L432) | [hooks.py:30](../src/agent_harness/runtime/hooks.py#L30)             | 触发 `PreToolUse`，检查能否执行 |
-| 7    | `call_tool_handler`   | 内部·跨文件 | [host.py:466](../src/agent_harness/host.py#L466) | [file_tools.py:285](../src/agent_harness/tools/file_tools.py#L285) | 执行工具                        |
-| 8    | `trigger_hooks`       | 内部·跨文件 | [host.py:468](../src/agent_harness/host.py#L468) | [hooks.py:30](../src/agent_harness/runtime/hooks.py#L30)             | 触发 `PostToolUse`              |
-| 9    | `build_user_content`  | 内部·同文件 | [host.py:486](../src/agent_harness/host.py#L486) | [host.py:170](../src/agent_harness/host.py#L170)             | 把工具结果和后台通知写回历史    |
-| 10   | `apply_after_results` | 内部·跨文件 | [host.py:488](../src/agent_harness/host.py#L488) | [compaction.py:654](../src/agent_harness/context/compaction.py#L654) | 有手动压缩请求时执行压缩        |
+| 顺序 | 函数 | 调用身份 | 调用 / 触发位置 | 实现位置 | 作用 |
+| --- | --- | --- | --- | --- | --- |
+| 6 | `check_tool_use` | 内部·跨文件 | [host.py:559](../src/agent_harness/host.py#L559) | [hooks.py:61](../src/agent_harness/runtime/hooks.py#L61) | 执行授权与 PreToolUse，并检查停止请求 |
+| 7 | `execute_tool` | 内部·跨文件 | [host.py:602](../src/agent_harness/host.py#L602) | [hooks.py:76](../src/agent_harness/runtime/hooks.py#L76) | 调用 handler，再执行 PostToolUse |
+| 8 | `build_user_content` | 内部·同文件 | [host.py:623](../src/agent_harness/host.py#L623) | [host.py:179](../src/agent_harness/host.py#L179) | 把本批工具结果和后台通知写回模型历史 |
+| 9 | `apply_after_results` | 内部·跨文件 | [host.py:627](../src/agent_harness/host.py#L627) | [compaction.py:654](../src/agent_harness/context/compaction.py#L654) | 有手动压缩请求时执行压缩 |
 
 然后回到循环顶部，再次请求模型。自检会演示：`请求写文件 → 执行 write_file → 回填结果 → 模型回答`。
 
@@ -362,20 +368,20 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 | 顺序 | 函数                           | 调用身份    | 调用 / 触发位置                                  | 实现位置                                           | 作用                                   |
 | ---- | ------------------------------ | ----------- | ------------------------------------------------ | -------------------------------------------------- | -------------------------------------- |
-| 6    | `trigger_hooks`                | 内部·跨文件 | [host.py:380](../src/agent_harness/host.py#L380) | [hooks.py:30](../src/agent_harness/runtime/hooks.py#L30)   | 触发 `Stop`                            |
-| 7    | `evaluate_goal`                | 内部·同文件 | [host.py:382](../src/agent_harness/host.py#L382) | [host.py:234](../src/agent_harness/host.py#L234)   | 检查目标；判定为 `block` 就继续循环    |
-| 8    | `remember_after_turn`          | 内部·同文件 | [host.py:405](../src/agent_harness/host.py#L405) | [host.py:151](../src/agent_harness/host.py#L151)   | 提取并整理记忆                         |
-| 9    | `release_completed_assignment` | 内部·跨文件 | [host.py:407](../src/agent_harness/host.py#L407) | [tasks.py:485](../src/agent_harness/workspace/tasks.py#L485) | 释放已完成任务的分配记录，随后结束本轮 |
+| 6    | `trigger_hooks`                | 内部·跨文件 | [host.py:491](../src/agent_harness/host.py#L491) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31)   | 触发 `Stop`                            |
+| 7    | `evaluate_goal`                | 内部·同文件 | [host.py:495](../src/agent_harness/host.py#L495) | [host.py:268](../src/agent_harness/host.py#L268)   | 检查目标；判定为 `block` 就继续循环    |
+| 8    | `remember_after_turn`          | 内部·同文件 | [host.py:524](../src/agent_harness/host.py#L524) | [host.py:155](../src/agent_harness/host.py#L155)   | 提取并整理记忆                         |
+| 9    | `release_completed_assignment` | 内部·跨文件 | [host.py:528](../src/agent_harness/host.py#L528) | [tasks.py:570](../src/agent_harness/workspace/tasks.py#L570) | 释放已完成任务的分配记录，随后结束本轮 |
 
 #### 2. 上下文如何刷新
 
-主循环在 [host.py:318](../src/agent_harness/host.py#L318) 调用 `build_context`，
+主循环在 [host.py:400](../src/agent_harness/host.py#L400) 调用 `build_context`，
 实现位于 [runtime_context.py:31](../src/agent_harness/runtime_context.py#L31)。
 进入函数后，按下面的顺序查看：
 
 | 顺序 | 函数或数据                  | 调用身份    | 使用位置                                                             | 实现或定义位置                                                       | 作用                          |
 | ---- | --------------------------- | ----------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------- |
-| 1    | `subagent.active_subagents` | 共享数据    | [runtime_context.py:39](../src/agent_harness/runtime_context.py#L39) | [subagent.py:125](../src/agent_harness/agents/subagent.py#L125)             | 加锁读取活跃子 agent 名称     |
+| 1    | `subagent.active_subagents` | 共享数据    | [runtime_context.py:39](../src/agent_harness/runtime_context.py#L39) | [subagent.py:126](../src/agent_harness/agents/subagent.py#L126)             | 加锁读取活跃子 agent 名称     |
 | 2    | `read_memory_index`         | 内部·跨文件 | [runtime_context.py:41](../src/agent_harness/runtime_context.py#L41) | [memory_runtime.py:197](../src/agent_harness/context/memory_runtime.py#L197) | 读取记忆索引                  |
 | 3    | `load_memories`             | 内部·跨文件 | [runtime_context.py:42](../src/agent_harness/runtime_context.py#L42) | [memory_runtime.py:371](../src/agent_harness/context/memory_runtime.py#L371) | 加载相关记忆，具体选取流程见第 14 节 |
 | 4    | `mcp_tools.mcp_clients`     | 共享数据    | [runtime_context.py:43](../src/agent_harness/runtime_context.py#L43) | [mcp_tools.py:54](../src/agent_harness/tools/mcp_tools.py#L54)             | 读取已登记的 MCP 名称         |
@@ -384,8 +390,8 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 | 顺序 | 函数                     | 调用身份    | 调用 / 触发位置                                  | 实现位置                                                             | 作用                                      |
 | ---- | ------------------------ | ----------- | ------------------------------------------------ | -------------------------------------------------------------------- | ----------------------------------------- |
-| 5    | `prompt_values`          | 内部·跨文件 | [host.py:223](../src/agent_harness/host.py#L223) | [runtime_context.py:17](../src/agent_harness/runtime_context.py#L17) | 将上下文字段交给提示词组装函数            |
-| 6    | `assemble_system_prompt` | 内部·跨文件 | [host.py:223](../src/agent_harness/host.py#L223) | [prompts.py:73](../src/agent_harness/context/prompts.py#L73)                 | 把记忆、MCP 和子 agent 信息拼进系统提示词 |
+| 5    | `prompt_values`          | 内部·跨文件 | [host.py:234](../src/agent_harness/host.py#L234) | [runtime_context.py:17](../src/agent_harness/runtime_context.py#L17) | 将上下文字段交给提示词组装函数            |
+| 6    | `assemble_system_prompt` | 内部·跨文件 | [host.py:234](../src/agent_harness/host.py#L234) | [prompts.py:73](../src/agent_harness/context/prompts.py#L73)                 | 把记忆、MCP 和子 agent 信息拼进系统提示词 |
 
 每次循环都会重新构造上下文。上一轮新增的 MCP 或子 agent，会在下一次构造时读到。
 要观察刷新前后的区别，选择「pytest（当前文件）」，将 `"${file}"` 替换为 `"tests/test_runtime_context.py"`。
@@ -399,55 +405,55 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 | 顺序 | 函数                                 | 调用身份        | 调用 / 触发位置                                                    | 实现位置                                         | 作用                           |
 | ---- | ------------------------------------ | --------------- | ------------------------------------------------------------------ | ------------------------------------------------ | ------------------------------ |
-| 1    | `evaluate_goal`                      | 内部·同文件     | [host.py:382](../src/agent_harness/host.py#L382)                   | [host.py:234](../src/agent_harness/host.py#L234) | 主模型不再请求工具时检查目标   |
-| 2    | `GoalController.evaluate_after_turn` | 内部·跨文件     | [host.py:248](../src/agent_harness/host.py#L248)                   | [goal.py:356](../src/agent_harness/agents/goal.py#L356) | 根据活动目标决定是否评估       |
-| 3    | `PromptGoalEvaluator.evaluate`       | 内部·同文件     | [goal.py:384](../src/agent_harness/agents/goal.py#L384)                   | [goal.py:184](../src/agent_harness/agents/goal.py#L184) | 启动独立目标评估               |
-| 4    | `_evaluate_sync`                     | 线程任务·同文件 | [goal.py:199](../src/agent_harness/agents/goal.py#L199)（to_thread 目标） | [goal.py:202](../src/agent_harness/agents/goal.py#L202) | 在线程中请求评估模型并解析判断 |
+| 1    | `evaluate_goal`                      | 内部·同文件     | [host.py:495](../src/agent_harness/host.py#L495)                   | [host.py:268](../src/agent_harness/host.py#L268) | 主模型不再请求工具时检查目标   |
+| 2    | `GoalController.evaluate_after_turn` | 内部·跨文件     | [host.py:282](../src/agent_harness/host.py#L282)                   | [goal.py:358](../src/agent_harness/agents/goal.py#L358) | 根据活动目标决定是否评估       |
+| 3    | `PromptGoalEvaluator.evaluate`       | 内部·同文件     | [goal.py:386](../src/agent_harness/agents/goal.py#L386)                   | [goal.py:186](../src/agent_harness/agents/goal.py#L186) | 启动独立目标评估               |
+| 4    | `_evaluate_sync`                     | 线程任务·同文件 | [goal.py:201](../src/agent_harness/agents/goal.py#L201)（to_thread 目标） | [goal.py:204](../src/agent_harness/agents/goal.py#L204) | 在线程中请求评估模型并解析判断 |
 
-判定为 `block` 时，主循环在 [host.py:390](../src/agent_harness/host.py#L390) 追加继续提示；判定为 `achieved` 时，在 [goal.py:416](../src/agent_harness/agents/goal.py#L416) 清空活动目标。
+判定为 `block` 时，主循环在 [host.py:511](../src/agent_harness/host.py#L511) 追加继续提示；判定为 `achieved` 时，在 [goal.py:418](../src/agent_harness/agents/goal.py#L418) 清空活动目标。
 
 #### 4. 系统提示词怎么拼出来
 
-选择「端到端自检（离线）」，在 [host.py:222](../src/agent_harness/host.py#L222) 下断点。
+选择「端到端自检（离线）」，在 [host.py:234](../src/agent_harness/host.py#L234) 下断点。
 
 | 顺序 | 函数                     | 调用身份    | 调用 / 触发位置                                      | 实现位置                                                             | 作用                     |
 | ---- | ------------------------ | ----------- | ---------------------------------------------------- | -------------------------------------------------------------------- | ------------------------ |
-| 1    | `prompt_values`          | 内部·跨文件 | [host.py:223](../src/agent_harness/host.py#L223)     | [runtime_context.py:17](../src/agent_harness/runtime_context.py#L17) | 取出本轮上下文字段       |
-| 2    | `assemble_system_prompt` | 内部·跨文件 | [host.py:223](../src/agent_harness/host.py#L223)     | [prompts.py:73](../src/agent_harness/context/prompts.py#L73)                 | 拼接固定规则和本轮上下文 |
+| 1    | `prompt_values`          | 内部·跨文件 | [host.py:234](../src/agent_harness/host.py#L234)     | [runtime_context.py:17](../src/agent_harness/runtime_context.py#L17) | 取出本轮上下文字段       |
+| 2    | `assemble_system_prompt` | 内部·跨文件 | [host.py:234](../src/agent_harness/host.py#L234)     | [prompts.py:73](../src/agent_harness/context/prompts.py#L73)                 | 拼接固定规则和本轮上下文 |
 | 3    | `list_skills`            | 内部·跨文件 | [prompts.py:89](../src/agent_harness/context/prompts.py#L89) | [skills.py:80](../src/agent_harness/context/skills.py#L80)                   | 加入可用 skill 目录      |
 
-拼接完成后，在 [host.py:224](../src/agent_harness/host.py#L224) 发起模型请求。
+拼接完成后，在 [host.py:256](../src/agent_harness/host.py#L256) 发起模型请求。
 
 #### 5. 工具调用与结果
 
-选择「端到端自检（离线）」，在 [host.py:465](../src/agent_harness/host.py#L465) 下断点。以 `write_file` 为例：
+选择「端到端自检（离线）」，在 [host.py:602](../src/agent_harness/host.py#L602) 下断点。以 `write_file` 为例：
 
 | 顺序 | 函数                 | 调用身份                      | 调用 / 触发位置                                                                                                                                   | 实现位置                                                     | 作用                                     |
 | ---- | -------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ---------------------------------------- |
-| 1    | `call_tool_handler`  | 内部·跨文件                   | [host.py:466](../src/agent_harness/host.py#L466)                                                                                                  | [file_tools.py:285](../src/agent_harness/tools/file_tools.py#L285) | 按工具名称取得的处理函数执行工具         |
-| 2    | `run_agent_write`    | 工具处理器：`write_file`      | 登记 [registrations.py:192](../src/agent_harness/registrations.py#L192) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [file_tools.py:255](../src/agent_harness/tools/file_tools.py#L255) | 根据 write_file 映射进入写文件处理器     |
-| 3    | `_agent_cwd`         | 内部·同文件                   | [file_tools.py:261](../src/agent_harness/tools/file_tools.py#L261)                                                                                      | [file_tools.py:223](../src/agent_harness/tools/file_tools.py#L223) | 确定当前任务的工作目录                   |
-| 4    | `assignment_cwd`     | 内部·跨文件                   | [file_tools.py:229](../src/agent_harness/tools/file_tools.py#L229)                                                                                      | [tasks.py:450](../src/agent_harness/workspace/tasks.py#L450)           | 读取任务分配及 worktree 目录             |
-| 5    | `run_write`          | 内部·同文件；子代理工具处理器 | [file_tools.py:262](../src/agent_harness/tools/file_tools.py#L262)                                                                                      | [file_tools.py:167](../src/agent_harness/tools/file_tools.py#L167) | 执行文件写入                             |
-| 6    | `safe_path`          | 内部·同文件                   | [file_tools.py:174](../src/agent_harness/tools/file_tools.py#L174)                                                                                      | [file_tools.py:26](../src/agent_harness/tools/file_tools.py#L26)   | 检查文件路径是否在允许目录内             |
-| 7    | `build_user_content` | 内部·同文件                   | [host.py:486](../src/agent_harness/host.py#L486)                                                                                                  | [host.py:170](../src/agent_harness/host.py#L170)             | 把执行结果写回历史，供下一次模型调用读取 |
+| 1 | `execute_tool` → `call_tool_handler` | 内部·跨文件 | [host.py:602](../src/agent_harness/host.py#L602) → [hooks.py:81](../src/agent_harness/runtime/hooks.py#L81) | [file_tools.py:293](../src/agent_harness/tools/file_tools.py#L293) | 通过统一执行入口取得并调用处理器 |
+| 2 | `bind_file_tools.write` | 工具处理器：`write_file` | 绑定 [shared_tools.py:104](../src/agent_harness/tools/shared_tools.py#L104) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [file_tools.py:252](../src/agent_harness/tools/file_tools.py#L252) | Lead 与 child 都使用按 owner 绑定的写文件闭包 |
+| 3 | `tool_cwd` | 内部·同文件 | [file_tools.py:239](../src/agent_harness/tools/file_tools.py#L239) | [file_tools.py:224](../src/agent_harness/tools/file_tools.py#L224) | 每次执行时取得当前任务目录 |
+| 4 | `assignment_cwd` | 内部·跨文件 | [file_tools.py:227](../src/agent_harness/tools/file_tools.py#L227) | [tasks.py:525](../src/agent_harness/workspace/tasks.py#L525) | 读取任务分配及 worktree 目录 |
+| 5 | `run_write` | 内部·同文件 | [file_tools.py:253](../src/agent_harness/tools/file_tools.py#L253) → [file_tools.py:240](../src/agent_harness/tools/file_tools.py#L240) | [file_tools.py:168](../src/agent_harness/tools/file_tools.py#L168) | 通过 invoke 传入 cwd 并写入文件 |
+| 6    | `safe_path`          | 内部·同文件                   | [file_tools.py:175](../src/agent_harness/tools/file_tools.py#L175)                                                                                      | [file_tools.py:27](../src/agent_harness/tools/file_tools.py#L27)   | 检查文件路径是否在允许目录内             |
+| 7    | `build_user_content` | 内部·同文件                   | [host.py:623](../src/agent_harness/host.py#L623)                                                                                                  | [host.py:179](../src/agent_harness/host.py#L179)             | 把执行结果写回历史，供下一次模型调用读取 |
 
 执行前后的权限与 hooks 见第 10 节。
 
 #### 6. 工具池装配
 
-选择「端到端自检（离线）」，在 [host.py:319](../src/agent_harness/host.py#L319) 下断点。
-启动时在 [host.py:111](../src/agent_harness/host.py#L111) 登记工具来源，之后每次循环按顺序装配。
+选择「端到端自检（离线）」，在 [host.py:402](../src/agent_harness/host.py#L402) 下断点。
+启动时由 `initialize_runtime` 在 [host.py:145](../src/agent_harness/host.py#L145) 登记工具来源，之后每次循环按顺序装配。
 表中“登记 → 执行”表示通过变量间接调用。工具来源回调提供工具定义，不是 LLM 可请求的工具。
 
 | 顺序 | 函数                    | 调用身份     | 调用 / 触发位置                                                                                                                    | 实现位置                                                           | 作用                             |
 | ---- | ----------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | -------------------------------- |
-| 1    | `assemble_tool_pool`    | 内部·同文件  | [host.py:320](../src/agent_harness/host.py#L320)                                                                                   | [host.py:119](../src/agent_harness/host.py#L119)                   | 装配本轮工具                     |
-| 2    | `ToolRegistry.snapshot` | 内部·跨文件  | [host.py:123](../src/agent_harness/host.py#L123)                                                                                   | [tool_registry.py:36](../src/agent_harness/tools/tool_registry.py#L36)   | 统一收集工具描述、处理函数和权限 |
-| 3    | `builtin_definitions`   | 工具来源回调 | 登记 [host.py:112](../src/agent_harness/host.py#L112) → [tool_registry.py:44](../src/agent_harness/tools/tool_registry.py#L44)（source） | [registrations.py:373](../src/agent_harness/registrations.py#L373) | 读取内置工具定义                 |
-| 4    | `discover_tools`        | 工具来源回调 | 登记 [host.py:113](../src/agent_harness/host.py#L113) → [tool_registry.py:44](../src/agent_harness/tools/tool_registry.py#L44)（source） | [mcp_tools.py:147](../src/agent_harness/tools/mcp_tools.py#L147)         | 读取已连接 MCP 的工具定义        |
+| 1    | `assemble_tool_pool`    | 内部·同文件  | [host.py:402](../src/agent_harness/host.py#L402)                                                                                   | [host.py:101](../src/agent_harness/host.py#L101)                   | 装配本轮工具                     |
+| 2    | `ToolRegistry.snapshot` | 内部·跨文件  | [host.py:105](../src/agent_harness/host.py#L105)                                                                                   | [tool_registry.py:36](../src/agent_harness/tools/tool_registry.py#L36)   | 统一收集工具描述、处理函数和权限 |
+| 3    | `builtin_definitions`   | 工具来源回调 | 登记 [host.py:146](../src/agent_harness/host.py#L146) → [tool_registry.py:44](../src/agent_harness/tools/tool_registry.py#L44)（source） | [registrations.py:308](../src/agent_harness/registrations.py#L308) | 读取内置工具定义                 |
+| 4    | `discover_tools`        | 工具来源回调 | 登记 [host.py:147](../src/agent_harness/host.py#L147) → [tool_registry.py:44](../src/agent_harness/tools/tool_registry.py#L44)（source） | [mcp_tools.py:147](../src/agent_harness/tools/mcp_tools.py#L147)         | 读取已连接 MCP 的工具定义        |
 
-注册器在同一调用位置依次执行各来源；Workflow 来源定义在 [host.py:114](../src/agent_harness/host.py#L114)。
+注册器在同一调用位置依次执行各来源；Workflow 来源定义在 [host.py:148](../src/agent_harness/host.py#L148)。
 `compact` 由主循环单独处理，见[运行相关](#运行相关)。
 
 #### 7. 任务生命周期
@@ -457,17 +463,17 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 | 顺序 | 函数                           | 调用身份                    | 调用 / 触发位置                                                                                                                                   | 实现位置                                                           | 作用                               |
 | ---- | ------------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ---------------------------------- |
-| 1    | `run_create_task`              | 工具处理器：`create_task`   | 登记 [registrations.py:236](../src/agent_harness/registrations.py#L236) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [registrations.py:44](../src/agent_harness/registrations.py#L44)   | 分发创建任务请求，格式化结果       |
-| 1.1  | `create_task`                  | 工具底层·跨文件             | [registrations.py:54](../src/agent_harness/registrations.py#L54)                                                                                  | [tasks.py:129](../src/agent_harness/workspace/tasks.py#L129)                 | 创建 pending 任务                  |
-| 2    | `run_claim_task`               | 工具处理器：`claim_task`    | 登记 [registrations.py:263](../src/agent_harness/registrations.py#L263) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [registrations.py:112](../src/agent_harness/registrations.py#L112) | 以主 agent 身份分发认领请求        |
-| 2.1  | `claim_task`                   | 工具底层·跨文件             | [registrations.py:122](../src/agent_harness/registrations.py#L122)                                                                                | [tasks.py:358](../src/agent_harness/workspace/tasks.py#L358)                 | 认领任务，登记 owner 和工作目录    |
-| 3    | `run_complete_task`            | 工具处理器：`complete_task` | 登记 [registrations.py:268](../src/agent_harness/registrations.py#L268) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [registrations.py:128](../src/agent_harness/registrations.py#L128) | 以主 agent 身份分发完成请求        |
-| 3.1  | `complete_task`                | 工具底层·跨文件             | [registrations.py:138](../src/agent_harness/registrations.py#L138)                                                                                | [tasks.py:397](../src/agent_harness/workspace/tasks.py#L397)                 | 把任务标记为 completed             |
-| 4    | `release_completed_assignment` | 内部·跨文件                 | [host.py:407](../src/agent_harness/host.py#L407)                                                                                                  | [tasks.py:485](../src/agent_harness/workspace/tasks.py#L485)                 | 本轮结束时释放已完成任务的分配记录 |
+| 1    | `run_create_task`              | 工具处理器：`create_task`   | 登记 [registrations.py:174](../src/agent_harness/registrations.py#L174) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [registrations.py:47](../src/agent_harness/registrations.py#L47)   | 分发创建任务请求，格式化结果       |
+| 1.1  | `create_task`                  | 工具底层·跨文件             | [registrations.py:57](../src/agent_harness/registrations.py#L57)                                                                                  | [tasks.py:191](../src/agent_harness/workspace/tasks.py#L191)                 | 创建 pending 任务                  |
+| 2 | `shared_tools.run_claim_task` | 工具处理器：`claim_task` | 绑定 [shared_tools.py:108](../src/agent_harness/tools/shared_tools.py#L108) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [shared_tools.py:85](../src/agent_harness/tools/shared_tools.py#L85) | 按 owner 认领任务 |
+| 2.1 | `claim_task` | 工具底层·跨文件 | [shared_tools.py:87](../src/agent_harness/tools/shared_tools.py#L87) → [shared_tools.py:78](../src/agent_harness/tools/shared_tools.py#L78) | [tasks.py:421](../src/agent_harness/workspace/tasks.py#L421) | 校验任务并登记 owner 和工作目录 |
+| 3 | `shared_tools.run_complete_task` | 工具处理器：`complete_task` | 绑定 [shared_tools.py:109](../src/agent_harness/tools/shared_tools.py#L109) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [shared_tools.py:90](../src/agent_harness/tools/shared_tools.py#L90) | 按 owner 完成任务 |
+| 3.1 | `complete_task` | 工具底层·跨文件 | [shared_tools.py:92](../src/agent_harness/tools/shared_tools.py#L92) → [shared_tools.py:78](../src/agent_harness/tools/shared_tools.py#L78) | [tasks.py:466](../src/agent_harness/workspace/tasks.py#L466) | 把 in_progress 任务标记为 completed |
+| 4    | `release_completed_assignment` | 内部·跨文件                 | [host.py:528](../src/agent_harness/host.py#L528)                                                                                                  | [tasks.py:570](../src/agent_harness/workspace/tasks.py#L570)                 | 本轮结束时释放已完成任务的分配记录 |
 
 创建、认领、完成分别由模型请求对应工具触发；分配通常在本轮结束时释放，
 Lead 成功移除自己的已完成 worktree 时也会提前释放，见第 8 节。
-表中的处理器属于 Lead。子 agent的认领和完成工具由自己的执行器包装，复用 `tasks.py` 的业务函数。
+表中的 owner 是 Lead（`agent`）。子 agent 使用相同处理器，绑定自己的 owner，复用 `tasks.py` 的业务函数。
 测试会直接调用业务函数。
 
 #### 8. 任务与 worktree 绑定
@@ -478,12 +484,12 @@ Lead 成功移除自己的已完成 worktree 时也会提前释放，见第 8 �
 
 | 顺序 | 函数                  | 调用身份                      | 调用 / 触发位置                                                                                                                                   | 实现位置                                                           | 作用                                  |
 | ---- | --------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------- |
-| 1    | `run_create_worktree` | 工具处理器：`create_worktree` | 登记 [registrations.py:347](../src/agent_harness/registrations.py#L347) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [registrations.py:21](../src/agent_harness/registrations.py#L21)   | 分发创建任务工作目录的请求            |
-| 1.1  | `create_worktree`     | 工具底层·跨文件               | [registrations.py:30](../src/agent_harness/registrations.py#L30)                                                                                  | [task_worktrees.py:13](../src/agent_harness/workspace/task_worktrees.py#L13) | 检查任务处于 pending 且未认领         |
-| 2    | `run_git`             | 内部·跨文件                   | [task_worktrees.py:66](../src/agent_harness/workspace/task_worktrees.py#L66)                                                                                | [worktrees.py:107](../src/agent_harness/workspace/worktrees.py#L107)         | 执行 git worktree add，创建目录和分支 |
-| 3    | `save_task`           | 内部·跨文件                   | [task_worktrees.py:93](../src/agent_harness/workspace/task_worktrees.py#L93)                                                                                | [tasks.py:231](../src/agent_harness/workspace/tasks.py#L231)                 | 把 worktree 名称绑定到任务            |
-| 4    | `run_claim_task`      | 工具处理器：`claim_task`      | 登记 [registrations.py:263](../src/agent_harness/registrations.py#L263) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [registrations.py:112](../src/agent_harness/registrations.py#L112) | 分发主 agent 的认领请求               |
-| 4.1  | `claim_task`          | 工具底层·跨文件               | [registrations.py:122](../src/agent_harness/registrations.py#L122)                                                                                | [tasks.py:358](../src/agent_harness/workspace/tasks.py#L358)                 | 认领已绑定任务，采用对应工作目录      |
+| 1    | `run_create_worktree` | 工具处理器：`create_worktree` | 登记 [registrations.py:282](../src/agent_harness/registrations.py#L282) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [registrations.py:24](../src/agent_harness/registrations.py#L24)   | 分发创建任务工作目录的请求            |
+| 1.1  | `create_worktree`     | 工具底层·跨文件               | [registrations.py:33](../src/agent_harness/registrations.py#L33)                                                                                  | [task_worktrees.py:13](../src/agent_harness/workspace/task_worktrees.py#L13) | 检查任务处于 pending 且未认领         |
+| 2    | `run_git`             | 内部·跨文件                   | [task_worktrees.py:66](../src/agent_harness/workspace/task_worktrees.py#L66)                                                                                | [worktrees.py:109](../src/agent_harness/workspace/worktrees.py#L109)         | 执行 git worktree add，创建目录和分支 |
+| 3    | `save_task`           | 内部·跨文件                   | [task_worktrees.py:93](../src/agent_harness/workspace/task_worktrees.py#L93)                                                                                | [tasks.py:293](../src/agent_harness/workspace/tasks.py#L293)                 | 把 worktree 名称绑定到任务            |
+| 4 | `shared_tools.run_claim_task` | 工具处理器：`claim_task` | 绑定 [shared_tools.py:108](../src/agent_harness/tools/shared_tools.py#L108) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [shared_tools.py:85](../src/agent_harness/tools/shared_tools.py#L85) | 按 owner 认领任务 |
+| 4.1 | `claim_task` | 工具底层·跨文件 | [shared_tools.py:87](../src/agent_harness/tools/shared_tools.py#L87) → [shared_tools.py:78](../src/agent_harness/tools/shared_tools.py#L78) | [tasks.py:421](../src/agent_harness/workspace/tasks.py#L421) | 校验任务并登记 owner 和工作目录 |
 
 任务完成后，Lead 可请求 `remove_worktree` 工具。它拒绝未提交、未跟踪和被忽略的文件，
 也拒绝子 agent占用或运行中的后台命令。Git 移除成功后，才释放 Lead 自己匹配的已完成分配并解除绑定；
@@ -493,11 +499,11 @@ Lead 成功移除自己的已完成 worktree 时也会提前释放，见第 8 �
 
 | 顺序 | 函数                           | 调用身份                      | 调用 / 触发位置                                                                                                                                   | 实现位置                                                             | 作用                                         |
 | ---- | ------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------- |
-| 1    | `run_remove_worktree`          | 工具处理器：`remove_worktree` | 登记 [registrations.py:357](../src/agent_harness/registrations.py#L357) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [registrations.py:33](../src/agent_harness/registrations.py#L33)     | 处理 Lead 的非强制清理请求                   |
-| 1.1  | `remove_worktree`              | 工具底层·跨文件               | [registrations.py:40](../src/agent_harness/registrations.py#L40)                                                                                  | [task_worktrees.py:103](../src/agent_harness/workspace/task_worktrees.py#L103) | 检查任务、占用和未提交改动                   |
-| 2    | `run_git`                      | 内部·跨文件                   | [task_worktrees.py:165](../src/agent_harness/workspace/task_worktrees.py#L165)                                                                              | [worktrees.py:107](../src/agent_harness/workspace/worktrees.py#L107)           | 执行 git worktree remove，保留分支           |
-| 3    | `release_completed_assignment` | 内部·跨文件                   | [task_worktrees.py:172](../src/agent_harness/workspace/task_worktrees.py#L172)                                                                              | [tasks.py:485](../src/agent_harness/workspace/tasks.py#L485)                   | 移除成功后释放 Lead 自己的已完成分配（如有） |
-| 4    | `save_task`                    | 内部·跨文件                   | [task_worktrees.py:175](../src/agent_harness/workspace/task_worktrees.py#L175)                                                                              | [tasks.py:231](../src/agent_harness/workspace/tasks.py#L231)                   | 清除任务中的 worktree 绑定                   |
+| 1    | `run_remove_worktree`          | 工具处理器：`remove_worktree` | 登记 [registrations.py:292](../src/agent_harness/registrations.py#L292) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [registrations.py:36](../src/agent_harness/registrations.py#L36)     | 处理 Lead 的非强制清理请求                   |
+| 1.1  | `remove_worktree`              | 工具底层·跨文件               | [registrations.py:43](../src/agent_harness/registrations.py#L43)                                                                                  | [task_worktrees.py:103](../src/agent_harness/workspace/task_worktrees.py#L103) | 检查任务、占用和未提交改动                   |
+| 2    | `run_git`                      | 内部·跨文件                   | [task_worktrees.py:165](../src/agent_harness/workspace/task_worktrees.py#L165)                                                                              | [worktrees.py:109](../src/agent_harness/workspace/worktrees.py#L109)           | 执行 git worktree remove，保留分支           |
+| 3    | `release_completed_assignment` | 内部·跨文件                   | [task_worktrees.py:174](../src/agent_harness/workspace/task_worktrees.py#L174)                                                                              | [tasks.py:570](../src/agent_harness/workspace/tasks.py#L570)                   | 移除成功后释放 Lead 自己的已完成分配（如有） |
+| 4    | `save_task`                    | 内部·跨文件                   | [task_worktrees.py:177](../src/agent_harness/workspace/task_worktrees.py#L177)                                                                              | [tasks.py:293](../src/agent_harness/workspace/tasks.py#L293)                   | 清除任务中的 worktree 绑定                   |
 
 #### 9. 统一子 agent 生命周期与协议
 
@@ -516,9 +522,9 @@ Lead 模型选择是否委派及 mode。once 同步交付最终结果；persiste
 | 2.1  | `claim_task`                   | 内部·跨文件                | [subagent.py:435](../src/agent_harness/agents/subagent.py#L435) | [tasks.py:421](../src/agent_harness/workspace/tasks.py#L421) | 只有显式指定初始 task_id 才认领                  |
 | 3    | `create_subagent_session`      | 内部·同文件                | [subagent.py:461](../src/agent_harness/agents/subagent.py#L461) | [subagent.py:201](../src/agent_harness/agents/subagent.py#L201) | 为两种模式构造相同的模型执行器                   |
 | 4    | `_execute_work`                | 内部·同文件                | [subagent.py:349](../src/agent_harness/agents/subagent.py#L349) | [subagent.py:316](../src/agent_harness/agents/subagent.py#L316) | 循环执行模型回合，直到最终回答                   |
-| 5    | `SubagentSession.run`          | 内部·跨文件                | [subagent.py:328](../src/agent_harness/agents/subagent.py#L328) | [subagent_session.py:130](../src/agent_harness/agents/subagent_session.py#L130) | 按当前委派整理历史，请求模型并回填工具结果       |
-| 5.1  | `SubagentSession._request`     | 内部·同文件                | [subagent_session.py:153](../src/agent_harness/agents/subagent_session.py#L153) | [subagent_session.py:174](../src/agent_harness/agents/subagent_session.py#L174) | 每次请求携带当前委派，旧委派只作为历史参考       |
-| 6    | `SubagentSession.execute_tool` | 内部·同文件                | [subagent_session.py:170](../src/agent_harness/agents/subagent_session.py#L170) | [subagent_session.py:115](../src/agent_harness/agents/subagent_session.py#L115) | 检查计划门禁和 hooks，再执行工具                 |
+| 5    | `SubagentSession.run`          | 内部·跨文件                | [subagent.py:328](../src/agent_harness/agents/subagent.py#L328) | [subagent_session.py:137](../src/agent_harness/agents/subagent_session.py#L137) | 按当前委派整理历史，请求模型并回填工具结果       |
+| 5.1  | `SubagentSession._request`     | 内部·同文件                | [subagent_session.py:160](../src/agent_harness/agents/subagent_session.py#L160) | [subagent_session.py:193](../src/agent_harness/agents/subagent_session.py#L193) | 每次请求携带当前委派，旧委派只作为历史参考       |
+| 6    | `SubagentSession.execute_tool` | 内部·同文件                | [subagent_session.py:184](../src/agent_harness/agents/subagent_session.py#L184) | [subagent_session.py:117](../src/agent_harness/agents/subagent_session.py#L117) | 检查计划门禁和 hooks，再执行工具                 |
 
 **持久实例、通信与收尾：**
 
@@ -530,7 +536,7 @@ Lead 模型选择是否委派及 mode。once 同步交付最终结果；persiste
 | 4    | `release_completed_assignment` | 内部·跨文件                | [subagent.py:357](../src/agent_harness/agents/subagent.py#L357) | [tasks.py:570](../src/agent_harness/workspace/tasks.py#L570) | 最终回答后释放已完成任务目录，保留实例和历史   |
 | 5    | `_wait_for_work`               | 内部·同文件                | [subagent.py:308](../src/agent_harness/agents/subagent.py#L308) | [subagent.py:308](../src/agent_harness/agents/subagent.py#L308) | IDLE 只等消息或关闭；不扫描任务板              |
 | 6    | `_cleanup`                     | 内部·同文件                | [subagent.py:334](../src/agent_harness/agents/subagent.py#L334) | [subagent.py:334](../src/agent_harness/agents/subagent.py#L334) | 实例退出时清理登记、协议和任务分配             |
-| 7    | `consume_lead_inbox`           | 内部·跨文件                | [interactive_runtime.py:243](../src/agent_harness/runtime/interactive_runtime.py#L243) | [subagent.py:143](../src/agent_harness/agents/subagent.py#L143) | 后台事件线程收取子 agent 结果并唤醒 Lead       |
+| 7    | `consume_lead_inbox`           | 内部·跨文件                | [interactive_runtime.py:245](../src/agent_harness/runtime/interactive_runtime.py#L245) | [subagent.py:143](../src/agent_harness/agents/subagent.py#L143) | 共享驱动在后台唤醒回合收取子 agent 结果       |
 
 任务 A 完成后先汇报并释放分配，persistent 实例继续等待。Lead 发来 B 的 ID 和说明后，子模型显式 claim_task 才切换目录。任务未完成的最终文本只表示等待指导，仍占用原任务，不能认领 B。无 Task 的调查直接使用启动目录。
 
@@ -557,12 +563,12 @@ Lead 模型选择是否委派及 mode。once 同步交付最终结果；persiste
 
 | 顺序 | 函数 | 调用身份 | 调用 / 触发位置 | 实现位置 | 作用 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `check_tool_use` | 内部·跨文件 | [host.py:502](../src/agent_harness/host.py#L502)；[subagent_session.py:124](../src/agent_harness/agents/subagent_session.py#L124) | [hooks.py:51](../src/agent_harness/runtime/hooks.py#L51) | 授权、前置 hook 和停止判断 |
-| 2 | `trigger_hooks（PreToolUse）` | 内部·同文件 | [hooks.py:57](../src/agent_harness/runtime/hooks.py#L57) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31) | 执行登记回调，取首个非 None 结果 |
-| 3 | `permission_hook` | hook 回调 | [hooks.py:145](../src/agent_harness/runtime/hooks.py#L145) | [hooks.py:85](../src/agent_harness/runtime/hooks.py#L85) | 检查命令、文件路径和 MCP 权限 |
-| 4 | `execute_tool` | 内部·跨文件 | [host.py:543](../src/agent_harness/host.py#L543)；[subagent_session.py:127](../src/agent_harness/agents/subagent_session.py#L127) | [hooks.py:65](../src/agent_harness/runtime/hooks.py#L65) | 执行 handler，保留状态回调 |
-| 5 | `trigger_hooks（PostToolUse）` | 内部·同文件 | [hooks.py:69](../src/agent_harness/runtime/hooks.py#L69) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31) | 同步执行后触发一次 |
-| 6 | `trigger_hooks（Stop）` | 内部·跨文件 | [host.py:435](../src/agent_harness/host.py#L435) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31) | 最终回答边界触发 |
+| 1 | `check_tool_use` | 内部·跨文件 | [host.py:559](../src/agent_harness/host.py#L559)；[subagent_session.py:128](../src/agent_harness/agents/subagent_session.py#L128) | [hooks.py:61](../src/agent_harness/runtime/hooks.py#L61) | 授权、前置 hook 和停止判断 |
+| 2 | `trigger_hooks（PreToolUse）` | 内部·同文件 | [hooks.py:68](../src/agent_harness/runtime/hooks.py#L68) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31) | 执行登记回调，取首个非 None 结果 |
+| 3 | `permission_hook` | hook 回调 | [hooks.py:172](../src/agent_harness/runtime/hooks.py#L172) | [hooks.py:108](../src/agent_harness/runtime/hooks.py#L108) | 检查命令、文件路径和 MCP 权限 |
+| 4 | `execute_tool` | 内部·跨文件 | [host.py:602](../src/agent_harness/host.py#L602)；[subagent_session.py:134](../src/agent_harness/agents/subagent_session.py#L134) | [hooks.py:76](../src/agent_harness/runtime/hooks.py#L76) | 执行 handler，保留状态回调 |
+| 5 | `trigger_hooks（PostToolUse）` | 内部·同文件 | [hooks.py:85](../src/agent_harness/runtime/hooks.py#L85) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31) | handler 返回后触发一次；后置处理结束才发布完成状态 |
+| 6 | `trigger_hooks（Stop）` | 内部·跨文件 | [host.py:491](../src/agent_harness/host.py#L491) | [hooks.py:31](../src/agent_harness/runtime/hooks.py#L31) | 最终回答边界触发 |
 
 UserPromptSubmit 在用户输入边界触发。上表按边界汇总分支，不表示每轮都会依次执行全部事件。
 hooks 是运行时回调，不是模型工具。Lead 和 child 共用检查与同步执行；child 先检查工具资格与计划授权。授权和 hook 只有 None 表示放行，空字符串、False、0 都拒绝。
@@ -581,44 +587,44 @@ cron 的创建、查询、取消属于模型工具；到期检查由调度线程
 
 | 顺序 | 函数                              | 调用身份      | 调用 / 触发位置                                                                                                                            | 实现位置                                                   | 作用                                 |
 | ---- | --------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- | ------------------------------------ |
-| 1    | `should_run_background`           | 内部·跨文件   | [host.py:443](../src/agent_harness/host.py#L443)                                                                                           | [scheduler.py:36](../src/agent_harness/runtime/scheduler.py#L36)   | 检查 bash 的后台标志                 |
-| 2    | `start_background_task`           | 内部·跨文件   | [host.py:447](../src/agent_harness/host.py#L447)                                                                                           | [scheduler.py:48](../src/agent_harness/runtime/scheduler.py#L48)   | 登记后台任务并启动线程               |
-| 3    | `worker`                          | 线程入口·局部 | [scheduler.py:102](../src/agent_harness/runtime/scheduler.py#L102)（线程目标）→ [scheduler.py:104](../src/agent_harness/runtime/scheduler.py#L104)（启动） | [scheduler.py:58](../src/agent_harness/runtime/scheduler.py#L58)   | 在线程中执行命令，保存状态和输出     |
-| 4    | `inject_background_notifications` | 内部·同文件   | [host.py:301](../src/agent_harness/host.py#L301)                                                                                           | [host.py:191](../src/agent_harness/host.py#L191)           | 后续循环中收取已完成通知             |
-| 5    | `collect_background_results`      | 内部·跨文件   | [host.py:201](../src/agent_harness/host.py#L201)                                                                                           | [scheduler.py:114](../src/agent_harness/runtime/scheduler.py#L114) | 保存长输出并交付通知，成功后清理记录 |
+| 1    | `should_run_background`           | 内部·跨文件   | [host.py:570](../src/agent_harness/host.py#L570)                                                                                           | [scheduler.py:38](../src/agent_harness/runtime/scheduler.py#L38)   | 检查 bash 的后台标志                 |
+| 2    | `start_background_task`           | 内部·跨文件   | [host.py:580](../src/agent_harness/host.py#L580)                                                                                           | [scheduler.py:50](../src/agent_harness/runtime/scheduler.py#L50)   | 登记后台任务并启动线程               |
+| 3 | `run_worker` → `worker` | 线程入口·局部 | [scheduler.py:114](../src/agent_harness/runtime/scheduler.py#L114)（线程目标）→ [scheduler.py:116](../src/agent_harness/runtime/scheduler.py#L116)（启动） | [scheduler.py:106](../src/agent_harness/runtime/scheduler.py#L106) → [scheduler.py:62](../src/agent_harness/runtime/scheduler.py#L62) | 绑定执行上下文，再执行命令并发布后台状态 |
+| 4    | `inject_background_notifications` | 内部·同文件   | [host.py:381](../src/agent_harness/host.py#L381)                                                                                           | [host.py:200](../src/agent_harness/host.py#L200)           | 后续循环中收取已完成通知             |
+| 5    | `collect_background_results`      | 内部·跨文件   | [host.py:210](../src/agent_harness/host.py#L210)                                                                                           | [scheduler.py:139](../src/agent_harness/runtime/scheduler.py#L139) | 保存长输出并交付通知，成功后清理记录 |
 
 **cron 创建：**
 
 | 顺序 | 函数                | 调用身份                    | 调用 / 触发位置                                                                                                                                   | 实现位置                                                   | 作用                            |
 | ---- | ------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------- |
-| 1    | `run_schedule_cron` | 工具处理器：`schedule_cron` | 登记 [registrations.py:279](../src/agent_harness/registrations.py#L279) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [scheduler.py:460](../src/agent_harness/runtime/scheduler.py#L460) | 通过工具分发接收定时请求        |
-| 2    | `schedule_job`      | 内部·同文件                 | [scheduler.py:467](../src/agent_harness/runtime/scheduler.py#L467)                                                                                        | [scheduler.py:316](../src/agent_harness/runtime/scheduler.py#L316) | 登记任务，按 durable 设置持久化 |
-| 3    | `validate_cron`     | 内部·同文件                 | [scheduler.py:325](../src/agent_harness/runtime/scheduler.py#L325)                                                                                        | [scheduler.py:262](../src/agent_harness/runtime/scheduler.py#L262) | 校验时间表达式                  |
+| 1    | `run_schedule_cron` | 工具处理器：`schedule_cron` | 登记 [registrations.py:214](../src/agent_harness/registrations.py#L214) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [scheduler.py:491](../src/agent_harness/runtime/scheduler.py#L491) | 通过工具分发接收定时请求        |
+| 2    | `schedule_job`      | 内部·同文件                 | [scheduler.py:498](../src/agent_harness/runtime/scheduler.py#L498)                                                                                        | [scheduler.py:348](../src/agent_harness/runtime/scheduler.py#L348) | 登记任务，按 durable 设置持久化 |
+| 3    | `validate_cron`     | 内部·同文件                 | [scheduler.py:357](../src/agent_harness/runtime/scheduler.py#L357)                                                                                        | [scheduler.py:293](../src/agent_harness/runtime/scheduler.py#L293) | 校验时间表达式                  |
 
 **cron 到期触发：**
 
 | 顺序 | 函数                    | 调用身份        | 调用 / 触发位置                                                        | 实现位置                                                   | 作用                               |
 | ---- | ----------------------- | --------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------- |
-| 1    | `cron_scheduler_loop`   | 线程入口·同文件 | [scheduler.py:512](../src/agent_harness/runtime/scheduler.py#L512)（线程启动） | [scheduler.py:387](../src/agent_harness/runtime/scheduler.py#L387) | 服务启动后在线程中持续检查到期任务 |
-| 2    | `cron_matches`          | 内部·同文件     | [scheduler.py:402](../src/agent_harness/runtime/scheduler.py#L402)             | [scheduler.py:202](../src/agent_harness/runtime/scheduler.py#L202) | 检查当前时间是否匹配               |
-| 3    | `_enqueue_due_job`      | 内部·同文件     | [scheduler.py:403](../src/agent_harness/runtime/scheduler.py#L403)             | [scheduler.py:369](../src/agent_harness/runtime/scheduler.py#L369) | 把到期任务放入队列                 |
-| 4    | `consume_cron_queue`    | 内部·跨文件     | [host.py:280](../src/agent_harness/host.py#L280)                       | [scheduler.py:409](../src/agent_harness/runtime/scheduler.py#L409) | 主循环取出到期任务并注入历史       |
-| 5    | `call_llm`              | 内部·同文件     | [host.py:326](../src/agent_harness/host.py#L326)                       | [host.py:210](../src/agent_harness/host.py#L210)           | 把定时提示词交给模型               |
-| 6    | `acknowledge_cron_jobs` | 内部·跨文件     | [host.py:350](../src/agent_harness/host.py#L350)                       | [scheduler.py:420](../src/agent_harness/runtime/scheduler.py#L420) | 模型响应成功后确认交付             |
+| 1    | `cron_scheduler_loop`   | 线程入口·同文件 | [scheduler.py:555](../src/agent_harness/runtime/scheduler.py#L555)（线程启动） | [scheduler.py:419](../src/agent_harness/runtime/scheduler.py#L419) | 服务启动后在线程中持续检查到期任务 |
+| 2    | `cron_matches`          | 内部·同文件     | [scheduler.py:433](../src/agent_harness/runtime/scheduler.py#L433)             | [scheduler.py:233](../src/agent_harness/runtime/scheduler.py#L233) | 检查当前时间是否匹配               |
+| 3    | `_enqueue_due_job`      | 内部·同文件     | [scheduler.py:434](../src/agent_harness/runtime/scheduler.py#L434)             | [scheduler.py:401](../src/agent_harness/runtime/scheduler.py#L401) | 把到期任务放入队列                 |
+| 4    | `consume_cron_queue`    | 内部·跨文件     | [host.py:360](../src/agent_harness/host.py#L360)                       | [scheduler.py:440](../src/agent_harness/runtime/scheduler.py#L440) | 主循环取出到期任务并注入历史       |
+| 5    | `call_llm`              | 内部·同文件     | [host.py:413](../src/agent_harness/host.py#L413)                       | [host.py:221](../src/agent_harness/host.py#L221)           | 把定时提示词交给模型               |
+| 6    | `acknowledge_cron_jobs` | 内部·跨文件     | [host.py:442](../src/agent_harness/host.py#L442)                       | [scheduler.py:451](../src/agent_harness/runtime/scheduler.py#L451) | 模型响应成功后确认交付             |
 
 **查看与取消是另外两个工具入口：**
 
 | 顺序 | 函数              | 调用身份                  | 调用 / 触发位置                                                                                                                                   | 实现位置                                                   | 作用             |
 | ---- | ----------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ---------------- |
-| 1    | `run_list_crons`  | 工具处理器：`list_crons`  | 登记 [registrations.py:282](../src/agent_harness/registrations.py#L282) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [scheduler.py:473](../src/agent_harness/runtime/scheduler.py#L473) | 查看当前定时任务 |
-| 2    | `run_cancel_cron` | 工具处理器：`cancel_cron` | 登记 [registrations.py:287](../src/agent_harness/registrations.py#L287) → [file_tools.py:295](../src/agent_harness/tools/file_tools.py#L295)（handler） | [scheduler.py:489](../src/agent_harness/runtime/scheduler.py#L489) | 接收取消请求     |
-| 3    | `cancel_job`      | 内部·同文件               | [scheduler.py:495](../src/agent_harness/runtime/scheduler.py#L495)                                                                                        | [scheduler.py:347](../src/agent_harness/runtime/scheduler.py#L347) | 删除对应任务     |
+| 1    | `run_list_crons`  | 工具处理器：`list_crons`  | 登记 [registrations.py:217](../src/agent_harness/registrations.py#L217) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [scheduler.py:504](../src/agent_harness/runtime/scheduler.py#L504) | 查看当前定时任务 |
+| 2    | `run_cancel_cron` | 工具处理器：`cancel_cron` | 登记 [registrations.py:222](../src/agent_harness/registrations.py#L222) → [file_tools.py:304](../src/agent_harness/tools/file_tools.py#L304)（handler） | [scheduler.py:520](../src/agent_harness/runtime/scheduler.py#L520) | 接收取消请求     |
+| 3    | `cancel_job`      | 内部·同文件               | [scheduler.py:526](../src/agent_harness/runtime/scheduler.py#L526)                                                                                        | [scheduler.py:379](../src/agent_harness/runtime/scheduler.py#L379) | 删除对应任务     |
 
 #### 12. 工作流单次 agent 调用
 
 选择「Workflow demo（离线，不联网）」。demo 和交互都经过统一 once 子 agent；demo 注入 DemoModelClient，运行记录写入启动目录的 .runtime/。
 
-交互中主模型调用 `Workflow` 工具，处理器 [run_workflow_sync](../src/agent_harness/workflows/workflow_runtime.py#L863) 在 [host.py:115](../src/agent_harness/host.py#L115) 登记。
+交互中主模型调用 `Workflow` 工具，处理器 [run_workflow_sync](../src/agent_harness/workflows/workflow_runtime.py#L1026) 在 [host.py:149](../src/agent_harness/host.py#L149) 登记。
 工作流脚本调用 `ctx.agent`；步骤顺序与并行由脚本决定，步骤内使用哪些工具由子模型决定。
 默认提供 bash、读写、编辑和 glob；`tools=[]` 关闭工具，非空名单限制可用工具。
 
@@ -632,8 +638,8 @@ cron 的创建、查询、取消属于模型工具；到期检查由调度线程
 | 6 | `SubagentRunner.run` | 线程任务·跨文件 | [workflow_runtime.py:693](../src/agent_harness/workflows/workflow_runtime.py#L693) | [workflow_runtime.py:294](../src/agent_harness/workflows/workflow_runtime.py#L294) | 将步骤接入统一 once 创建入口 |
 | 7 | `spawn_subagent` | 内部·跨文件 | [workflow_runtime.py:309](../src/agent_harness/workflows/workflow_runtime.py#L309) | [subagent.py:380](../src/agent_harness/agents/subagent.py#L380) | 登记步骤实例，按工具名单执行并清理 |
 | 8 | `_execute_work` | 内部·同文件 | [subagent.py:349](../src/agent_harness/agents/subagent.py#L349) | [subagent.py:316](../src/agent_harness/agents/subagent.py#L316) | 多回合执行到最终回答 |
-| 9 | `SubagentSession.run` | 内部·跨文件 | [subagent.py:328](../src/agent_harness/agents/subagent.py#L328) | [subagent_session.py:130](../src/agent_harness/agents/subagent_session.py#L130) | 压缩历史，请求模型，回填工具结果 |
-| 10 | `SubagentSession.execute_tool` | 内部·同文件 | [subagent_session.py:170](../src/agent_harness/agents/subagent_session.py#L170) | [subagent_session.py:115](../src/agent_harness/agents/subagent_session.py#L115) | 校验可用工具、计划门禁和权限 hooks |
+| 9 | `SubagentSession.run` | 内部·跨文件 | [subagent.py:328](../src/agent_harness/agents/subagent.py#L328) | [subagent_session.py:137](../src/agent_harness/agents/subagent_session.py#L137) | 压缩历史，请求模型，回填工具结果 |
+| 10 | `SubagentSession.execute_tool` | 内部·同文件 | [subagent_session.py:184](../src/agent_harness/agents/subagent_session.py#L184) | [subagent_session.py:117](../src/agent_harness/agents/subagent_session.py#L117) | 校验可用工具、计划门禁和权限 hooks |
 | 11 | `_parse_runner_json` | 内部·同文件 | [workflow_runtime.py:320](../src/agent_harness/workflows/workflow_runtime.py#L320) | [workflow_runtime.py:256](../src/agent_harness/workflows/workflow_runtime.py#L256) | 步骤返回后解析结构化文本 |
 | 12 | `SimpleJsonSchema.validate` | 内部·同文件 | [workflow_runtime.py:659](../src/agent_harness/workflows/workflow_runtime.py#L659) | [workflow_runtime.py:200](../src/agent_harness/workflows/workflow_runtime.py#L200) | 校验结果；不合格时最多一次无工具格式修正 |
 | 13 | `_call_runner` | 内部·同文件 | [workflow_runtime.py:655](../src/agent_harness/workflows/workflow_runtime.py#L655) | [workflow_runtime.py:690](../src/agent_harness/workflows/workflow_runtime.py#L690) | 每次请求立即结算；取消也等待已启动调用 |
@@ -643,7 +649,7 @@ cron 的创建、查询、取消属于模型工具；到期检查由调度线程
 格式修正只处理上次最终结果，关闭工具，文件操作不会因格式错误再执行一次。失败消费也保存在任务快照，恢复时继续计入预算。
 普通失败、取消和预算超额的收尾规则见 [README](../README.md#行为要点)。
 整个流程的输出在 [workflow_runtime.py:901](../src/agent_harness/workflows/workflow_runtime.py#L901) 保存，任务快照在 [workflow_runtime.py:902](../src/agent_harness/workflows/workflow_runtime.py#L902) 保存。
-真实客户端在 [host.py:108](../src/agent_harness/host.py#L108) 注入；离线客户端在 [cli.py:114](../src/agent_harness/frontends/cli.py#L114) 注入。
+真实客户端由 [workflow_runtime.py:290](../src/agent_harness/workflows/workflow_runtime.py#L290) 默认读取 `core.client`；离线客户端在 [cli.py:227](../src/agent_harness/frontends/cli.py#L227) 注入。
 
 #### 13. journal 读写与 resume
 
@@ -696,12 +702,12 @@ journal 的方法都是工作流内部调用。恢复通过 CLI 的 `workflow re
 
 | 顺序 | 函数                     | 调用身份    | 调用 / 触发位置                                                      | 实现位置                                                             | 作用                       |
 | ---- | ------------------------ | ----------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------- |
-| 1    | `extract_memories`       | 内部·跨文件 | [host.py:160](../src/agent_harness/host.py#L160)                     | [memory_runtime.py:443](../src/agent_harness/context/memory_runtime.py#L443) | 从最近对话中抽取候选记忆   |
-| 2    | `validate_memory_record` | 内部·同文件 | [memory_runtime.py:487](../src/agent_harness/context/memory_runtime.py#L487) | [memory_runtime.py:412](../src/agent_harness/context/memory_runtime.py#L412) | 检查候选记录是否合法       |
-| 3    | `should_store_memory`    | 内部·同文件 | [memory_runtime.py:495](../src/agent_harness/context/memory_runtime.py#L495) | [memory_runtime.py:103](../src/agent_harness/context/memory_runtime.py#L103) | 检查是否值得保存及是否重复 |
-| 4    | `write_memory_file`      | 内部·同文件 | [memory_runtime.py:497](../src/agent_harness/context/memory_runtime.py#L497) | [memory_runtime.py:149](../src/agent_harness/context/memory_runtime.py#L149) | 写入通过检查的记忆         |
+| 1    | `extract_memories`       | 内部·跨文件 | [host.py:167](../src/agent_harness/host.py#L167)                     | [memory_runtime.py:443](../src/agent_harness/context/memory_runtime.py#L443) | 从最近对话中抽取候选记忆   |
+| 2    | `validate_memory_record` | 内部·同文件 | [memory_runtime.py:492](../src/agent_harness/context/memory_runtime.py#L492) | [memory_runtime.py:412](../src/agent_harness/context/memory_runtime.py#L412) | 检查候选记录是否合法       |
+| 3    | `should_store_memory`    | 内部·同文件 | [memory_runtime.py:500](../src/agent_harness/context/memory_runtime.py#L500) | [memory_runtime.py:103](../src/agent_harness/context/memory_runtime.py#L103) | 检查是否值得保存及是否重复 |
+| 4    | `write_memory_file`      | 内部·同文件 | [memory_runtime.py:502](../src/agent_harness/context/memory_runtime.py#L502) | [memory_runtime.py:149](../src/agent_harness/context/memory_runtime.py#L149) | 写入通过检查的记忆         |
 | 5    | `rebuild_memory_index`   | 内部·同文件 | [memory_runtime.py:168](../src/agent_harness/context/memory_runtime.py#L168) | [memory_runtime.py:171](../src/agent_harness/context/memory_runtime.py#L171) | 更新索引                   |
-| 6    | `consolidate_memories`   | 内部·跨文件 | [host.py:161](../src/agent_harness/host.py#L161)                     | [memory_runtime.py:513](../src/agent_harness/context/memory_runtime.py#L513) | 有新记忆写入时合并重复记录 |
+| 6    | `consolidate_memories`   | 内部·跨文件 | [host.py:170](../src/agent_harness/host.py#L170)                     | [memory_runtime.py:518](../src/agent_harness/context/memory_runtime.py#L518) | 有新记忆写入时合并重复记录 |
 
 #### 15. 启动与 `/goal` 拦截
 
@@ -716,14 +722,14 @@ CLI 和 Textual 都将输入交给 [InteractiveRuntime](../src/agent_harness/run
 | `InteractiveRuntime._command` | 同上 | goal 查询、清除和设置；会话列表、恢复和删除 |
 | `InteractiveRuntime._resume` | 同上 | 按显式目标目录准备，再统一激活上下文；失败边界见 README |
 | `InteractiveRuntime._execute` | 同上 | hook、历史更新、会话记录、调用 host 和一次性回合结束 |
-| `InteractiveRuntime._checkpoint` | 同上 | 消费事实队列，按会话归属生成展示记录，统一保存并交付前端 |
+| `InteractiveRuntime._checkpoint` | 同上 | 轮询后台事实并保存已投影的展示记录；普通事实到达即投影交付 |
 | `agent_loop` | [host.py](../src/agent_harness/host.py) | 模型、工具、停止检查、goal 和 memory 收尾 |
 | `CLIAdapter._render_events` | [cli.py](../src/agent_harness/frontends/cli.py) | 输出线程展示完成后调用 `acknowledge_event()`，始终不读取输入 |
 | `HarnessApp.consume` | [tui/app.py](../src/agent_harness/frontends/tui/app.py) | UI 线程分批展示并确认事件，再取可交付审批 |
 | `InteractionChannel.next_approval` | [interaction.py](../src/agent_harness/runtime/interaction.py) | 等待前置事件展示完成；统一过滤过期会话事件和审批，后续日志不阻挡请求 |
 
 旧 `async_event_loop` 和 `print_turn_assistants` 已移除。执行线程只发布普通数据，adapter 负责呈现。
-TUI 操作见[怎么跑](#textual-交互界面)，调试源码 TUI 可将现有交互配置的 `args` 改为 `["tui"]`。
+TUI 操作见 [怎么跑](#textual-交互界面)，调试源码 TUI 可将现有交互配置的 `args` 改为 `["tui"]`。
 
 ### 用法要点
 
@@ -743,7 +749,7 @@ Remote-WSL 已让断点自动生效，一般不需要。真要 attach：在 WSL 
 
 - **模型输出额度**集中在 [core.py](../src/agent_harness/core.py)。主循环、子 agent和一次性子 agent使用
   `DEFAULT_MAX_TOKENS`；工作流、历史压缩、记忆筛选、抽取和合并各有专用常量。
-  目标评估器的额度由 [PromptGoalEvaluator](../src/agent_harness/agents/goal.py#L174) 的参数单独设置。
+  目标评估器的额度由 [PromptGoalEvaluator](../src/agent_harness/agents/goal.py#L173) 的参数单独设置。
 - **运行参数**：命令超时、工具输出上限、子代理轮数、重试退避和事件轮询间隔在
   [core.py](../src/agent_harness/core.py) 修改；记忆输入预算在
   [memory_runtime.py](../src/agent_harness/context/memory_runtime.py)，后台通知摘要长度在
