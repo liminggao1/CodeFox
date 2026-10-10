@@ -107,6 +107,8 @@ class ProcessGroup(Vertical):
 
     def on_mount(self):
         self.query_one(VerticalScroll).display = False
+        # 定时刷新可能在 compose 完成前记录过操作，这里补一次标题渲染。
+        self._render_head()
 
     def update_operation(self, key, text, state, elapsed=None):
         """Record one operation's full text and refresh the header line."""
@@ -114,7 +116,12 @@ class ProcessGroup(Vertical):
         self._render_head()
 
     def _render_head(self):
-        head = self.query_one(GroupHead)
+        # 挂载与 compose 之间存在窗口：容器已挂载但子控件尚未就绪时，
+        # 定时刷新会在这里到达，先取一次实际存在的标题行。
+        heads = self.query(GroupHead)
+        if not heads:
+            return
+        head = heads.first()
         running = [value for value in self.operations.values() if value[1] in self.RUNNING_STATES]
         if running and not self.expanded:
             text, _state, elapsed = running[0]
@@ -129,7 +136,9 @@ class ProcessGroup(Vertical):
 
     def on_group_head_toggle(self, event):
         self.expanded = not self.expanded
-        self.query_one(VerticalScroll).display = self.expanded
+        content = self.query(VerticalScroll)
+        if content:
+            content.first().display = self.expanded
         self._render_head()
 
 
