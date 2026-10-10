@@ -141,9 +141,9 @@ def test_tui_inline_approval_only_enables_delivered_request(monkeypatch):
 
     async def exercise():
         async with app.run_test(size=(45, 18)) as pilot:
-            await app._display_record(record(1, "approval_requested", {"request_id": "old", "tool_name": "bash",
+            await app.conversation.display_record(record(1, "approval_requested", {"request_id": "old", "tool_name": "bash",
                                       "arguments": {}, "historical": True, "interrupted": True}))
-            await app._display_record(record(2, "approval_requested", {"request_id": "current", "tool_name": "bash",
+            await app.conversation.display_record(record(2, "approval_requested", {"request_id": "current", "tool_name": "bash",
                                       "arguments": {"command": "pwd"}}))
             await pilot.pause()
             card = next(card for card in app.query(ApprovalCard) if card.request_id == "current")
@@ -170,9 +170,9 @@ def test_tool_summary_is_visible_before_expanding_details():
     app = HarnessApp(DisplayRuntime())
     async def exercise():
         async with app.run_test(size=(85, 30)) as pilot:
-            await app._display_record(record(1, "tool_call", {"id": "read", "name": "read_file",
+            await app.conversation.display_record(record(1, "tool_call", {"id": "read", "name": "read_file",
                                      "input": {"path": "说明.md"}}))
-            await app._display_record(record(2, "tool_result", {"tool_use_id": "read", "status": "returned",
+            await app.conversation.display_record(record(2, "tool_result", {"tool_use_id": "read", "status": "returned",
                                      "content": "读取成功\n" + "long output\n" * 100}))
             await pilot.pause()
             text = "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
@@ -190,12 +190,15 @@ def test_operation_summary_keeps_confirmed_elapsed_time():
     app = HarnessApp(DisplayRuntime())
     async def exercise():
         async with app.run_test(size=(85, 30)) as pilot:
-            entry = OperationEntry(record(1, "execution_status", {
+            from agent_harness.frontends.conversation import ConversationProjection
+            projection = ConversationProjection()
+            change = projection.apply_record(record(1, "execution_status", {
                 "operation_id": "op", "phase": "tool", "name": "读取 README.md",
                 "state": "completed", "elapsed_seconds": 3.0,
-            }))
+            }))[0]
+            entry = OperationEntry(change["entry"])
             await app.query_one("#chat", VerticalScroll).mount(entry)
-            entry.apply(entry.record)
+            entry.render_entry(change["entry"])
             await pilot.pause()
             text = str(entry.query_one(".operation-summary", Static).content)
             assert "耗时 3.0s" in text
@@ -210,10 +213,10 @@ def test_many_tools_share_scrollable_group_and_update_in_place():
     async def exercise():
         async with app.run_test(size=(85, 32)) as pilot:
             for index in range(20):
-                await app._display_record(record(100 + index, "tool_call", {
+                await app.conversation.display_record(record(100 + index, "tool_call", {
                     "id": f"tool-{index}", "name": "read_file", "input": {"path": f"file-{index}.txt"},
                     "model_call_id": "model-1"}))
-                await app._display_record(record(200 + index, "tool_result", {
+                await app.conversation.display_record(record(200 + index, "tool_result", {
                     "tool_use_id": f"tool-{index}", "content": f"result-{index}", "status": "returned",
                     "model_call_id": "model-1"}))
             await pilot.pause()
@@ -250,5 +253,73 @@ def test_cli_stream_confirms_without_duplicate_body_and_marks_discarded_attempt(
         "phase": "model", "name": "请求模型", "state": "discarded", "operation_id": "old", "model_call_id": "one"})}))
     assert "你好" in "".join(chunks) and "完成" in "".join(chunks)
     assert not any("你好完成" in text for text in output)
-    assert sum("本次输出未采用" in text for text in output) >= 2
+    assert sum("本次输出未采用" in text for text in output) == 1
     assert output[0] == "background update"
+
+
+def test_projection_confirmed_body_rejects_late_delta_and_is_read_only():
+    from agent_harness.frontends.conversation import ConversationProjection
+    projection = ConversationProjection()
+    projection.restore([], "test", 1)
+    projection.apply_record(record(1, "assistant_message", {"model_call_id": "one", "text": "正式正文"}))
+    assert projection.apply_delta(event("assistant_text_delta", {
+        "model_call_id": "one", "block_index": 0, "sequence": 1, "delta": "过期正文"})) == []
+    records = projection.records
+    records[0]["payload"]["text"] = "外部修改"
+    assert projection.records[0]["payload"]["text"] == "正式正文"
+    projection.apply_record(record(2, "execution_status", {
+        "phase": "model", "name": "请求模型", "state": "failed", "operation_id": "op", "model_call_id": "two"}))
+    assert projection.apply_delta(event("assistant_text_delta", {
+        "model_call_id": "two", "block_index": 0, "sequence": 1, "delta": "结束后迟到"})) == []
+
+
+def test_projection_deduplicates_and_discards_only_matching_unaccepted_source():
+    from agent_harness.frontends.conversation import ConversationProjection
+    projection = ConversationProjection()
+    delta = event("assistant_text_delta", {"model_call_id": "same", "block_index": 0, "sequence": 1, "delta": "Lead"})
+    projection.apply_delta(delta)
+    assert projection.apply_delta(delta) == []
+    delta.source = "child"
+    delta.payload = dict(delta.payload, delta="Child")
+    projection.apply_delta(delta)
+    changes = projection.apply_record(record(1, "execution_status", {
+        "phase": "model", "name": "请求模型", "state": "failed", "operation_id": "op", "model_call_id": "same"}))
+    assert [c["entry"]["text"] for c in changes if c["kind"] == "discarded"] == ["Lead"]
+    delta.generation = 0
+    assert projection.apply_delta(delta) == []
+    assert next(e for e in projection.entries if e.get("source") == "child")["discarded"] is False
+
+
+def test_tui_window_rebuild_preserves_expansion_and_live_body():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import OperationEntry, StreamingText
+    from textual.widgets import Collapsible, Markdown
+    app = HarnessApp(DisplayRuntime())
+
+    async def exercise():
+        async with app.run_test(size=(85, 30)) as pilot:
+            await app.conversation.display_record(record(1, "tool_call", {
+                "id": "tool", "name": "read_file", "input": {"path": "说明.md"}, "model_call_id": "model"}))
+            app.query_one(OperationEntry).query_one(Collapsible).collapsed = False
+            await app._event(event("assistant_text_delta", {
+                "model_call_id": "next", "block_index": 0, "sequence": 1, "delta": "活动正文"}))
+            await app.conversation.load_earlier()
+            await pilot.pause()
+            assert not app.query_one(OperationEntry).query_one(Collapsible).collapsed
+            assert app.query_one(StreamingText).query_one(Markdown)._markdown == "活动正文"
+            await app.conversation.display_record(record(2, "assistant_message", {
+                "model_call_id": "next", "block_index": 0, "text": "正式正文"}))
+            await app.conversation.load_earlier()
+            await pilot.pause()
+            assert app.query_one(StreamingText).query_one(Markdown)._markdown == "正式正文"
+            failed = event("assistant_text_delta", {
+                "model_call_id": "failed", "block_index": 0, "sequence": 1, "delta": "未采用正文"})
+            await app._event(failed)
+            await app.conversation.display_record(record(3, "execution_status", {
+                "phase": "model", "name": "请求模型", "state": "failed", "operation_id": "failed", "model_call_id": "failed"}))
+            streams = list(app.query(StreamingText))
+            streams[-1].query_one(Collapsible).collapsed = False
+            await app.conversation.load_earlier()
+            await pilot.pause()
+            assert not list(app.query(StreamingText))[-1].query_one(Collapsible).collapsed
+    asyncio.run(exercise())

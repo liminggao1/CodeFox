@@ -5,6 +5,7 @@
 | 文件/目录 | 职责 |
 | --- | --- |
 | [cli.py](cli.py) | `main` 路由 CLI、TUI 和离线工作流；`CLIAdapter` 读取输入、显示事件和收集审批答案 |
+| [conversation.py](conversation.py) | 共用展示投影：记录去重、工具关联、正文确认与作废；返回独立数据，不操作终端或控件 |
 | [presentation.py](presentation.py) | 两前端共用的纯参数摘要、短结果、生命周期文案和操作关联 |
 | [tui/](tui/README.md) | CodeFox Textual 工作台、输入补全、事件展示及审批/会话弹窗 |
 

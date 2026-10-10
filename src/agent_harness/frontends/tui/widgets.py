@@ -77,16 +77,9 @@ class OperationEntry(Vertical):
     OperationEntry .operation-preview { color: #999fa5; padding-left: 2; }
     """
 
-    def __init__(self, record):
+    def __init__(self, entry):
         super().__init__()
-        self.record = record
-        self.tool_name = record["payload"].get("name", "工具")
-        self.arguments = record["payload"].get("input", {})
-        self.state = "pending"
-        self.output = ""
-        self.started_at = None
-        self.finished_at = None
-        self.confirmed_elapsed = None
+        self.entry = entry
 
     def compose(self):
         yield Static(classes="operation-summary", markup=False)
@@ -94,52 +87,35 @@ class OperationEntry(Vertical):
         yield Collapsible(DetailScroll(Static(classes="operation-detail", markup=False)),
                           title="详情", collapsed=True)
 
-    def apply(self, record):
-        self.record = record
-        data, kind = record["payload"], record["type"]
-        at = record_time(record.get("at"))
-        if self.started_at is None and at is not None:
-            self.started_at = at
-        if kind == "tool_call":
-            self.tool_name, self.arguments = data["name"], data["input"]
-            if data.get("historical") and data.get("result_missing"):
-                self.state = "interrupted"
-        elif kind == "tool_result":
-            self.state = data.get("status", "returned")
-            self.output = full_text(data.get("content", ""))
-            self.finished_at = at
-        else:
-            self.state = data["state"]
-            if data.get("historical") and self.state == "running":
-                self.state = "interrupted"
-                data = dict(data, state="interrupted", reason="上次中断，结束状态未记录")
-            self.output = data.get("reason", "")
-            if self.state in {"completed", "success", "failed", "stopped", "denied", "discarded", "interrupted"}:
-                self.finished_at = at
-            self.confirmed_elapsed = data.get("elapsed_seconds")
-        if kind == "execution_status" and data["phase"] != "tool":
+    def render_entry(self, entry):
+        """状态由共享投影提供，控件只更新文字并保留展开状态。"""
+        self.entry = entry
+        record = entry["record"]
+        data = dict(record["payload"], state=entry["state"])
+        if record["type"] == "execution_status" and data["phase"] != "tool":
             summary = lifecycle_summary(data)
         else:
-            summary = f"工具 · {self.tool_name} · {arguments_summary(self.arguments)} · {STATUS_LABELS.get(self.state, self.state)}"
+            summary = f"工具 · {entry['tool_name']} · {arguments_summary(entry['arguments'])} · {STATUS_LABELS.get(entry['state'], entry['state'])}"
         self.query_one(".operation-summary", Static).update(self._summary_text(summary))
         preview = self.query_one(".operation-preview", Static)
-        preview.update(short_text(self.output) if self.output else "")
-        preview.display = bool(self.output)
-        self.query_one(".operation-detail", Static).update(full_text(self.arguments) + "\n" + self.output)
+        preview.update(short_text(entry["output"]) if entry["output"] else "")
+        preview.display = bool(entry["output"])
+        self.query_one(".operation-detail", Static).update(full_text(entry["arguments"]) + "\n" + entry["output"])
 
     def _summary_text(self, summary, now=None):
         elapsed = self.elapsed_seconds(now)
         return summary + (f" · 耗时 {format_elapsed(elapsed)}" if elapsed is not None else "")
 
     def elapsed_seconds(self, now=None):
-        if self.confirmed_elapsed is not None:
-            return self.confirmed_elapsed
-        if self.started_at is None:
+        if self.entry["elapsed_seconds"] is not None:
+            return self.entry["elapsed_seconds"]
+        started_at = record_time(self.entry["started_at"])
+        if started_at is None:
             return None
-        end = self.finished_at or now
+        end = record_time(self.entry["finished_at"]) or now
         if end is None:
             return None
-        return max(0.0, (end - self.started_at).total_seconds())
+        return max(0.0, (end - started_at).total_seconds())
 
     def refresh_elapsed(self, now):
         if not self.is_mounted:
@@ -154,13 +130,6 @@ class OperationEntry(Vertical):
 class StreamingText(Vertical):
     DEFAULT_CSS = "StreamingText { height: auto; } StreamingText Static { height: auto; color: #999fa5; }"
 
-    def __init__(self):
-        super().__init__()
-        self.text = ""
-        self.sequence = 0
-        self.confirmed = False
-        self.discarded = False
-
     def compose(self):
         yield Static("Lead", markup=False)
         yield Collapsible(Markdown(""), title="本次输出未采用", collapsed=False)
@@ -168,24 +137,11 @@ class StreamingText(Vertical):
     def on_mount(self):
         self.query_one("CollapsibleTitle").display = False
 
-    def append(self, data):
-        if self.confirmed or data["sequence"] <= self.sequence:
-            return
-        self.sequence = data["sequence"]
-        self.text += data["delta"]
-        self.query_one(Markdown).update(self.text)
-
-    def confirm(self, text):
-        self.confirmed = True
-        self.text = text
-        self.query_one(Markdown).update(text)
-
-    def discard(self):
-        self.confirmed = True
-        self.discarded = True
-        detail = self.query_one(Collapsible)
-        self.query_one("CollapsibleTitle").display = True
-        detail.collapsed = True
+    def render_entry(self, entry):
+        self.query_one(Markdown).update(entry["text"])
+        self.query_one("CollapsibleTitle").display = entry["discarded"]
+        if entry["discarded"]:
+            self.query_one(Collapsible).collapsed = True
 
 
 class CommandCandidates(OptionList):

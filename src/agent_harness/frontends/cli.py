@@ -10,6 +10,7 @@ import threading
 from .. import core
 from ..workflows import workflow_runtime, workflow_demo
 from ..runtime.interactive_runtime import InteractiveRuntime
+from .conversation import ConversationProjection
 from .presentation import STATUS_LABELS, arguments_summary, lifecycle_summary, short_text
 
 
@@ -23,9 +24,7 @@ class CLIAdapter:
         self._completed = set()
         self._changed = threading.Event()
         self._renderer = None
-        self._record_ids = set()
-        self._tool_names = {}
-        self._streamed = {}
+        self.projection = ConversationProjection()
         self._stream_open = None
 
     def _end_stream_line(self):
@@ -33,34 +32,23 @@ class CLIAdapter:
             self.write_chunk("\n")
             self._stream_open = None
 
-    def _discard_stream(self, data):
-        """Close a failed attempt and make its discarded text explicit."""
-        call_id = data.get("model_call_id")
-        if not call_id:
-            return
-        for key, stream in self._streamed.items():
-            if key[2] != call_id or stream.get("discarded"):
-                continue
-            self._end_stream_line()
-            self.write("本次输出未采用")
-            stream["discarded"] = True
-
-    def render_record(self, record):
-        if record["id"] in self._record_ids:
-            return
-        self._record_ids.add(record["id"])
-        kind, data, source = record["type"], record["payload"], record["source"]
-        if kind == "assistant_message" and data.get("model_call_id"):
-            stream_key = (record.get("turn_id"), source, data["model_call_id"], data.get("block_index", 0))
-            if stream_key in self._streamed:
+    def render_record(self, record, *, session_id=None, generation=None):
+        changes = self.projection.apply_record(record, session_id=session_id, generation=generation)
+        for change in changes:
+            if change["kind"] == "confirmed":
                 self._end_stream_line()
-                return
+            elif change["kind"] == "discarded":
+                self._end_stream_line()
+                self.write("本次输出未采用")
+            elif change["kind"] == "record":
+                self._render_record(change["record"], change["entry"])
+
+    def _render_record(self, record, entry):
+        kind, data, source = record["type"], record["payload"], record["source"]
         self._end_stream_line()
-        key = (record.get("turn_id"), source, data.get("id") or data.get("tool_use_id"))
         if kind in {"user_message", "assistant_message"}:
             self.write(f"[{ '你' if kind == 'user_message' else source }] {data['text']}")
         elif kind == "tool_call":
-            self._tool_names[key] = data["name"]
             self.write(f"[{source}] 工具 · {data['name']} · {arguments_summary(data.get('input', {}))} · 待执行")
             if data.get("result_missing"):
                 self.write("结果未记录，请核对当前状态")
@@ -69,11 +57,9 @@ class CLIAdapter:
             content = data.get("content", "")
             if not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False, indent=2)
-            self.write(f"[{source}] {self._tool_names.get(key, '工具')} · {status}\n{short_text(content)}")
+            self.write(f"[{source}] {entry['tool_name']} · {status}\n{short_text(content)}")
         elif kind == "execution_status":
             self.write(f"[{source}] {lifecycle_summary(data)}" + ("\n" + short_text(data["reason"]) if data.get("reason") else ""))
-            if data.get("phase") == "model" and data.get("state") in {"failed", "stopped", "discarded"}:
-                self._discard_stream(data)
         elif kind == "todo_updated":
             self.write(f"[{source}] TODO\n" + ("\n".join(f"{item.get('status', '')} · {item.get('content', '')}"
                                                       for item in data.get("todos", [])) or "无待办"))
@@ -105,25 +91,20 @@ class CLIAdapter:
     def render(self, event):
         payload = event.payload
         if event.type == "assistant_text_delta":
-            key = (event.turn_id, event.source, payload["model_call_id"], payload["block_index"])
-            previous = self._streamed.get(key, {"sequence": 0, "text": ""})
-            if previous.get("discarded") or payload["sequence"] <= previous["sequence"]:
-                return
-            if self._stream_open != key:
-                self._end_stream_line()
-                self.write_chunk(f"[{event.source}] ")
-                self._stream_open = key
-            self.write_chunk(payload["delta"])
-            self._streamed[key] = {"sequence": payload["sequence"], "text": previous["text"] + payload["delta"]}
+            for change in self.projection.apply_delta(event):
+                key = change["entry"]["key"]
+                if self._stream_open != key:
+                    self._end_stream_line()
+                    self.write_chunk(f"[{event.source}] ")
+                    self._stream_open = key
+                self.write_chunk(change["delta"])
         elif event.type == "display_record":
-            self.render_record(payload["record"])
+            self.render_record(payload["record"], session_id=event.session_id, generation=event.generation)
         elif event.type == "session_changed":
-            self._record_ids.clear()
-            self._tool_names.clear()
             self._end_stream_line()
-            self._streamed.clear()
-            for record in payload["records"]:
-                self.render_record(record)
+            for change in self.projection.restore(payload["records"], event.session_id, event.generation):
+                if change["kind"] == "record":
+                    self._render_record(change["record"], change["entry"])
         elif event.type == "log":
             self._end_stream_line()
             self.write(payload["text"])
