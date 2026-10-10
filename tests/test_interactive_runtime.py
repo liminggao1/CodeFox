@@ -1,31 +1,34 @@
-"""Offline integration through the real serialized driver and host loop."""
+"""离线集成：真实序列化驱动与 host 主循环、Lead 状态拥有者和工具执行状态。"""
 
 from __future__ import annotations
 
-
-import agent_harness.core as core
-import agent_harness.runtime.scheduler as scheduler
-import agent_harness.agents.subagent as subagent_runtime
-import agent_harness.context.compaction as compaction
-import agent_harness.context.memory_runtime as memory_runtime
-import agent_harness.workspace.tasks as tasks
-import agent_harness.workspace.task_worktrees as task_worktrees
-import agent_harness.tools.file_tools as file_tools
-import agent_harness.workspace.worktrees as worktrees
-
-
-import threading
-import time
-import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from contextlib import ExitStack
-from agent_harness.runtime.lead_context import lead_context_scope
+import subprocess
+import threading
+import time
 
 import pytest
 
+from agent_harness.runtime import hooks
+from agent_harness.runtime.lead_context import lead_context_scope
+from agent_harness.tools import file_tools, shared_tools
+from agent_harness.workspace import tasks
 from support.fakes import fake_stream_for, response, tool
+from support.fakes import response, tool
 from support.helpers import displayed_approval, until
+from support.helpers import records, stored, until
+from support.helpers import stored, until
+import agent_harness.agents.subagent as subagent_runtime
+import agent_harness.context.compaction as compaction
+import agent_harness.context.memory_runtime as memory_runtime
+import agent_harness.core as core
+import agent_harness.runtime.scheduler as scheduler
+import agent_harness.tools.file_tools as file_tools
+import agent_harness.workspace.task_worktrees as task_worktrees
+import agent_harness.workspace.tasks as tasks
+import agent_harness.workspace.worktrees as worktrees
 
 
 def add_display_messages(snapshot):
@@ -791,3 +794,98 @@ def test_cross_directory_failure_preserves_current_context(runtime_factory, monk
     assert Path.cwd() == core.WORKDIR == runtime.session.store.workdir == original_root
     assert set(scheduler.scheduled_jobs) == {job.id}
     assert scheduler._runtime_thread.is_alive()
+
+
+def test_todo_input_and_snapshot_cannot_mutate_runtime_state(runtime_factory):
+    todos = [{"content": "verify", "status": "pending"}]
+    runtime, _ = runtime_factory([
+        response(tools=[tool("todo_write", todos=todos)], stop="tool_use"), response()])
+    submitted = runtime.submit("plan")
+    until(runtime, "turn_finished", submission_id=submitted.submission_id)
+    todos[0]["content"] = "changed externally"
+    snapshot = runtime.lead_context.snapshot()
+    snapshot["todos"].clear()
+    assert runtime.lead_context.todos == [{"content": "verify", "status": "pending"}]
+    session_id = runtime.lead_context.session_id
+    runtime.session.save()
+    assert runtime.lead_context.session_id == session_id == runtime.session.session_id
+    assert stored(runtime)["todos"] == runtime.lead_context.todos
+
+
+def test_post_hook_failure_saves_real_result_and_pairs_unexecuted_calls(runtime_factory, monkeypatch):
+    runtime, _ = runtime_factory([response(tools=[
+        tool("write_file", "first", path="first.txt", content="written"),
+        tool("write_file", "second", path="second.txt", content="never")], stop="tool_use")])
+
+    def fail(*args):
+        raise RuntimeError("post failed")
+
+    monkeypatch.setitem(hooks.HOOKS, "PostToolUse", [fail])
+    submitted = runtime.submit("write")
+    finished, _ = until(runtime, "turn_finished", submission_id=submitted.submission_id)
+    snapshot = stored(runtime)
+    assert finished.payload["outcome"]["status"] == "failed"
+    results = snapshot["messages"][-1]["content"]
+    assert results[0]["tool_use_id"] == "first" and not results[0].get("is_error")
+    assert results[1]["tool_use_id"] == "second" and results[1]["is_error"]
+    assert (runtime.session.store.workdir / "first.txt").read_text() == "written"
+    assert not (runtime.session.store.workdir / "second.txt").exists()
+    assert any(item["payload"].get("phase") == "hook" and item["payload"].get("state") == "failed"
+               for item in records(snapshot, "execution_status"))
+    restored = runtime.session.store.load(snapshot["id"])
+    assert restored["messages"] == snapshot["messages"]
+
+
+def test_tool_status_comes_from_execution_not_output(host_factory):
+    host_factory()
+    output = file_tools.run_bash("printf 'Error: sample output'")
+    assert output.content == "Error: sample output"
+    assert output.status == "success"
+    failed = file_tools.run_bash("printf done; exit 2")
+    assert failed.status == "failed" and "done" in failed.content
+    task = tasks.create_task("pending")
+    result = shared_tools.run_complete_task(task.id)
+    assert result.status == "failed" and "cannot complete" in result.content
+
+
+def test_failed_tool_does_not_skip_other_calls_in_batch(host_factory, monkeypatch):
+    from agent_harness import core
+    import copy
+    from types import SimpleNamespace
+    host = host_factory()
+    calls = []
+    responses = iter([response(tools=[
+        tool("read_file", "missing", path="missing.txt"),
+        tool("write_file", "write", path="result.txt", content="done")], stop="tool_use"), response()])
+
+    def create(**kwargs):
+        calls.append(copy.deepcopy(kwargs["messages"]))
+        return next(responses)
+
+    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
+    host.agent_loop([{"role": "user", "content": "work"}], "work")
+    results = calls[1][-1]["content"]
+    assert results[0]["tool_use_id"] == "missing" and results[0]["is_error"]
+    assert results[1]["tool_use_id"] == "write" and not results[1].get("is_error")
+    assert (core.WORKDIR / "result.txt").read_text() == "done"
+
+
+def test_compact_failure_is_saved_as_a_new_correction_fact(runtime_factory, monkeypatch):
+    from agent_harness.context import compaction
+    runtime, _ = runtime_factory([
+        response(tools=[tool("compact", "compact")], stop="tool_use"), response()])
+
+    def fail_summary(messages):
+        raise RuntimeError("summary unavailable")
+
+    monkeypatch.setattr(compaction, "summarize_history", fail_summary)
+    submitted = runtime.submit("compact")
+    until(runtime, "turn_finished", submission_id=submitted.submission_id)
+    snapshot = stored(runtime)
+    results = [item for item in records(snapshot, "tool_result")
+               if item["payload"]["tool_use_id"] == "compact"]
+    assert [item["payload"]["status"] for item in results] == ["returned", "failed"]
+    assert results[0]["id"] != results[1]["id"]
+    assert "Compaction requested" in results[0]["payload"]["content"]
+    assert results[1]["payload"]["correction"] and results[1]["payload"]["is_error"]
+    assert snapshot["messages"][-2]["content"][0]["is_error"]

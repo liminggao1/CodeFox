@@ -143,7 +143,7 @@ Ctrl+D 在会话中显示「正在关闭」，拒绝新输入，停止 cron，�
 
 ```sh
 cd /mnt/d/01dpan/01project/life/learncc/agent-harness
-/home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q tests/test_interaction.py tests/test_interactive_runtime.py tests/test_tui_integration.py tests/test_conversation_records.py tests/test_conversation_frontends.py
+/home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q tests/test_interaction.py tests/test_interactive_runtime.py tests/test_tui_integration.py tests/test_conversation.py
 ```
 
 实现与验收记录见 [Textual 实施计划](../docs/plans/2026-10-09-02Textual交互界面实施计划.md)。
@@ -479,7 +479,7 @@ F10 单步，F11 进入函数，Shift+F11 返回，F5 继续。暂时不看的�
 要观察字段实际变化，选择「pytest（当前文件）」，将 `args` 设置为：
 
 ```json
-["-q", "tests/test_runtime_context.py::test_agent_refreshes_memory_mcp_and_subagents_after_tool_round"]
+["-q", "tests/test_runtime_setup.py::test_agent_refreshes_memory_mcp_and_subagents_after_tool_round"]
 ```
 
 这个离线测试显式启用记忆，并模拟记忆召回、MCP 连接和子 agent 登记。
@@ -534,7 +534,7 @@ F10 单步，F11 进入函数，Shift+F11 返回，F5 继续。暂时不看的�
 **调试 Todo 更新：** 选择「pytest（当前文件）」，将 `args` 改为：
 
 ```json
-["-q", "tests/test_conversation_records.py::test_model_owns_todo_updates_without_cross_round_reminders"]
+["-q", "tests/test_conversation.py::test_model_owns_todo_updates_without_cross_round_reminders"]
 ```
 
 在 [run_todo_write](../src/agent_harness/tools/file_tools.py#L295) 和 [工具结果回填](../src/agent_harness/host.py#L394) 下断点，观察模型提交的 `todos`、工具返回的清单统计及下一次请求的 `messages`。

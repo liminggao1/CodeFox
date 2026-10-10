@@ -117,19 +117,18 @@ python -m pytest -q
 共用设施放在 `tests/support/`：`fakes.py` 提供假模型响应构造器，`helpers.py` 提供运行时事件和会话文件工具；`conftest.py` 提供 host 与运行时工厂。
 
 - `tests/test_goal.py`：控制器用例，以及用脚本化 client 驱动 `agent_loop` 的会话级用例。
-- `tests/test_workflow.py`：覆盖 journal 回放、预算与 runner 接线。
-- `tests/test_workflow_subagents.py`：实际 Workflow 工具、子 agent 文件操作、权限、格式重试和失败消费的恢复。
-- `tests/test_llm_client.py`：覆盖响应协议、工具参数和失败响应的 Lead 行为。
-- `tests/test_subagents.py`：宿主与任务/审批协议用例。
+- `tests/test_workflow.py`：journal 回放、预算与 runner 接线，以及跨真实子 agent 接口的工作流步骤。
+- `tests/test_llm_client.py`：响应协议、工具参数、失败响应的 Lead 行为，以及不依赖远端模型的真实 HTTP 流式响应。
+- `tests/test_subagents.py`：宿主、任务/审批协议，以及工具白名单、依赖注入和用量计数。
 - `tests/test_subagent_lifetimes.py`：统一创建工具、真实线程、跨任务上下文和消息投递。
-- `tests/test_shared_session.py`：共享执行、截断与上下文恢复。
-- `tests/test_subagent_options.py`：工具白名单、依赖注入及模型/摘要用量计数。
+- `tests/test_subagent_session.py`：子 agent 会话的共享执行、截断与上下文恢复。
+- `tests/test_runtime_setup.py`：启动配置、注入 runner 的保留，以及运行时快照刷新。
+- `tests/test_scheduler.py`：后台任务、cron 调度与完整后台输出的单次交付。
 - `tests/test_worktree_cleanup.py`：Lead 同轮清理、目录切换，以及拒绝和失败后的分配保留。
 - `tests/test_interaction.py`：事件顺序与数据副本、审批关联、来源权限、停止和关闭解除等待。
-- `tests/test_interactive_runtime.py`：实际共享驱动、命令/会话、四种回合结果、停止边界、cron 确认、后台交付和 CLI 读取归属。
+- `tests/test_interactive_runtime.py`：实际共享驱动、命令/会话、四种回合结果、停止边界、cron 确认、后台交付、CLI 读取归属和 Lead 状态拥有者。
 - `tests/test_tui_integration.py`：无头界面的中文多行对话、审批、停止、恢复、窄屏和滚动；未安装 Textual 时跳过。
-- `tests/test_conversation_records.py`：实际文件中的展示记录、审批前保存、后台检查点、重试去重、压缩与恢复续聊、当前结构校验。
-- `tests/test_conversation_frontends.py`：CLI 历史与文本详情、TUI 内联审批、展开和分段加载；历史只读并按 ID 去重。
+- `tests/test_conversation.py`：展示记录与前端回放，含审批前保存、后台检查点、重试去重、压缩恢复续聊、CLI/TUI 详情与分段加载。
 
 离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、子 agent），说明见
 [note/dev-notes.md](note/dev-notes.md)：
