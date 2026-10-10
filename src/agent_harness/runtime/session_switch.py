@@ -116,3 +116,26 @@ class SessionSwitch:
         if not saved:
             text += "; context could not be saved and will be retried on the next interaction"
         return {"text": text, "workdir": str(root), "saved": saved}
+
+    def start_new(self):
+        """保存当前会话并在同一启动目录开启一个干净会话；失败保持当前会话。"""
+        root = core.WORKDIR.resolve()
+        if (scheduler.has_background_tasks() or subagent_runtime.list_subagents()
+                or subagent_runtime.has_pending_inbox()):
+            raise SessionError("Background work or results remain; finish them and retry /new")
+        with scheduler.cron_lock:
+            if scheduler.cron_queue:
+                raise SessionError("Scheduled results remain; finish them and retry /new")
+        if not self._checkpoint():
+            raise SessionError("Current session could not be saved; a new session was not created")
+        current_goal = self._read_goal()
+        fresh_goal = goal.GoalController(current_goal.evaluator, current_goal.block_cap)
+        snapshot = self._store.create()
+        assignment = tasks.validate_lead_context(snapshot["id"], snapshot, workdir=root)
+        self._activate(snapshot, root, fresh_goal, assignment)
+        with interaction.execution_context(self._context()):
+            self._record("new_session", snapshot["id"], save=False)
+            self._checkpoint()
+            self._context().publish("session_changed",
+                                    records=self._session.display_records(historical=True))
+        return {"text": f"Started new session {snapshot['id']}", "workdir": str(root), "saved": True}

@@ -6,8 +6,15 @@ from textual.containers import VerticalScroll
 from textual.widgets import Button, Collapsible
 
 from ..conversation import ConversationProjection
-from ..presentation import session_title
+from ..presentation import arguments_text, format_elapsed, session_title
 from .widgets import ApprovalCard, BrandBar, ConversationRecord, OperationEntry, ProcessGroup, StreamingText
+
+
+def operation_text(entry):
+    """Full operation text for the call frame: tool name plus complete arguments."""
+    arguments = entry.get("arguments") or {}
+    detail = arguments_text(arguments) if arguments else entry.get("output", "")
+    return " · ".join(filter(None, (entry.get("tool_name"), detail)))
 
 
 class ConversationView:
@@ -27,8 +34,12 @@ class ConversationView:
 
     def refresh_elapsed(self):
         now = datetime.now(timezone.utc)
-        for entry in self._operations.values():
+        for key, entry in self._operations.items():
             entry.refresh_elapsed(now)
+            group = self._groups.get(key[:3]) if isinstance(key, tuple) else None
+            if group is not None and group.is_mounted:
+                group.update_operation(key, operation_text(entry.entry), entry.entry["state"],
+                                       format_elapsed(entry.elapsed_seconds(now)))
 
     async def _render_stream(self, entry):
         key = entry["key"]
@@ -54,6 +65,7 @@ class ConversationView:
             widget = self._operations.get(key)
             if widget is None or not widget.is_mounted:
                 parent = chat
+                group = None
                 if data.get("model_call_id") and data.get("phase") != "model":
                     group_key = (record.get("turn_id"), record["source"], data["model_call_id"])
                     group = self._groups.get(group_key)
@@ -68,6 +80,10 @@ class ConversationView:
                 self._operations[key] = widget
                 await parent.mount(widget)
             widget.render_entry(entry)
+            group = self._groups.get((record.get("turn_id"), record["source"], data.get("model_call_id")))
+            if group is not None and group.is_mounted:
+                group.update_operation(key, operation_text(entry), entry["state"],
+                                       format_elapsed(widget.elapsed_seconds()))
         else:
             widget = ConversationRecord(record, entry["tool_name"])
             widget.record_start_index = index

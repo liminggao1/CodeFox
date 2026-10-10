@@ -180,6 +180,36 @@ def test_goal_command_correlates_followup_turn(runtime_factory, monkeypatch):
     assert runtime.session.active_request == "write report"
 
 
+def test_new_command_saves_old_session_and_resets_context(runtime_factory):
+    runtime, host = runtime_factory()
+    submission = runtime.submit("first")
+    until(runtime, "turn_finished", submission_id=submission.submission_id)
+    previous = runtime.session.session_id
+    host.GOAL.set_goal("keep working")
+    submission = runtime.submit("/new")
+    command, events = until(runtime, "command_result", submission_id=submission.submission_id)
+    assert command.payload["status"] == "completed"
+    assert runtime.session.session_id != previous
+    assert runtime.session.history == []
+    assert not host.GOAL.snapshot()["active"]
+    assert len([event for event in events if event.type == "session_changed"]) == 1
+    # 旧会话仍可恢复，且保存了切换前的消息。
+    saved = runtime.session.store.load(previous)
+    assert saved["messages"][0]["content"] == "first"
+
+
+def test_new_command_rejects_save_failure_and_keeps_session(runtime_factory, monkeypatch):
+    runtime, host = runtime_factory()
+    submission = runtime.submit("first")
+    until(runtime, "turn_finished", submission_id=submission.submission_id)
+    previous = runtime.session.session_id
+    monkeypatch.setattr(runtime.session.store, "save", lambda snapshot: (_ for _ in ()).throw(OSError("disk")))
+    submission = runtime.submit("/new")
+    command, _ = until(runtime, "command_result", submission_id=submission.submission_id)
+    assert command.payload["status"] == "failed"
+    assert runtime.session.session_id == previous
+
+
 def test_cli_owns_all_reads_and_waits_for_goal_followup(runtime_factory, monkeypatch):
     from agent_harness.frontends.cli import CLIAdapter
     runtime, host = runtime_factory([response(tools=[tool("bash", command="printf hello")], stop="tool_use"), response("After")])

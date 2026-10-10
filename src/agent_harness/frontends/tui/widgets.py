@@ -12,8 +12,8 @@ from textual.screen import ModalScreen
 from textual.message import Message
 from textual.widgets import Button, Collapsible, Label, ListItem, ListView, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
-from ..presentation import (STATUS_LABELS, arguments_summary, format_elapsed, format_session_state,
-                            full_text, lifecycle_summary, record_time, short_text)
+from ..presentation import (STATUS_LABELS, arguments_summary, arguments_text, format_elapsed,
+                            format_session_state, full_text, lifecycle_summary, record_time, short_text)
 
 
 LOGO_PATH = Path(__file__).resolve().parents[4] / "assets" / "logo" / "1F98A.svg"
@@ -26,14 +26,30 @@ class DetailScroll(VerticalScroll):
     """
 
 
+class GroupHead(Static):
+    """Clickable one-line header for a model call's operation frame."""
+
+    class Toggle(Message):
+        pass
+
+    DEFAULT_CSS = """
+    GroupHead { height: 1; color: #999fa5; }
+    """
+
+    def on_click(self):
+        self.post_message(self.Toggle())
+
+
 class BrandBar(Horizontal):
     """Compact CodeFox identity and navigation actions."""
     DEFAULT_CSS = """
-    BrandBar { height: 3; padding: 0 1; background: #101214; }
-    BrandBar .brand { width: 24; color: #80cbc4; text-style: bold; }
-    BrandBar .session-title { width: 1fr; color: #e1e3e5; padding: 1 0; }
-    BrandBar #top-actions { width: auto; height: 3; align-horizontal: right; }
-    BrandBar #top-actions Button { min-width: 8; margin-left: 1; }
+    BrandBar { height: 1; padding: 0 1; background: #101214; }
+    BrandBar .brand { width: 12; color: #80cbc4; text-style: bold; }
+    BrandBar .session-title { width: 1fr; color: #e1e3e5; }
+    BrandBar #top-actions { width: auto; height: 1; align-horizontal: right; }
+    BrandBar #top-actions Button { min-width: 6; height: 1; min-height: 1; border: none;
+        margin-left: 1; padding: 0 1; }
+    BrandBar #top-actions #new-session { color: #101214; background: #80cbc4; }
     """
 
     def compose(self) -> ComposeResult:
@@ -41,31 +57,79 @@ class BrandBar(Horizontal):
         yield Static(f"{logo} CodeFox >_", classes="brand", markup=False)
         yield Static("未开始会话", classes="session-title", markup=False)
         with Horizontal(id="top-actions"):
-            yield Button("会话恢复", id="session")
             yield Button("历史", id="history")
-            yield Button("状态", id="state")
             yield Button("设置", id="settings")
-            yield Button("···", id="more")
+            yield Button("新会话", id="new-session", variant="primary")
 
     def update_title(self, title):
         self.query_one(".session-title", Static).update(title)
 
 
-class ProcessGroup(Vertical):
-    """One model call's operations, with bounded independent scrolling."""
+class StateToggle(Static):
+    """One-line entry point that expands the collapsed read-only state panel."""
+
+    class Pressed(Message):
+        pass
+
     DEFAULT_CSS = """
-    ProcessGroup { height: auto; margin: 1 0; }
-    ProcessGroup > Static { height: 1; color: #999fa5; }
+    StateToggle { height: 1; color: #80cbc4; padding: 0 1; }
+    """
+
+    def on_click(self):
+        self.post_message(self.Pressed())
+
+
+class ProcessGroup(Vertical):
+    """One model call's operations behind a collapsed frame.
+
+    收起时显示正在进行的操作 ``运行中 <本次操作>``（多条时标注“还有 N 条进行中”）；
+    没有进行中操作时标题回到 ``已运行的命令``，展开后列出各 ``已运行 <本次操作>`` 行。
+    操作内容原样透传，不截断。
+    """
+    DEFAULT_CSS = """
+    ProcessGroup { height: auto; margin: 1 0; background: #141618; border: solid #2c3033; padding: 0 1; }
+    ProcessGroup GroupHead { height: 1; color: #999fa5; }
     ProcessGroup > VerticalScroll { height: auto; max-height: 14; }
     """
+
+    RUNNING_STATES = {"pending", "running", "working", "postprocessing"}
 
     def __init__(self, source):
         super().__init__()
         self.source = source
+        self.expanded = False
+        self.operations = {}
 
     def compose(self):
-        yield Static(f"{self.source} · 操作", markup=False)
+        yield GroupHead("已运行的命令", id="group-head")
         yield VerticalScroll(classes="process-content")
+
+    def on_mount(self):
+        self.query_one(VerticalScroll).display = False
+
+    def update_operation(self, key, text, state, elapsed=None):
+        """Record one operation's full text and refresh the header line."""
+        self.operations[key] = (text, state, elapsed)
+        self._render_head()
+
+    def _render_head(self):
+        head = self.query_one(GroupHead)
+        running = [value for value in self.operations.values() if value[1] in self.RUNNING_STATES]
+        if running and not self.expanded:
+            text, _state, elapsed = running[0]
+            line = f"运行中 {text}"
+            if elapsed:
+                line += f" · 已耗时 {elapsed}"
+            if len(running) > 1:
+                line += f" · 还有 {len(running) - 1} 条进行中"
+            head.update(line)
+        else:
+            head.update("已运行的命令" if self.expanded else "已运行的命令")
+
+    def on_group_head_toggle(self, event):
+        self.expanded = not self.expanded
+        self.query_one(VerticalScroll).display = self.expanded
+        self._render_head()
 
 
 class OperationEntry(Vertical):
@@ -95,7 +159,10 @@ class OperationEntry(Vertical):
         if record["type"] == "execution_status" and data["phase"] != "tool":
             summary = lifecycle_summary(data)
         else:
-            summary = f"工具 · {entry['tool_name']} · {arguments_summary(entry['arguments'])} · {STATUS_LABELS.get(entry['state'], entry['state'])}"
+            arguments = entry["arguments"] or {}
+            detail = arguments_text(arguments) if arguments else short_text(entry["output"]) if entry["output"] else ""
+            summary = " · ".join(filter(None, ("已运行", entry["tool_name"], detail,
+                                               STATUS_LABELS.get(entry["state"], entry["state"]))))
         self.query_one(".operation-summary", Static).update(self._summary_text(summary))
         preview = self.query_one(".operation-preview", Static)
         preview.update(short_text(entry["output"]) if entry["output"] else "")
@@ -345,13 +412,17 @@ class SessionScreen(ModalScreen[str | None]):
 class SessionStatePanel(VerticalScroll):
     """Read-only projection of the active session state."""
     DEFAULT_CSS = """
-    SessionStatePanel { width: 32; min-width: 26; padding: 1 2; background: #191b1d; border-left: solid #35393d; }
-    SessionStatePanel .state-title { color: #80cbc4; text-style: bold; height: 1; }
+    SessionStatePanel { width: 32; min-width: 26; padding: 0 1; background: #191b1d; border-left: solid #35393d; }
+    SessionStatePanel #state-head { height: 1; }
+    SessionStatePanel .state-title { width: 1fr; color: #80cbc4; text-style: bold; height: 1; }
+    SessionStatePanel #state-collapse { min-width: 6; height: 1; min-height: 1; border: none; padding: 0 1; }
     SessionStatePanel .state-body { color: #b8bdc2; height: auto; }
     """
 
     def compose(self) -> ComposeResult:
-        yield Static("会话状态", classes="state-title", markup=False)
+        with Horizontal(id="state-head"):
+            yield Static("会话状态", classes="state-title", markup=False)
+            yield Button("收起", id="state-collapse")
         yield Static("未开始会话", classes="state-body", markup=False)
 
     def update_snapshot(self, snapshot, records=()):

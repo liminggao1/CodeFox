@@ -1,8 +1,8 @@
-"""本地命令路由：解析 /quit、/goal、/resume、/delete 并返回明确结果。
+"""本地命令路由：解析 /quit、/goal、/new、/resume、/delete 并返回明确结果。
 
 命令结果通过 ``CommandOutcome`` 显式返回，不再写运行时实例字段；
 ``/goal <text>`` 需要后续回合时，用 ``followup`` 表达，而不是隐藏通道。
-会话切换仍由 [session_switch](session_switch.py) 独占。
+会话切换与开启新会话仍由 [session_switch](session_switch.py) 独占。
 """
 
 from __future__ import annotations
@@ -25,13 +25,14 @@ class CommandOutcome:
 class CommandRouter:
     """把命令分派依赖显式注入；不持有运行时状态。"""
 
-    def __init__(self, *, store, session_id, read_goal, record, close, session_switch):
+    def __init__(self, *, store, session_id, read_goal, record, close, session_switch, new_session):
         self._store = store
         self._session_id = session_id
         self._read_goal = read_goal
         self._record = record
         self._close = close
         self._switch = session_switch
+        self._new_session = new_session
 
     def dispatch(self, text: str) -> CommandOutcome:
         """执行一条本地命令；参数错误按既有文案抛出 SessionError。"""
@@ -42,6 +43,8 @@ class CommandRouter:
             return CommandOutcome(command)
         if command == "/goal":
             return self._goal(text)
+        if command == "/new":
+            return CommandOutcome(command, self._new_session())
         if command == "/resume" and len(parts) == 1:
             entries, errors = self._store.list_sessions()
             return CommandOutcome(command, {"sessions": entries, "errors": errors})

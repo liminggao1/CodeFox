@@ -26,6 +26,13 @@ def arguments_summary(arguments):
     return short_text(" · ".join(values) if values else arguments, 110)
 
 
+def arguments_text(arguments):
+    """Full operation text for the call frame; never truncates or rewrites."""
+    keys = ("path", "command", "name", "task_id", "prompt", "query", "subject")
+    values = [str(arguments[key]) for key in keys if key in arguments]
+    return " · ".join(values) if values else full_text(arguments)
+
+
 def operation_key(record):
     data = record["payload"]
     if record["type"] in {"tool_call", "tool_result"} or data.get("phase") == "tool":

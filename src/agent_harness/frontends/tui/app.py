@@ -11,10 +11,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Collapsible, Static, TextArea
 
+from ... import core
 from ...runtime.interactive_runtime import InteractiveRuntime
 from ...runtime.local_commands import LOCAL_COMMANDS, find_command
 from .widgets import (ApprovalCard, BrandBar, CommandCandidates, ConversationRecord, DetailScroll,
-                      SessionInfoScreen, SessionScreen, SessionStatePanel)
+                      SessionInfoScreen, SessionScreen, SessionStatePanel, StateToggle)
 from ..presentation import session_title, session_status_label
 from .conversation_view import ConversationView
 
@@ -38,27 +39,30 @@ class HarnessApp(App):
     Screen { background: #151719; color: #e1e3e5; }
     #workspace { height: 1fr; }
     #conversation { width: 1fr; height: 1fr; padding: 0 1; }
+    #conversation-top { height: 1; }
+    #conversation-top #earlier { width: auto; min-width: 0; height: 1; min-height: 1; border: none; padding: 0 1; }
+    #conversation-top #state-spacer { width: 1fr; }
+    #conversation-top #state-toggle { width: auto; min-width: 6; height: 1; min-height: 1; }
     #chat { height: 1fr; }
-    #earlier { height: 3; display: none; }
+    #earlier { display: none; }
     Markdown { padding: 0 1; margin: 0; background: transparent; }
     .activity { height: auto; color: #999fa5; margin: 1 0; }
     .diagnostic { height: auto; padding: 0; }
     #input { height: 5; margin-top: 1; border: solid #55595d; background: #202326; }
     #command-hint { display: none; height: 1; color: #80cbc4; }
-    #actions { height: 3; align-horizontal: right; }
-    #actions Button { min-width: 8; margin-left: 1; }
+    #input-status { height: 1; color: #999fa5; }
+    #actions { height: 1; align-horizontal: right; }
+    #actions Button { min-width: 8; height: 1; min-height: 1; border: none; margin-left: 1; padding: 0 1; }
     #input-footer { height: 1; color: #999fa5; }
     #permission { width: 1fr; color: #b3a35a; }
     #bottom-status { width: auto; color: #999fa5; }
     .short #input { height: 3; margin-top: 0; }
     .short #actions { display: none; }
     .short #input-footer { display: none; }
+    .short #input-status { display: none; }
     .short BrandBar { height: 1; }
     .short BrandBar .brand, .short BrandBar .session-title { height: 1; padding: 0; }
-    .short BrandBar #top-actions { width: 6; }
     .short BrandBar #top-actions Button { display: none; }
-    .short BrandBar #top-actions #state { display: block; min-width: 5; margin-left: 0; }
-    .narrow #session-status { display: none; }
     .narrow #conversation { width: 1fr; }
     """
 
@@ -71,6 +75,8 @@ class HarnessApp(App):
         self.busy = False
         self.stopping = False
         self.closing = False
+        self.state_expanded = False
+        self._notice = None
         self.runtime_closed = False
         self.approval = None
         self.snapshot = {}
@@ -90,11 +96,15 @@ class HarnessApp(App):
         yield BrandBar()
         with Horizontal(id="workspace"):
             with Vertical(id="conversation"):
-                yield Button("加载更早记录", id="earlier")
+                with Horizontal(id="conversation-top"):
+                    yield Button("加载更早记录", id="earlier")
+                    yield Static(id="state-spacer")
+                    yield StateToggle("[状态]", id="state-toggle", markup=False)
                 yield VerticalScroll(id="chat")
                 yield CommandCandidates(id="commands")
                 yield Static(id="command-hint", markup=False)
                 yield TextArea(id="input", soft_wrap=True, placeholder="消息或 / 命令 · Enter 发送 · Shift+Enter 换行")
+                yield Static("就绪", id="input-status", markup=False)
                 with Horizontal(id="actions"):
                     yield Button("发送", id="send", variant="primary")
                 with Horizontal(id="input-footer"):
@@ -107,10 +117,12 @@ class HarnessApp(App):
         self._consume_timer = self.set_interval(0.05, self.consume)
         self._clock_timer = self.set_interval(0.25, self.conversation.refresh_elapsed)
         self.query_one("#input", TextArea).focus()
+        self._controls()
 
     def on_resize(self, event):
         self.set_class(event.size.height < 16, "short")
         self.set_class(event.size.width < 90, "narrow")
+        self._controls()
 
     def on_key(self, event):
         """Keep Home/End deterministic when the conversation itself has focus."""
@@ -128,11 +140,8 @@ class HarnessApp(App):
 
     def _controls(self):
         button = self.query_one("#send", Button)
-        if self.closing:
-            button.label = "停止中"
-            button.disabled = True
-        elif self.stopping:
-            button.label = "停止中"
+        if self.closing or self.stopping:
+            button.label = "停止"
             button.disabled = True
         elif self.busy:
             button.label = "停止"
@@ -142,8 +151,11 @@ class HarnessApp(App):
             button.disabled = False
         status = session_status_label({"busy": self.busy, "closing": self.closing})
         self.query_one("#bottom-status", Static).update(
-            f"模型：{self.snapshot.get('model') or '未开始'} · 状态：{status} · 消息：{len(self.records)}")
+            f"模型：{self.snapshot.get('model') or '未开始'} · 消息：{len(self.records)} · 字符预算：{core.CONTEXT_LIMIT}")
+        self._input_status()
         self.query_one(SessionStatePanel).update_snapshot(self.snapshot, self.records)
+        self.query_one(SessionStatePanel).display = self.state_expanded
+        self.query_one("#state-toggle", StateToggle).display = not self.state_expanded
         self.query_one(BrandBar).update_title(session_title(self.snapshot, self.records))
         self._refresh_commands()
 
@@ -289,6 +301,8 @@ class HarnessApp(App):
             self._refresh_commands()
 
     def _status(self, label="就绪"):
+        self._notice = None if label == "就绪" else label
+        self._input_status()
         if self._activity is None or self._activity.parent is None:
             if label == "就绪":
                 return
@@ -296,6 +310,16 @@ class HarnessApp(App):
             self.query_one("#chat", VerticalScroll).mount(self._activity)
         else:
             self._activity.update(label)
+
+    def _input_status(self):
+        """Input-area status line: runtime state first, then the last notice."""
+        if self.closing:
+            label = "关闭中"
+        elif self.busy:
+            label = "处理中"
+        else:
+            label = self._notice or "就绪"
+        self.query_one("#input-status", Static).update(label)
 
     def action_send(self):
         if len(self.screen_stack) != 1:
@@ -342,11 +366,14 @@ class HarnessApp(App):
         if len(self.screen_stack) == 1:
             self._submit("/resume")
 
+    def action_new_session(self):
+        if len(self.screen_stack) == 1:
+            self._submit("/new")
+
     def action_stop_turn(self):
         if self.turn_id and self.runtime.request_stop(self.turn_id):
             self.stopping = True
             self._controls()
-            self._status("正在停止")
             self._dismiss_approval()
 
     def action_close_runtime(self):
@@ -365,16 +392,19 @@ class HarnessApp(App):
                 self.action_send()
         elif event.button.id == "earlier":
             await self.conversation.load_earlier()
-        elif event.button.id == "session" or event.button.id == "more":
-            self.action_sessions()
-        elif event.button.id == "state":
-            self.push_screen(SessionInfoScreen(self.snapshot, self.records))
+        elif event.button.id == "state-collapse":
+            self.state_expanded = False
+            self._controls()
         elif event.button.id == "history":
-            self.conversation.start = 0
-            await self.conversation.render_window()
-            self.query_one("#chat", VerticalScroll).scroll_home(animate=False)
+            self.action_sessions()
         elif event.button.id == "settings":
             self.push_screen(SessionInfoScreen(self.snapshot, self.records))
+        elif event.button.id == "new-session":
+            self.action_new_session()
+
+    def on_state_toggle_pressed(self, event: StateToggle.Pressed):
+        self.state_expanded = True
+        self._controls()
 
     def _dismiss_approval(self):
         if self.approval is not None:

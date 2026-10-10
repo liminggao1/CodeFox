@@ -50,7 +50,7 @@ class InteractiveRuntime:
         self.command_router = CommandRouter(
             store=self.session.store, session_id=lambda: self.session.session_id,
             read_goal=self._read_goal, record=self._record, close=self.close,
-            session_switch=self.session_switch)
+            session_switch=self.session_switch, new_session=self.session_switch.start_new)
 
     def _dispatch_command(self, text):
         """CommandRouter 晚绑定回调：它依赖 SessionSwitch，直接注入会形成构造环。"""

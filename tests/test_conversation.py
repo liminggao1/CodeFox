@@ -800,14 +800,19 @@ def test_tui_record_window_expansion_history_and_dedup():
 
 def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
     from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import BrandBar, SessionStatePanel
+    from agent_harness.frontends.tui.widgets import BrandBar, SessionStatePanel, StateToggle
     from textual.widgets import Button, Static
 
     app = HarnessApp(DisplayRuntime())
     async def exercise():
         async with app.run_test(size=(110, 30)) as pilot:
             assert app.query_one(BrandBar)
-            assert app.query_one(SessionStatePanel)
+            # 顶部只有三个固定按钮，状态入口在对话区顶部行右侧。
+            assert [button.id for button in app.query_one(BrandBar).query(Button)] == [
+                "history", "settings", "new-session"]
+            assert app.query_one("#conversation-top").region.y == 1
+            assert not app.query_one(SessionStatePanel).display
+            assert app.query_one(StateToggle).display
             assert app.query_one("#send", Button).label == "发送"
             assert not app.query("#stop")
             await app._event(event("state_snapshot", {
@@ -819,6 +824,19 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
             }))
             await pilot.pause()
             assert app.query_one("#send", Button).label == "停止"
+            app.action_stop_turn()
+            app.turn_id = "turn-1"
+            app.runtime.request_stop = lambda turn_id: True
+            app.action_stop_turn()
+            assert app.stopping and app.query_one("#send", Button).label == "停止"
+            assert app.query_one("#send", Button).disabled
+            assert str(app.query_one("#input-status", Static).content) == "处理中"
+            app.state_expanded = True
+            app._controls()
+            await pilot.pause()
+            assert app.query_one(SessionStatePanel).display
+            assert not app.query_one(StateToggle).display
+            assert str(app.query_one("#state-collapse", Button).label) == "收起"
             state = str(app.query_one(SessionStatePanel).query_one(".state-body", Static).content)
             assert "test-model" in state and "/tmp/project" in state and "feature" in state
     import asyncio
@@ -907,7 +925,7 @@ def test_operation_summary_keeps_confirmed_elapsed_time():
     asyncio.run(exercise())
 def test_many_tools_share_scrollable_group_and_update_in_place():
     from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import OperationEntry, ProcessGroup
+    from agent_harness.frontends.tui.widgets import GroupHead, OperationEntry, ProcessGroup
     from textual.containers import VerticalScroll
     from textual.events import MouseScrollDown
     app = HarnessApp(DisplayRuntime())
@@ -923,7 +941,11 @@ def test_many_tools_share_scrollable_group_and_update_in_place():
             await pilot.pause()
             assert len(app.query(ProcessGroup)) == 1
             assert len(app.query(OperationEntry)) == 20
-            scroll = app.query_one(ProcessGroup).query_one(VerticalScroll)
+            group = app.query_one(ProcessGroup)
+            assert str(group.query_one(GroupHead).content) == "已运行的命令"
+            group.query_one(GroupHead).post_message(GroupHead.Toggle())
+            await pilot.pause()
+            scroll = group.query_one(VerticalScroll)
             assert scroll.region.height <= 14 and scroll.max_scroll_y > 0
             scroll.scroll_home(animate=False)
             await pilot.pause()
