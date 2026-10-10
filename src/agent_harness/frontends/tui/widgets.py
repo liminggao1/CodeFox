@@ -53,8 +53,9 @@ class BrandBar(Horizontal):
     """
 
     def compose(self) -> ComposeResult:
-        logo = "🦊" if LOGO_PATH.is_file() else ">_"
-        yield Static(f"{logo} CodeFox >_", classes="brand", markup=False)
+        # Logo 用终端字符表现；SVG 缺失时退回可稳定显示的狐狸字符，不加装饰符号。
+        logo = "🦊" if LOGO_PATH.is_file() else "狐"
+        yield Static(f"{logo} CodeFox", classes="brand", markup=False)
         yield Static("未开始会话", classes="session-title", markup=False)
         with Horizontal(id="top-actions"):
             yield Button("历史", id="history")
@@ -124,7 +125,7 @@ class ProcessGroup(Vertical):
                 line += f" · 还有 {len(running) - 1} 条进行中"
             head.update(line)
         else:
-            head.update("已运行的命令" if self.expanded else "已运行的命令")
+            head.update("已运行的命令")
 
     def on_group_head_toggle(self, event):
         self.expanded = not self.expanded

@@ -851,6 +851,32 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
     asyncio.run(exercise())
 
 
+def test_tui_state_panel_reopens_and_top_entries_keep_editor_focus():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import SessionStatePanel, StateToggle
+    from textual.widgets import TextArea
+
+    app = HarnessApp(DisplayRuntime())
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            editor = app.query_one("#input", TextArea)
+            await pilot.click("#state-toggle")
+            await pilot.pause()
+            assert app.state_expanded and app.query_one(SessionStatePanel).display
+            assert not app.query_one(StateToggle).display
+            assert app.focused is editor
+            await pilot.click("#state-collapse")
+            await pilot.pause()
+            assert not app.state_expanded and not app.query_one(SessionStatePanel).display
+            assert app.query_one(StateToggle).display
+            # 收起后仍可再次展开，且焦点回到输入框。
+            await pilot.click("#state-toggle")
+            await pilot.pause()
+            assert app.query_one(SessionStatePanel).display and app.focused is editor
+    import asyncio
+    asyncio.run(exercise())
+
+
 def test_tui_inline_approval_only_enables_delivered_request(monkeypatch):
     pytest.importorskip("textual")
     from textual.widgets import Button

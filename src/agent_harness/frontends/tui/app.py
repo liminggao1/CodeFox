@@ -405,10 +405,17 @@ class HarnessApp(App):
             self.push_screen(SessionInfoScreen(self.snapshot, self.records))
         elif event.button.id == "new-session":
             self.action_new_session()
+        self._focus_input()
 
     def on_state_toggle_pressed(self, event: StateToggle.Pressed):
         self.state_expanded = True
         self._controls()
+        self._focus_input()
+
+    def _focus_input(self):
+        """顶部入口和状态切换不保留焦点，输入框始终可以继续编辑草稿。"""
+        if self.is_running:
+            self.query_one("#input", TextArea).focus()
 
     def _dismiss_approval(self):
         if self.approval is not None:
