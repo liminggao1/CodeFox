@@ -65,28 +65,48 @@ class ChatMessages(FakeMessages):
 
 
 def main() -> None:
+    # 将项目上层的src目录加入Python模块搜索路径，这样才能import agent_harness下的代码
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    # 保存脚本启动时的原始工作目录，最后需要切回去恢复环境
     original_cwd = Path.cwd()
+    # 创建临时文件夹，前缀为agent-harness-chat-，退出with块会自动删除该目录
     with tempfile.TemporaryDirectory(prefix="agent-harness-chat-") as directory:
-        # 先切目录，再导入 core，使启动目录相关状态全部落在临时目录。
+        # 先切换到临时目录，再导入core模块
+        # 目的：让agent所有读写、会话等操作全部落在临时目录，不污染本机真实文件
         os.chdir(directory)
         try:
+            # 延迟导入：必须在切换目录之后才导入core，core内部会读取当前工作目录
             from agent_harness import core
             from agent_harness.frontends.cli import CLIAdapter
             from agent_harness.runtime.interactive_runtime import InteractiveRuntime
             from agent_harness.runtime.session_store import SessionStore
 
+            # 构造一个假的模型客户端，用于离线模拟，不调用真实大模型API
             client = FakeClient([])
+            # 初始化消息容器，挂载到fake客户端上，管理对话消息
             client.messages = ChatMessages(client)
+            # 把伪造客户端注入到core全局变量，替换真实模型客户端
             core.client = client
-            core.MEMORY_ENABLED = False  # 本场景只观察主模型，关闭记忆模型调用。
+            # 关闭记忆模型，本次测试只观测主Agent模型逻辑，不额外调用记忆模块
+            core.MEMORY_ENABLED = False
+
+            # 创建会话存储实例，会话数据存放位置绑定core的工作目录
             store = SessionStore(core.WORKDIR)
-            store.directory = core.WORKDIR / "sessions"  # 不写入个人真实会话目录。
+            # 将会话存储目录重定向到临时目录下的sessions文件夹
+            # 避免会话持久化写入你电脑真实的用户会话目录
+            store.directory = core.WORKDIR / "sessions"
+
+            # 控制台打印提示信息
             print(f"离线模拟交互；工作目录：{core.WORKDIR}")
             print("输入：你好 / 写文件；q 退出。回复固定，文件工具真实执行。")
+
+            # 实例化交互式运行时（绑定会话存储），再套一层CLI命令行适配器，启动交互循环
             CLIAdapter(InteractiveRuntime(store=store)).run()
         finally:
+            # 无论上面代码正常结束还是异常崩溃，最终都会执行这里
+            # 切换回脚本最开始的原始工作目录，防止目录状态残留
             os.chdir(original_cwd)
+
 
 
 if __name__ == "__main__":

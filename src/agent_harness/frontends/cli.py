@@ -191,26 +191,48 @@ class CLIAdapter:
             self._changed.set()
 
     def run(self):
+        """运行命令行交互，直到用户退出或运行时关闭。
+
+        当前线程读取输入和审批；运行时的工作线程执行请求；
+        cli-output 线程读取事件并显示模型回复、工具状态等结果。
+        """
+        # 标记 CLI 已启动，让后台打印配合输入提示符显示。
         core.CLI_ACTIVE = True
+        # 初始化运行时，并启动执行请求的工作线程；此时还没有用户请求。
         self.runtime.start()
+        # 创建显示线程：target 是线程启动后执行的函数，不在这里立即调用。
+        # name 是线程名；daemon=True 表示它本身不阻止进程退出，正常收尾仍会等待它结束。
         self._renderer = threading.Thread(target=self._render_events, name="cli-output", daemon=True)
+        # 启动显示线程，持续读取事件；它不读取用户输入。
         self._renderer.start()
         try:
+            # 每次循环读取一条输入；运行时关闭后 self.closed 会变为 True。
             while not self.closed:
+                # 显示提示符并等待输入，用户按回车后才返回字符串。
                 text = self.reader()
+                # 去掉首尾空白并转为小写；空输入或退出命令会结束交互循环。
                 if text.strip().lower() in {"", "q", "exit", "/quit"}:
                     break
+                # 将输入交给运行时排队，返回是否接收及请求 ID；模型在工作线程执行。
                 result = self.runtime.submit(text)
                 if result.status == "accepted":
+                    # 等待这次请求完成，期间在当前线程处理审批输入。
+                    # 模型回复和工具状态由显示线程持续输出，完成后才读取下一条输入。
                     self.pump(result.submission_id)
                 else:
+                    # 请求未接收时显示原因，例如运行时忙碌或正在关闭。
                     self.write(result.reason)
         except (EOFError, KeyboardInterrupt):
+            # 输入结束（如 Ctrl+D）或 Ctrl+C 中断时，进入下面的统一收尾。
             pass
         finally:
+            # 不论正常退出还是发生异常，都通知运行时停止并保存会话。
             self.runtime.close()
+            # 不指定请求 ID，等待显示线程收到 runtime_closed 并设置 self.closed。
             self.pump()
+            # 等待显示线程退出，确保关闭事件已处理完。
             self._renderer.join()
+            # 恢复普通终端打印模式。
             core.CLI_ACTIVE = False
 
 

@@ -356,26 +356,40 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 
 #### 1. 一轮对话的完整流程
 
-**launch 配置：** 将上方 JSON 中第一个对象（「Agent 交互（模拟 API，离线）」）手动加入
-[launch.json](../.vscode/launch.json) 的 `configurations` 数组。入口为 `scripts/debug_chat.py`，终端为 `integratedTerminal`。
+**launch 配置：** 选择「Agent 交互（模拟 API，离线）」，入口是 `scripts/debug_chat.py`，终端是 `integratedTerminal`。
+当前 [launch.json](../.vscode/launch.json) 已有该配置；需要手动替换时用上方 JSON。
 
-**断点设置：** 点击源码行左侧下断点；先设置入口和模型调用两个断点即可。
+**先调试脚本启动。** 点击源码行左侧设置下面三个断点，然后按 F5：
 
-| 位置 | 停在哪里 |
-| --- | --- |
-| [host.py:329](../src/agent_harness/host.py#L329) | 进入 `agent_loop` |
-| [host.py:355](../src/agent_harness/host.py#L355) | 准备历史 |
-| [host.py:363](../src/agent_harness/host.py#L363) | 构造上下文，详见第 2 节 |
-| [host.py:365](../src/agent_harness/host.py#L365) | 装配工具池 |
-| [host.py:374](../src/agent_harness/host.py#L374) | 调用模拟模型 |
-| [host.py:425](../src/agent_harness/host.py#L425) | 判断是否进入工具分支 |
+| 顺序 | 断点 | 如何操作 |
+| --- | --- | --- |
+| 1 | [debug_chat.py:85](../scripts/debug_chat.py#L85) | 创建模拟客户端；按两次 F10，查看 `client` 和 `client.messages`，后者应为 `ChatMessages` |
+| 2 | [debug_chat.py:89](../scripts/debug_chat.py#L89) | 将模拟客户端交给项目；按一次 F10，查看 `core.client is client`，应为 `True` |
+| 3 | [debug_chat.py:104](../scripts/debug_chat.py#L104) | 启动真实 CLI 和共享驱动；按 F5 继续，等待终端输入提示符 |
 
-按 F5 选择模拟配置，在**集成终端**输入 `你好` 并回车，即命中入口断点。
-F10 单步，F11 进入函数，Shift+F11 返回，F5 继续；输入 `q` 退出。
+断点停在该行**执行之前**；查看赋值结果时先按 F10。启动阶段还没有用户输入，不会命中下面的模型断点。
 
-要调试工具调用，输入 `写文件`，另在 [lead_tools.py:58](../src/agent_harness/agents/lead_tools.py#L58)（工具检查）
+**再调试一轮“你好”。** 预先设置下面的断点，程序运行到提示符后，在**集成终端**输入 `你好` 并回车。
+下表按实际命中顺序排列，每看完一个位置按 F5 前往下一个：
+
+| 顺序 | 断点 | 看什么 |
+| --- | --- | --- |
+| 1 | [cli.py:217](../src/agent_harness/frontends/cli.py#L217) | `text == "你好"`，CLI 将输入交给共享驱动 |
+| 2 | [host.py:329](../src/agent_harness/host.py#L329) | 进入主循环；`active_request == "你好"`，`messages[-1]` 为用户消息 |
+| 3 | [host.py:374](../src/agent_harness/host.py#L374) | 请求模型之前；查看 `context`、`tools` 和 `messages`；上下文细节见第 2 节 |
+| 4 | [debug_chat.py:26](../scripts/debug_chat.py#L26) | 模拟模型收到请求；看 `kwargs["system"]`、`kwargs["messages"]`、`kwargs["tools"]`；F10 后 `content == "你好"` |
+| 5 | [debug_chat.py:64](../scripts/debug_chat.py#L64) | 模拟流已经组装好；查看 `response.content` 和 `events`，继续后由真实流式消费器读取 |
+| 6 | [host.py:425](../src/agent_harness/host.py#L425) | 模型响应已写回历史；`response.stop_reason == "end_turn"`，继续后走普通回答结束分支 |
+
+模拟响应在 [debug_chat.py:33](../scripts/debug_chat.py#L33) 生成；想看生成过程，可从第 26 行用 F10 走到这里。
+想追踪流式入口，可另在 [debug_chat.py:42](../scripts/debug_chat.py#L42) 下断点，它先于第 26 行命中。
+主循环和模型断点位于 `interactive-lead` 工作线程，CLI 输入断点位于主线程；在调用堆栈中查看当前线程。
+
+F10 单步，F11 进入函数，Shift+F11 返回，F5 继续。暂时不看的断点可在“断点”面板取消勾选；输入 `q` 退出。
+
+要调试工具调用，继续输入 `写文件`，另在 [lead_tools.py:58](../src/agent_harness/agents/lead_tools.py#L58)（工具检查）
 和 [lead_tools.py:90](../src/agent_harness/agents/lead_tools.py#L90)（执行工具）下断点。
-`你好` 不会命中这两个工具断点。
+它会两次命中模拟模型：先返回 `tool_use`，再接收 `tool_result` 并回答；`你好` 不会命中工具断点。
 
 #### 2. 上下文如何刷新
 
@@ -683,7 +697,7 @@ cron 的创建、查询、取消属于模型工具；到期检查由调度线程
 格式修正只处理上次最终结果，关闭工具，文件操作不会因格式错误再执行一次。失败消费也保存在任务快照，恢复时继续计入预算。
 普通失败、取消和预算超额的收尾规则见 [README](../README.md#行为要点)。
 整个流程的输出在 [workflow_runtime.py:901](../src/agent_harness/workflows/workflow_runtime.py#L901) 保存，任务快照在 [workflow_runtime.py:902](../src/agent_harness/workflows/workflow_runtime.py#L902) 保存。
-真实客户端由 [workflow_runtime.py:290](../src/agent_harness/workflows/workflow_runtime.py#L290) 默认读取 `core.client`；离线客户端在 [cli.py:227](../src/agent_harness/frontends/cli.py#L227) 注入。
+真实客户端由 [workflow_runtime.py:290](../src/agent_harness/workflows/workflow_runtime.py#L290) 默认读取 `core.client`；离线客户端在 [cli.py:249](../src/agent_harness/frontends/cli.py#L249) 注入。
 
 #### 13. journal 读写与 resume
 

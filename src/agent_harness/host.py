@@ -313,7 +313,6 @@ def _track_tool_completion(name):
 # Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
 def agent_loop(messages: list, active_request: str, save_context=None, on_usage=None):
     """执行 Agent 主循环，直到模型完成回答或本轮无法继续。
-
     Args:
         messages: 当前对话历史，会被原地追加助手响应和工具结果。
         active_request: 当前用户请求，供历史压缩和任务续做使用。
@@ -321,23 +320,27 @@ def agent_loop(messages: list, active_request: str, save_context=None, on_usage=
         on_usage: 接收 Lead 主模型用量的回调。
     Returns:
         TurnOutcome；历史和工具副作用保留在各自所属模块。
-
     LeadTurn 负责本轮记录与收尾，工具批次复用 hooks；本循环保留
     上下文准备、模型重试/续写、goal 判定和工具迭代的显式顺序。
     """
+    # 全局变量，记录距离上次待办任务 todo 的迭代轮数，用于任务续做/压缩判断
     global rounds_since_todo
+    # 创建本轮回合对象 LeadTurn：管理本轮所有记录、状态、会话保存、token用量回调
     turn = LeadTurn(messages, save_context, on_usage)
-    # 保存本轮 API 重试、模型降级和上下文恢复状态。
+    # 实例化恢复状态对象：保存本轮API重试、模型降级、上下文回滚恢复相关状态
     state = recovery.RecoveryState()
-    # 管理本轮手动压缩的工具响应和执行时机。
+    # 手动压缩管理器，管控手动触发的工具返回内容压缩以及压缩执行时机
     manual_compaction = compaction.ManualCompaction()
+    # 开启自动上下文压缩开关，当上下文过长时自动压缩对话历史
     automatic_compaction_enabled = True
 
     # -- 准备上下文并请求完整模型响应 --
-    # 每次迭代完成一次模型调用，并处理它返回的文本或工具请求。
+    # 每次循环迭代：调用一次模型，处理模型返回的文本回答 或者 工具调用请求
     while True:
+        # 检查外部停止信号（用户主动终止、运行时关闭），收到信号就结束本轮
         if interaction.stopped():
             return turn.finish("stopped")
+        # 标记模型调用已经开始，用于异常捕获、重试逻辑判断
         model_call_started = False
         # 准备阶段与模型调用失败共用同一套 cron 收尾。
         try:
