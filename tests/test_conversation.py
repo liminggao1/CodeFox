@@ -1117,6 +1117,9 @@ def test_tui_messages_hide_source_labels_and_user_messages_hug_right():
             model_box = model_row.query_one(ConversationRecord).region
             assert user_box.x > model_box.x
             assert user_box.right > model_box.right
+            # 短消息的用户气泡按内容收缩并贴右，不是占满 82% 后把文字留在左侧。
+            assert user_box.width < model_box.width
+            assert user_box.right == user_row.region.right
             # 消息框内不显示“你”“CodeFox”等来源标签。
             for item in app.query(ConversationRecord):
                 assert not item.query(".record-source")

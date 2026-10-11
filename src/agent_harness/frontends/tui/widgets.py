@@ -302,7 +302,8 @@ class MessageRow(Horizontal):
 class ConversationRecord(Vertical):
     DEFAULT_CSS = """
     ConversationRecord { height: auto; margin-bottom: 1; }
-    ConversationRecord.user-message { width: 82%; background: #202326; padding: 0 1; }
+    ConversationRecord.user-message { width: auto; max-width: 82%; background: #202326; padding: 0 1; }
+    ConversationRecord.user-message Static { width: auto; max-width: 100%; }
     ConversationRecord.model-message { width: 82%; background: #191b1d; padding: 0 1; }
     ConversationRecord.event-record { width: 100%; background: #17191b; color: #999fa5; padding: 0 1; }
     ConversationRecord .record-source { height: 1; color: #80cbc4; }
