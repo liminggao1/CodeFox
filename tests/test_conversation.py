@@ -1035,7 +1035,7 @@ def test_many_tools_share_scrollable_group_and_update_in_place():
             assert len(app.query(ProcessGroup)) == 1
             assert len(app.query(OperationEntry)) == 20
             group = app.query_one(ProcessGroup)
-            assert str(group.query_one(GroupHead).content) == "已运行的命令"
+            assert str(group.query_one(GroupHead).content).startswith("工具调用 · 耗时 ")
             group.query_one(GroupHead).post_message(GroupHead.Toggle())
             await pilot.pause()
             scroll = group.query_one(VerticalScroll)

@@ -123,8 +123,17 @@ def test_host_outcomes_are_structured(runtime_factory, mode):
         return response("partial", stop="max_tokens")
     runtime, host = runtime_factory(client=create)
     submission = runtime.submit("run")
-    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    finished, events = until(runtime, "turn_finished", submission_id=submission.submission_id)
     assert finished.payload["outcome"]["status"] == ("failed" if mode == "failure" else "truncated")
+    if mode == "failure":
+        assert any(event.type == "system_error" and "offline failure" in event.payload["error"]
+                   for event in events)
+        snapshot = stored(runtime)
+        assert records(snapshot, "system_error")
+        assert not any(message.get("role") == "assistant" and "[Error]" in str(message.get("content"))
+                       for message in snapshot["messages"])
+    else:
+        assert not any(event.type == "system_error" for event in events)
 
 
 def test_commands_resume_generation_and_save_failure(runtime_factory, monkeypatch):

@@ -452,7 +452,8 @@ def test_reactive_archive_failure_ends_with_cron_restored(host_factory, monkeypa
     monkeypatch.setattr(compaction, "write_transcript", fail_archive)
     history = [{"role": "user", "content": "go"}]
     host.agent_loop(history, "go")
-    assert "Reactive compaction failed" in history[-1]["content"][0]["text"]
+    assert not any(message.get("role") == "assistant" and "Reactive compaction failed" in str(message.get("content"))
+                   for message in history)
     assert scheduler._cron_queue == [job]
     assert history[0]["content"] == "go"
 

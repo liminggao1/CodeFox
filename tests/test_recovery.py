@@ -136,7 +136,8 @@ def test_lead_does_not_repeat_reactive_recovery(host_factory, monkeypatch):
     host.agent_loop(history, "go")
     assert calls == [True, True]
     assert summaries == [True]
-    assert "context_length_exceeded" in history[-1]["content"][0]["text"]
+    assert not any(message.get("role") == "assistant" and "context_length_exceeded" in str(message.get("content"))
+                   for message in history)
 
 
 @pytest.mark.parametrize("failure", ["memory", "tools", "preparation_context_error"])
@@ -168,7 +169,8 @@ def test_preparation_failure_restores_cron_and_next_turn_can_deliver(host_factor
     assert calls == []
     assert scheduler._cron_queue == [job]
     assert scheduler._scheduled_jobs[job.id].pending_delivery
-    assert "[Error]" in history[-1]["content"][0]["text"]
+    assert not any(message.get("role") == "assistant" and "[Error]" in str(message.get("content"))
+                   for message in history)
 
     monkeypatch.setattr(memory_runtime, "read_memory_index", original_index)
     mcp_tools.mcp_clients.clear()

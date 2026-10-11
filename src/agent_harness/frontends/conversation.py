@@ -88,13 +88,18 @@ class ConversationProjection:
             if kind == "tool_call":
                 entry.update(tool_name=data["name"], arguments=data.get("input", {}))
                 if data.get("result_missing"):
-                    entry["state"] = "interrupted"
+                    entry.update(state="interrupted", finished_at=record.get("at"))
             elif kind == "tool_result":
                 entry.update(state=data.get("status", "returned"), output=full_text(data.get("content", "")),
                              finished_at=record.get("at"))
             else:
                 state = "interrupted" if data.get("historical") and data["state"] == "running" else data["state"]
-                entry.update(state=state, output=data.get("reason", ""), elapsed_seconds=data.get("elapsed_seconds"))
+                output = data.get("reason", "")
+                # 工具结果已经带有原始正文时，生命周期事件只能更新状态，
+                # 不能用通用 reason 覆盖工具返回的错误码和正文。
+                if data.get("phase") == "tool" and entry["output"]:
+                    output = entry["output"]
+                entry.update(state=state, output=output, elapsed_seconds=data.get("elapsed_seconds"))
                 if state in {"completed", "success", "returned", "failed", "stopped", "denied", "discarded", "interrupted"}:
                     entry["finished_at"] = record.get("at")
                 if data["phase"] == "model" and state in {"failed", "stopped", "discarded"}:

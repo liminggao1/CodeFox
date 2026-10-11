@@ -183,6 +183,7 @@ class SessionStore:
             "command_result": {"command": str, "status": str, "data": dict},
             "turn_finished": {"outcome": dict, "summary": dict},
             "execution_status": {"operation_id": str, "phase": str, "name": str, "state": str},
+            "system_error": {"error": str},
         }[kind]
         if not all(isinstance(payload.get(key), expected) for key, expected in required.items()):
             raise SessionError(f"Invalid {kind} display payload")

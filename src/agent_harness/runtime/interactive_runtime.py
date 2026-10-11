@@ -174,6 +174,12 @@ class InteractiveRuntime:
     def _complete_event(self, context, kind, **payload):
         """Save a terminal fact before exposing completion to the adapter."""
         recorded = self.session.session_id is not None and "sessions" not in payload.get("data", {})
+        if kind == "turn_finished":
+            outcome = payload.get("outcome", {})
+            if outcome.get("status") == "failed" and outcome.get("reason"):
+                # 错误卡是会话展示事实，不进入模型消息历史；在终态保存前发布，
+                # 因而既能立即显示，也能随会话恢复。
+                self.channel.publish(context, "system_error", {"error": outcome["reason"]})
         if recorded:
             self.channel.publish(context, kind, payload, deliver=False)
         with interaction.execution_context(context):
@@ -210,7 +216,10 @@ class InteractiveRuntime:
                     with host.agent_lock, interaction.execution_context(self._context()):
                         self._checkpoint(poll=True)
         except Exception as exc:
-            self._context().publish("runtime_error", error=f"{type(exc).__name__}: {exc}")
+            context = self._context()
+            error = f"{type(exc).__name__}: {exc}"
+            context.publish("system_error", error=error)
+            context.publish("runtime_error", error=error)
             self.close()
         finally:
             self._shutdown()
@@ -257,7 +266,9 @@ class InteractiveRuntime:
                         {"type": "text", "text": note} for note in notes]})
             except OSError as exc:
                 collected = False
-                self._context().publish("runtime_error", error=f"Could not save background results: {exc}")
+                error = f"Could not save background results: {exc}"
+                self._context().publish("system_error", error=error)
+                self._context().publish("runtime_error", error=error)
             saved = self._checkpoint() and collected
             self._context().publish("runtime_closed", saved=saved)
         self.channel.close()

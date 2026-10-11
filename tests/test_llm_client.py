@@ -161,7 +161,8 @@ def test_lead_protocol_failure_executes_no_tools_or_stop_and_restores_cron(host_
     assert "Stop" not in stops
     assert scheduler._cron_queue == [job]
     assert not (core.WORKDIR / "bad.txt").exists()
-    assert "ProtocolResponseError" in messages[-1]["content"][0]["text"]
+    assert not any(message.get("role") == "assistant" and "ProtocolResponseError" in str(message.get("content"))
+                   for message in messages)
     assert not any("tool_use" in str(msg) for msg in messages)
 
 

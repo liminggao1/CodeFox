@@ -89,6 +89,8 @@ class ProcessGroup(Vertical):
     """
 
     RUNNING_STATES = {"pending", "running", "working", "postprocessing"}
+    TERMINAL_STATES = {"completed", "success", "returned", "failed", "denied",
+                       "stopped", "discarded", "interrupted", "started"}
 
     def __init__(self, source):
         super().__init__()
@@ -105,10 +107,24 @@ class ProcessGroup(Vertical):
         # 定时刷新可能在 compose 完成前记录过操作，这里补一次标题渲染。
         self._render_head()
 
-    def update_operation(self, key, text, state, elapsed=None):
-        """Record one operation's full text and refresh the header line."""
-        self.operations[key] = (text, state, elapsed)
+    def update_operation(self, key, text, state, elapsed=None, *, started_at=None, finished_at=None):
+        """Record one operation and refresh the batch duration header."""
+        self.operations[key] = {"text": text, "state": state, "elapsed": elapsed,
+                                "started_at": started_at, "finished_at": finished_at}
         self._render_head()
+
+    def _elapsed(self):
+        values = list(self.operations.values())
+        starts = [record_time(value["started_at"]) for value in values]
+        starts = [value for value in starts if value is not None]
+        if not starts:
+            return ""
+        start = min(starts)
+        finished = all(value["state"] in self.TERMINAL_STATES for value in values)
+        ends = [record_time(value["finished_at"]) for value in values]
+        ends = [value for value in ends if value is not None]
+        end = max(ends) if finished and ends else datetime.now(timezone.utc)
+        return format_elapsed(max(0.0, (end - start).total_seconds()))
 
     def _render_head(self):
         # 挂载与 compose 之间存在窗口：容器已挂载但子控件尚未就绪时，
@@ -117,17 +133,17 @@ class ProcessGroup(Vertical):
         if not heads:
             return
         head = heads.first()
-        running = [value for value in self.operations.values() if value[1] in self.RUNNING_STATES]
-        if running and not self.expanded:
-            text, _state, elapsed = running[0]
-            line = f"运行中 {text}"
+        running = [value for value in self.operations.values() if value["state"] in self.RUNNING_STATES]
+        elapsed = self._elapsed()
+        if running:
+            line = "工具调用"
             if elapsed:
                 line += f" · 已耗时 {elapsed}"
-            if len(running) > 1:
-                line += f" · 还有 {len(running) - 1} 条进行中"
-            head.update(line)
         else:
-            head.update("已运行的命令")
+            line = "工具调用"
+            if elapsed:
+                line += f" · 耗时 {elapsed}"
+        head.update(line)
 
     def on_group_head_toggle(self, event):
         self.set_expanded(not self.expanded)
@@ -170,8 +186,10 @@ class OperationEntry(Vertical):
                        if data["phase"] == "model" else lifecycle_summary(data))
         else:
             arguments = entry["arguments"] or {}
-            # 工具行只写工具名与完整参数，不判断成功/失败；结果原样在下方透传。
-            summary = " · ".join(filter(None, ("已运行", entry["tool_name"],
+            status = {"completed": "成功", "success": "成功", "returned": "成功"}.get(
+                entry["state"], STATUS_LABELS.get(entry["state"], entry["state"]))
+            # 工具行同时展示工具名、执行状态和参数；结果原样在详情中透传。
+            summary = " · ".join(filter(None, (entry["tool_name"], status,
                                                arguments_text(arguments) if arguments else "")))
         # 进行中事件首次显示就带耗时；计时器随后只刷新这一行。
         self.query_one(".operation-summary", Static).update(
@@ -324,6 +342,7 @@ class ConversationRecord(Vertical):
     ConversationRecord.user-message Static { width: auto; max-width: 100%; }
     ConversationRecord.model-message { width: 82%; background: #191b1d; padding: 0 1; }
     ConversationRecord.event-record { width: 100%; background: #17191b; color: #999fa5; padding: 0 1; }
+    ConversationRecord.system-error { width: 100%; background: #321d1d; color: #ff9b9b; border-left: solid #ff6b6b; padding: 0 1; }
     ConversationRecord .record-source { height: 1; color: #80cbc4; }
     ConversationRecord Static { height: auto; }
     ConversationRecord Collapsible { height: auto; padding: 0; background: transparent; }
@@ -331,7 +350,9 @@ class ConversationRecord(Vertical):
 
     def __init__(self, record, tool_name=None):
         kind = record["type"]
-        classes = "user-message" if kind == "user_message" else "model-message" if kind == "assistant_message" else "event-record"
+        classes = ("user-message" if kind == "user_message" else
+                   "model-message" if kind == "assistant_message" else
+                   "system-error" if kind == "system_error" else "event-record")
         super().__init__(id="record-" + record["id"], classes=classes)
         self.record = record
         self.tool_name = tool_name
@@ -341,6 +362,9 @@ class ConversationRecord(Vertical):
         kind, source = record["type"], record["source"]
         if kind in {"user_message", "assistant_message"}:
             yield Markdown(data["text"]) if kind == "assistant_message" else Static(data["text"], markup=False)
+            return
+        if kind == "system_error":
+            yield Static(data["error"], markup=False)
             return
         yield Static(source, classes="record-source", markup=False)
         if kind == "tool_call":
@@ -380,8 +404,6 @@ class ConversationRecord(Vertical):
                 text += f" · {summary.get('elapsed_seconds', 0):.1f}s · 工具 {summary.get('tool_calls', 0)} · 审批 {summary.get('approvals', 0)}"
                 usage = summary.get("lead_usage", {})
                 text += f"\nLead 主模型 · 请求 {usage.get('model_calls', 0)} · 输入 {usage.get('input_tokens', 0)} · 输出 {usage.get('output_tokens', 0)}"
-            if outcome.get("reason"):
-                text += "\n" + outcome["reason"]
             yield Static(text, markup=False)
 
 

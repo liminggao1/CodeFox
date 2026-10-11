@@ -106,7 +106,8 @@ class ConversationView:
 
     async def show_error(self, text):
         self._errors.append(text)
-        await self.app.query_one("#chat", VerticalScroll).mount(Static(text, markup=False))
+        await self.app.query_one("#chat", VerticalScroll).mount(
+            Static(text, classes="system-error", markup=False))
 
     def disable_approval(self, request_id):
         for card in self.app.query(ApprovalCard):
@@ -125,7 +126,9 @@ class ConversationView:
             group = self._groups.get(key[:3]) if isinstance(key, tuple) else None
             if group is not None and group.is_mounted:
                 group.update_operation(key, operation_text(entry.entry), entry.entry["state"],
-                                       format_elapsed(entry.elapsed_seconds(now)))
+                                       format_elapsed(entry.elapsed_seconds(now)),
+                                       started_at=entry.entry["started_at"],
+                                       finished_at=entry.entry["finished_at"])
 
     async def _render_stream(self, entry):
         key = entry["key"]
@@ -140,6 +143,9 @@ class ConversationView:
         data, kind = record["payload"], record["type"]
         # 审批结果已由审批卡就地展示，不再单独占一行。
         if kind == "approval_decided":
+            return
+        # 模型生命周期由诊断日志和终态统计承担；对话区只展示模型正文。
+        if kind == "execution_status" and data.get("phase") == "model":
             return
         chat = self.app.query_one("#chat", VerticalScroll)
         index = next(i for i, item in enumerate(self.records) if item["id"] == record["id"])
@@ -172,7 +178,8 @@ class ConversationView:
             group = self._groups.get((record.get("turn_id"), record["source"], data.get("model_call_id")))
             if group is not None and group.is_mounted:
                 group.update_operation(key, operation_text(entry), entry["state"],
-                                       format_elapsed(widget.elapsed_seconds(datetime.now(timezone.utc))))
+                                       format_elapsed(widget.elapsed_seconds(datetime.now(timezone.utc))),
+                                       started_at=entry["started_at"], finished_at=entry["finished_at"])
         else:
             # 每条记录独占一行：用户消息靠右，模型回复和事件靠左。
             row = MessageRow(classes="user" if kind == "user_message" else "")
@@ -296,7 +303,7 @@ class ConversationView:
                 card.enable()
         # 临时显示只留当前会话内存，重建时与记录一起恢复，不进入语义投影。
         for text in self._errors:
-            await chat.mount(Static(text, markup=False))
+            await chat.mount(Static(text, classes="system-error", markup=False))
         for record in self._pending_inputs.values():
             await self._mount_pending(record)
         if self._activity_label is not None:

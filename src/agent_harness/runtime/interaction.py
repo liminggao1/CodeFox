@@ -25,7 +25,7 @@ DISPLAY_FACT_TYPES = frozenset({
     "user_message", "assistant_message", "tool_call", "tool_result",
     "todo_updated", "subagent_status", "background_status",
     "approval_requested", "approval_decided", "command_result", "turn_finished",
-    "execution_status",
+    "execution_status", "system_error",
 })
 
 @dataclass(frozen=True)

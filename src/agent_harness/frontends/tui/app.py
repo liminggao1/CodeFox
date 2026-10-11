@@ -513,11 +513,15 @@ class HarnessApp(App):
         elif kind == "session_saved":
             if not self.busy:
                 self._status("已保存")
-        elif kind in {"runtime_error", "session_save_error"}:
+        elif kind == "runtime_error":
+            self.conversation.log(data["error"])
+            self.notify(data["error"], severity="error")
+        elif kind == "session_save_error":
             await self.conversation.show_error(data["error"])
             self.notify(data["error"], severity="error")
         elif kind not in {"session_saved", "lead_usage", "user_message", "assistant_message", "tool_call",
-                          "tool_result", "todo_updated", "background_status", "approval_requested", "approval_decided", "execution_status"}:
+                          "tool_result", "todo_updated", "background_status", "approval_requested", "approval_decided",
+                          "execution_status", "system_error"}:
             self.conversation.log(f"[{event.source}] {kind}\n{json.dumps(data, ensure_ascii=False, indent=2)}")
 
     def on_unmount(self):

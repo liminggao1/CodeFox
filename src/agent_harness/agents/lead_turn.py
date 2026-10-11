@@ -149,10 +149,6 @@ class LeadTurn:
             scheduler.restore_cron_jobs(self._pending_cron)
         if status == "stopped":
             reason = "Stop requested"
-        elif status == "failed":
-            # 将错误写入历史，供外层向用户展示。
-            self.append({"role": "assistant", "content": [
-                {"type": "text", "text": f"[Error] {reason}"}]})
         # 释放已完成任务的 agent 分配记录。
         tasks.release_completed_assignment("agent")
         return interaction.TurnOutcome(status, reason)
