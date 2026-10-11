@@ -447,7 +447,7 @@ def test_resume_target_save_failure_stays_target_and_retries(runtime_factory, mo
         result, events = resume_command(runtime, target["id"])
         assert result.payload["status"] == "completed"
         assert result.payload["data"]["saved"] is False
-        assert "could not be saved" in result.payload["data"]["text"]
+        assert "上下文未能保存" in result.payload["data"]["text"]
         assert any(event.type == "session_save_error" for event in events)
         assert runtime.session.session_id == target["id"] and runtime.session.dirty
         assert runtime.session.history == target["messages"]
@@ -475,7 +475,7 @@ def test_resume_mailbox_error_delivers_target_state_and_command_end(runtime_fact
     runtime.session.store.save(target)
     result, events = resume_command(runtime, target["id"])
     assert result.payload["status"] == "failed"
-    assert "post-resume processing failed" in result.payload["data"]["error"]
+    assert "切换后的处理失败" in result.payload["data"]["error"]
     assert runtime.session.session_id == target["id"]
     assert core.WORKDIR == root and Path.cwd() == root
     changed = next(event for event in events if event.type == "session_changed")
@@ -960,7 +960,7 @@ def test_command_dispatch_returns_explicit_outcome(runtime_factory):
 
     goal_outcome = router.dispatch("/goal ship the feature")
     assert goal_outcome.command == "/goal"
-    assert goal_outcome.data["text"] == "Goal set: ship the feature"
+    assert goal_outcome.data["text"] == "已设置目标：ship the feature"
     # /goal <text> 之后仍要跑一个回合，followup 是明确返回值而不是隐藏字段。
     assert goal_outcome.followup == "ship the feature"
 

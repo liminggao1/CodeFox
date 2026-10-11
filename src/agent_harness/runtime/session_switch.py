@@ -49,13 +49,13 @@ class SessionSwitch:
             current_goal.evaluator, snapshot["goal"], current_goal.block_cap)
         root = Path(snapshot["workdir"]).resolve()
         if not root.is_dir():
-            raise SessionError(f"Session startup directory does not exist: {root}")
+            raise SessionError(f"会话启动目录不存在：{root}")
         if (scheduler.has_background_tasks() or subagent_runtime.list_subagents()
                 or subagent_runtime.has_pending_inbox()):
-            raise SessionError("Background work or results remain; finish them and retry /resume")
+            raise SessionError("仍有后台任务或结果未处理，请先完成再 /resume")
         with scheduler.cron_lock:
             if scheduler.cron_queue:
-                raise SessionError("Scheduled results remain; finish them and retry /resume")
+                raise SessionError("仍有计划任务结果未处理，请先完成再 /resume")
         assignment = tasks.validate_lead_context(target, snapshot, workdir=root)
         return snapshot, root, restored_goal, assignment
 
@@ -79,7 +79,7 @@ class SessionSwitch:
         """切换当前会话；成功返回结果字典，失败保持当前状态并抛出 SessionError。"""
         snapshot, root, restored_goal, assignment = self._prepare(target)
         if not self._checkpoint():
-            raise SessionError("Current session could not be saved; context was not switched")
+            raise SessionError("当前会话保存失败，未切换上下文")
         directory_changed = root != core.WORKDIR.resolve()
         # 不在持 cron 锁时等待线程退出；服务停稳后重新检查一次队列。
         if directory_changed:
@@ -87,7 +87,7 @@ class SessionSwitch:
         try:
             with scheduler.cron_lock:
                 if scheduler.cron_queue:
-                    raise SessionError("Scheduled results remain; finish them and retry /resume")
+                    raise SessionError("仍有计划任务结果未处理，请先完成再 /resume")
                 if directory_changed:
                     os.chdir(root)
                 self._activate(snapshot, root, restored_goal, assignment)
@@ -108,13 +108,13 @@ class SessionSwitch:
             except Exception as exc:
                 # 不重复消费同一批已损坏的后台输入。
                 self._pause_background()
-                raise SessionError(f"Resumed {target} at {root}; post-resume processing failed: {exc}") from exc
+                raise SessionError(f"已切换到会话 {target}（工作目录 {root}），但切换后的处理失败：{exc}") from exc
             finally:
                 self._context().publish("session_changed",
                                         records=self._session.display_records(historical=True))
-        text = f"Resumed {target} at {root}"
+        text = f"已切换到会话 {target}（工作目录 {root}）"
         if not saved:
-            text += "; context could not be saved and will be retried on the next interaction"
+            text += "；上下文未能保存，将在下次交互时重试"
         return {"text": text, "workdir": str(root), "saved": saved}
 
     def start_new(self):
@@ -122,12 +122,12 @@ class SessionSwitch:
         root = core.WORKDIR.resolve()
         if (scheduler.has_background_tasks() or subagent_runtime.list_subagents()
                 or subagent_runtime.has_pending_inbox()):
-            raise SessionError("Background work or results remain; finish them and retry /new")
+            raise SessionError("仍有后台任务或结果未处理，请先完成再 /new")
         with scheduler.cron_lock:
             if scheduler.cron_queue:
-                raise SessionError("Scheduled results remain; finish them and retry /new")
+                raise SessionError("仍有计划任务结果未处理，请先完成再 /new")
         if not self._checkpoint():
-            raise SessionError("Current session could not be saved; a new session was not created")
+            raise SessionError("当前会话保存失败，未开启新会话")
         current_goal = self._read_goal()
         fresh_goal = goal.GoalController(current_goal.evaluator, current_goal.block_cap)
         snapshot = self._store.create()
@@ -138,4 +138,4 @@ class SessionSwitch:
             self._checkpoint()
             self._context().publish("session_changed",
                                     records=self._session.display_records(historical=True))
-        return {"text": f"Started new session {snapshot['id']}", "workdir": str(root), "saved": True}
+        return {"text": f"已开启新会话 {snapshot['id']}", "workdir": str(root), "saved": True}

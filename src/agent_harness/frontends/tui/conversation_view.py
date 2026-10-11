@@ -108,6 +108,9 @@ class ConversationView:
         changes = self.projection.apply_record(record, session_id=session_id, generation=generation)
         if not changes:
             return
+        # 命令结果只弹窗提示，不占对话区行。
+        if record["type"] == "command_result":
+            return
         self.app.query_one(BrandBar).update_title(session_title(self.app.snapshot, self.records))
         chat = self.app.query_one("#chat", VerticalScroll)
         follow = chat.scroll_y >= chat.max_scroll_y - 1 and self.app.approval is None
@@ -164,6 +167,9 @@ class ConversationView:
         visible_ids = {r["id"] for r in visible}
         group_ids = {(r.get("turn_id"), r["source"], r["payload"].get("model_call_id")) for r in visible if r["payload"].get("model_call_id")}
         for record in records:
+            # 历史里的命令结果也不回放到对话区，只作为会话文件记录存在。
+            if record["type"] == "command_result":
+                continue
             group_key = (record.get("turn_id"), record["source"], record["payload"].get("model_call_id"))
             if record["id"] in visible_ids or group_key in group_ids or (record["type"] == "approval_requested" and
                     self.app.approval is not None and record["payload"]["request_id"] == self.app.approval.request_id):

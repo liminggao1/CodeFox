@@ -168,7 +168,7 @@ def test_restore_reinstalls_only_an_active_goal():
 def test_clear_aliases(alias):
     gc = controller()
     gc.set_goal("something")
-    assert "cleared" in gc.clear(alias)
+    assert "已清除目标" in gc.clear(alias)
     assert gc.active is None
 
 

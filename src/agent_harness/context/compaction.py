@@ -553,6 +553,25 @@ def _tail_start(messages):
     return start
 
 
+def manual_compact(messages: list, active_request: str, *, client=None,
+                   model=None) -> CompactionResult:
+    """用户主动触发整段历史压缩：归档并摘要，失败保留原历史。
+
+    Args:
+        messages: 当前会话历史，成功后就地替换内容。
+        active_request: 摘要后需要保留的当前请求。
+    Returns:
+        CompactionResult；摘要失败时 applied 为 False，reason 说明原因。
+    """
+    if not messages:
+        return CompactionResult(False)
+    options = {}
+    if client is not None:
+        options.update(client=client, model=model)
+    return _history_transaction(
+        messages, lambda candidate: compact_history(candidate, active_request, **options))
+
+
 def _reactive_history(messages: list, active_request: str, *, client=None,
                       model=None, strict_summary=False) -> list:
     """提示过长时归档历史，摘要旧消息并保留最近的消息尾部。
@@ -616,18 +635,6 @@ class ManualCompaction:
         self.pending = False
         self._result = None
         self._execution_context = None
-
-    def available_tools(self, tools: list) -> list:
-        """首次手动压缩请求被接受后，不再向模型提供 compact 工具。
-
-        Args:
-            tools: 本轮可提供给模型的工具描述列表。
-        Returns:
-            尚未接受请求时返回原列表；否则返回移除 compact 的列表。
-        """
-        if not self.accepted:
-            return tools
-        return [tool for tool in tools if tool["name"] != "compact"]
 
     def handle_tool_use(self, block) -> dict | None:
         """识别 compact 请求并返回对应的工具结果。

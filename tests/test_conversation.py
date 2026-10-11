@@ -1210,3 +1210,33 @@ def test_tui_state_panel_toggles_in_one_layout_and_keeps_input_visible():
             await pilot.pause()
             assert not panel.display
     asyncio.run(exercise())
+
+
+def test_tui_command_result_notifies_without_conversation_row():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import ConversationRecord
+
+    app = HarnessApp(DisplayRuntime())
+    notified = []
+    app.notify = lambda message, **kwargs: notified.append((str(message), kwargs))
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            app._status("正在处理请求")
+            await pilot.pause()
+            assert app.query(".activity")
+            await app._event(event("command_result", {
+                "command": "/delete", "status": "completed",
+                "data": {"text": "已删除会话 20261011-072015-6526e2ec"}}))
+            await pilot.pause()
+            # 命令结果只弹窗提示：对话区不留命令行，终态也不留活动状态行。
+            assert notified == [("已删除会话 20261011-072015-6526e2ec", {"markup": False})]
+            assert not app.query(ConversationRecord)
+            assert not app.query(".activity")
+            # 历史回放同样跳过命令结果行。
+            await app.conversation.display_record(record(9, "command_result", {
+                "command": "/delete", "status": "completed",
+                "data": {"text": "已删除会话 20261011-072015-6526e2ec"}}))
+            await pilot.pause()
+            assert not app.query(ConversationRecord)
+    asyncio.run(exercise())

@@ -266,8 +266,6 @@ def agent_loop(history: list, active_request: str, save_context=None, on_usage=N
             context = runtime_context.build_context(turn.history)
             # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
             tools, handlers = assemble_tool_pool()
-            # 手动压缩完成后不再向模型提供 compact 工具。
-            tools = manual_compaction.available_tools(tools)
             if interaction.stopped():
                 return turn.finish("stopped")
 

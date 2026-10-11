@@ -313,7 +313,7 @@ class GoalController:
         返回：清除确认或无目标提示；记录事件并重置连续阻止计数，不调用评估器。
         """
         if self.active is None:
-            return "No goal set"
+            return "未设置目标"
         condition = self.active.condition
         self._record(
             active=False,
@@ -323,7 +323,7 @@ class GoalController:
         )
         self.active = None
         self.consecutive_blocks = 0
-        return f"Goal cleared: {condition}"
+        return f"已清除目标：{condition}"
 
     def status(self, current_tokens: int = 0) -> str:
         """生成可展示的目标状态文本。
@@ -334,25 +334,25 @@ class GoalController:
         if self.active is None:
             if self.last_status and self.last_status.get("met"):
                 return (
-                    f"Goal achieved: {self.last_status['condition']}\n"
-                    f"Reason: {self.last_status.get('reason', '')}"
+                    f"目标已达成：{self.last_status['condition']}\n"
+                    f"原因：{self.last_status.get('reason', '')}"
                 )
             if self.last_status and self.last_status.get("failed"):
                 return (
-                    f"Goal failed: {self.last_status['condition']}\n"
-                    f"Reason: {self.last_status.get('reason', '')}"
+                    f"目标未达成：{self.last_status['condition']}\n"
+                    f"原因：{self.last_status.get('reason', '')}"
                 )
-            return "No goal set"
+            return "未设置目标"
         elapsed = max(0, int(time.time() - self.active.set_at))
         spent = max(0, current_tokens - self.active.tokens_at_start)
         lines = [
-            f"Goal active: {self.active.condition}",
-            f"Elapsed: {elapsed}s",
-            f"Evaluations: {self.active.iterations}",
-            f"Tokens: {spent}",
+            f"目标进行中：{self.active.condition}",
+            f"已耗时：{elapsed}s",
+            f"评估次数：{self.active.iterations}",
+            f"已用 Token：{spent}",
         ]
         if self.active.last_reason:
-            lines.append(f"Last reason: {self.active.last_reason}")
+            lines.append(f"上次原因：{self.active.last_reason}")
         return "\n".join(lines)
 
     async def evaluate_after_turn(

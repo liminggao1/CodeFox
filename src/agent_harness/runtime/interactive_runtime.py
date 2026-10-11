@@ -6,6 +6,7 @@ import threading
 
 from .. import core
 from .. import host
+from ..context import compaction
 from ..workspace import tasks
 from ..agents import subagent as subagent_runtime
 from ..tools import file_tools
@@ -50,7 +51,13 @@ class InteractiveRuntime:
         self.command_router = CommandRouter(
             store=self.session.store, session_id=lambda: self.session.session_id,
             read_goal=self._read_goal, record=self._record, close=self.close,
-            session_switch=self.session_switch, new_session=self.session_switch.start_new)
+            session_switch=self.session_switch, new_session=self.session_switch.start_new,
+            compact_history=self._compact_history,
+            active_request=lambda: self.session.active_request)
+
+    def _compact_history(self, active_request):
+        """用户主动压缩当前会话历史；成功后由终态结算统一保存。"""
+        return compaction.manual_compact(self.session.history, active_request)
 
     def _dispatch_command(self, text):
         """CommandRouter 晚绑定回调：它依赖 SessionSwitch，直接注入会形成构造环。"""

@@ -309,7 +309,7 @@ def test_manual_compact_runs_once_per_user_turn(host_factory, monkeypatch) -> No
 
     assert len(list(core.transcript_dir().glob("transcript_*.jsonl"))) == 2
     assert ["compact" in names for names in offered_tools] == [
-        True, False, False, True, False,
+        True, True, True, True, True,
     ]
     assert responses == []
 
@@ -325,8 +325,6 @@ def test_manual_compact_handles_duplicate_calls_in_one_batch(
 
     monkeypatch.setattr(compaction, "compact_history", compact_history)
     manual = compaction.ManualCompaction()
-    tools = [{"name": "compact"}, {"name": "bash"}]
-    assert manual.available_tools(tools) == tools
     assert manual.handle_tool_use(SimpleNamespace(name="bash", id="other")) is None
 
     first = manual.handle_tool_use(SimpleNamespace(name="compact", id="first"))
@@ -335,7 +333,6 @@ def test_manual_compact_handles_duplicate_calls_in_one_batch(
                      "content": "[Compaction requested. This completed turn will be summarized.]"}
     assert duplicate == {"type": "tool_result", "tool_use_id": "second",
                          "content": "[Compaction already requested for this user turn.]"}
-    assert manual.available_tools(tools) == [{"name": "bash"}]
 
     messages = [{"role": "user", "content": [first, duplicate]}]
     manual.apply_after_results(messages, "ask")
@@ -437,7 +434,7 @@ def test_manual_failure_preserves_other_results_and_never_reruns_tools(host_fact
     assert results[1]["is_error"] is True
     assert (core.WORKDIR / "once.txt").read_text() == "written"
     assert len(summaries) == 1
-    assert all(tool["name"] != "compact" for tool in calls[1]["tools"])
+    assert any(tool["name"] == "compact" for tool in calls[1]["tools"])
 
 
 def test_reactive_archive_failure_ends_with_cron_restored(host_factory, monkeypatch):

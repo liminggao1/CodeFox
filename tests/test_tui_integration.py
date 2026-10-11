@@ -374,11 +374,11 @@ def test_command_menu_navigation_fill_escape_and_editor_boundaries(runtime_facto
         async with app.run_test(size=(80, 25)) as pilot:
             editor = await command_draft(app, pilot, "/")
             panel = app.query_one(CommandCandidates)
-            assert panel.display and panel.names == ("/goal", "/new", "/resume", "/delete", "/quit")
+            assert panel.display and panel.names == ("/goal", "/compact", "/new", "/resume", "/delete", "/quit")
             assert panel.highlighted == 0 and app.focused is editor
             await pilot.press("up")
-            assert panel.highlighted == 4 and app.focused is editor
-            await pilot.press("down", "down", "down", "tab")
+            assert panel.highlighted == 5 and app.focused is editor
+            await pilot.press("down", "down", "down", "down", "tab")
             assert editor.text == "/resume" and not app.busy
             assert panel.names == ("/resume",) and panel.highlighted == 0
             await pilot.press("escape")
@@ -502,7 +502,7 @@ def test_command_menu_mouse_small_layout_and_modal_focus(runtime_factory, monkey
             assert panel.region.bottom <= editor.region.y
             assert editor.region.bottom <= size[1] and app.focused is editor
             await pilot.press("up")
-            assert panel.highlighted == 4
+            assert panel.highlighted == 5
             await pilot.press("down")
             assert panel.highlighted == 0
             assert await pilot.click(panel, offset=(1, 0))

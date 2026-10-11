@@ -20,6 +20,9 @@ from ..presentation import (PERMISSION_DEFAULT, PERMISSION_WAITING, message_coun
                             permission_summary, session_title)
 from .conversation_view import ConversationView
 
+# 只有进行中的状态才占用对话区一行；终态一律清掉，避免残留。
+ACTIVE_STATUSES = frozenset({"正在处理请求", "正在关闭"})
+
 
 class HarnessApp(App):
     TITLE = "Agent Harness"
@@ -302,15 +305,25 @@ class HarnessApp(App):
             self._refresh_commands()
 
     def _status(self, label="就绪"):
+        """底部状态行始终更新；对话区的活动行只在执行期间存在。"""
         self._notice = None if label == "就绪" else label
         self._input_status()
+        if label not in ACTIVE_STATUSES:
+            self._clear_activity()
+            return
         if self._activity is None or self._activity.parent is None:
-            if label == "就绪":
-                return
             self._activity = Static(label, classes="activity", markup=False)
             self.query_one("#chat", VerticalScroll).mount(self._activity)
         else:
             self._activity.update(label)
+
+    def _clear_activity(self):
+        """终态不留对话区行；结果和状态由记录行或底部状态行承担。"""
+        if self._activity is None:
+            return
+        if self._activity.parent is not None:
+            self._activity.remove()
+        self._activity = None
 
     def _input_status(self):
         """Input-area status line: runtime state first, then the last notice."""
@@ -351,7 +364,7 @@ class HarnessApp(App):
                  "payload": {"text": text.strip()}}), classes="user")
             self.conversation.pending_inputs[result.submission_id] = pending
             self.query_one("#chat", VerticalScroll).mount(pending)
-        self._activity = None
+        self._clear_activity()
         self._diagnostic_detail = None
         self._controls()
         self._status("正在处理请求")
@@ -528,14 +541,14 @@ class HarnessApp(App):
                 self._controls()
                 self._status("正在关闭" if self.closing else "就绪")
             result = data["data"]
-            # 命令错误只弹窗提示，不再占用状态行；错误正文仍由展示记录留在对话区。
+            # 命令结果一律弹窗提示：对话区不留命令行，避免开发者视角的噪音。
             if data["status"] == "failed":
                 self.notify(result.get("error") or "命令执行失败", severity="error", markup=False)
             elif "sessions" in result and not self.closing:
                 self.push_screen(SessionScreen(result["sessions"], self.snapshot.get("session_id")),
                                  lambda command: self._submit(command) if command else None)
-            elif not data.get("recorded") and result.get("text"):
-                await self.query_one("#chat", VerticalScroll).mount(Static(result["text"], markup=False))
+            elif result.get("text") and not self.closing:
+                self.notify(str(result["text"]), markup=False)
         elif kind == "runtime_closed":
             self.runtime_closed = True
             self.exit(0 if data["saved"] else 1)
