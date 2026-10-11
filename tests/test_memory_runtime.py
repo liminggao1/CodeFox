@@ -82,6 +82,42 @@ def test_memory_recall_survives_model_failure(tmp_path, monkeypatch) -> None:
     assert memory_runtime.read_memory_file(path.name) == recalled[0]["content"]
 
 
+def test_remember_after_turn_reports_memory_operations_when_enabled(monkeypatch) -> None:
+    """Enabled memory publishes the 记忆检查/记忆整理 operations to the frontend."""
+    from agent_harness import host
+    from agent_harness.runtime.interaction import (
+        ExecutionContext, InteractionChannel, execution_context)
+
+    monkeypatch.setattr(memory_runtime.core, "MEMORY_ENABLED", True)
+    monkeypatch.setattr(memory_runtime, "extract_memories", lambda messages: 0)
+    channel = InteractionChannel()
+    context = ExecutionContext(channel, "session", 1, "turn", origin="frontend")
+    with execution_context(context):
+        host.remember_after_turn([{"role": "user", "content": "hi"}])
+    phases = [event.payload.get("phase") for event in channel.drain_facts()
+              if event.type == "execution_status"]
+    assert phases == ["memory", "memory"]
+
+
+def test_remember_after_turn_skips_memory_operations_when_disabled(monkeypatch) -> None:
+    """Disabled memory must not publish 记忆检查/记忆整理 rows to the frontend."""
+    from agent_harness import host
+    from agent_harness.runtime.interaction import (
+        ExecutionContext, InteractionChannel, execution_context)
+
+    monkeypatch.setattr(memory_runtime.core, "MEMORY_ENABLED", False)
+    calls = []
+    monkeypatch.setattr(memory_runtime, "extract_memories",
+                        lambda messages: calls.append("extract") or 0)
+    channel = InteractionChannel()
+    context = ExecutionContext(channel, "session", 1, "turn", origin="frontend")
+    with execution_context(context):
+        host.remember_after_turn([{"role": "user", "content": "hi"}])
+    assert calls == []
+    assert not [event for event in channel.drain_facts()
+                if event.type == "execution_status" and event.payload.get("phase") == "memory"]
+
+
 def test_memory_disabled_skips_recall_extraction_and_consolidation(tmp_path, monkeypatch) -> None:
     """The MVP default does not read or make model calls for optional memory."""
     monkeypatch.setattr(memory_runtime.core, "WORKDIR", tmp_path)

@@ -738,7 +738,7 @@ def test_cli_record_replay_details_status_and_dedup():
     adapter.render(event("assistant_message", {"text": "raw duplicate"}))
     text = "\n".join(output)
     assert len(output) == len(records)
-    assert "read_file · 已返回结果" in text and "Error is normal content" in text and "x" * 500 not in text
+    assert "[lead] read_file" in text and "Error is normal content" in text and "x" * 500 not in text
     assert "文件.txt" in text and "上次中断，未继续执行" in text
     assert "raw duplicate" not in text
     assert "1.5s" in text and "请求 2" in text
@@ -913,6 +913,63 @@ def test_tui_inline_approval_only_enables_delivered_request(monkeypatch):
             assert all(button.disabled for button in card.query(Button))
             assert app.approval is None
     asyncio.run(exercise())
+def test_approval_decision_does_not_add_a_separate_row():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import ApprovalCard, ConversationRecord
+    from textual.widgets import Static
+
+    app = HarnessApp(DisplayRuntime())
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            await app.conversation.display_record(record(1, "approval_requested", {
+                "request_id": "req", "tool_name": "bash", "arguments": {"command": "pwd"}}))
+            await pilot.pause()
+            card = app.query_one(ApprovalCard)
+            assert len(app.query(ConversationRecord)) == 1
+            await app.conversation.display_record(record(2, "approval_decided", {
+                "request_id": "req", "tool_name": "bash", "decision": "approve"}))
+            await pilot.pause()
+            # 审批结果就地更新审批卡，不再单独占一行“bash · 已批准”。
+            assert len(app.query(ConversationRecord)) == 1
+            state = card.query_one(".approval-state", Static)
+            marked = [widget for widget in app.query(Static) if "已批准" in str(widget.content)]
+            assert marked == [state]
+    asyncio.run(exercise())
+
+
+def test_empty_operation_details_are_hidden():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import OperationEntry
+    from textual.widgets import Collapsible, Static
+
+    app = HarnessApp(DisplayRuntime())
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            # Hook、模型、记忆等状态行没有参数也没有结果，不显示空详情块。
+            await app.conversation.display_record(record(1, "execution_status", {
+                "operation_id": "hook", "phase": "hook", "name": "user_prompt_hook",
+                "event": "UserPromptSubmit", "state": "completed", "elapsed_seconds": 0.0}))
+            await app.conversation.display_record(record(2, "execution_status", {
+                "operation_id": "mem", "phase": "memory", "name": "记忆检查",
+                "state": "completed", "elapsed_seconds": 0.0}))
+            # 有参数的工具调用仍保留可展开的详情。
+            await app.conversation.display_record(record(3, "tool_call", {
+                "id": "tool", "name": "read_file", "input": {"path": "说明.md"}, "model_call_id": "c1"}))
+            await pilot.pause()
+            entries = list(app.query(OperationEntry))
+            assert len(entries) == 3
+            by_name = {str(entry.query_one(".operation-summary", Static).content): entry for entry in entries}
+            hook = next(entry for text, entry in by_name.items() if "user_prompt_hook" in text)
+            memory = next(entry for text, entry in by_name.items() if "记忆检查" in text)
+            tool = next(entry for text, entry in by_name.items() if "read_file" in text)
+            assert not hook.query_one(Collapsible).display
+            assert not memory.query_one(Collapsible).display
+            assert tool.query_one(Collapsible).display
+    asyncio.run(exercise())
+
+
 def test_tool_summary_is_visible_before_expanding_details():
     from agent_harness.frontends.tui.app import HarnessApp
     from textual.widgets import Collapsible

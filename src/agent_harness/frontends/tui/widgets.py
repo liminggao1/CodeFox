@@ -161,19 +161,33 @@ class OperationEntry(Vertical):
         record = entry["record"]
         data = dict(record["payload"], state=entry["state"])
         if record["type"] == "execution_status" and data["phase"] != "tool":
-            summary = lifecycle_summary(data)
+            # 模型行只保留状态与耗时，省掉“模型 · 请求模型”前缀。
+            summary = (STATUS_LABELS.get(data["state"], data["state"])
+                       if data["phase"] == "model" else lifecycle_summary(data))
         else:
             arguments = entry["arguments"] or {}
-            detail = arguments_text(arguments) if arguments else short_text(entry["output"]) if entry["output"] else ""
-            summary = " · ".join(filter(None, ("已运行", entry["tool_name"], detail,
-                                               STATUS_LABELS.get(entry["state"], entry["state"]))))
+            # 工具行只写工具名与完整参数，不判断成功/失败；结果原样在下方透传。
+            summary = " · ".join(filter(None, ("已运行", entry["tool_name"],
+                                               arguments_text(arguments) if arguments else "")))
         # 进行中事件首次显示就带耗时；计时器随后只刷新这一行。
         self.query_one(".operation-summary", Static).update(
             self._summary_text(summary, datetime.now(timezone.utc)))
         preview = self.query_one(".operation-preview", Static)
         preview.update(short_text(entry["output"]) if entry["output"] else "")
         preview.display = bool(entry["output"])
-        self.query_one(".operation-detail", Static).update(full_text(entry["arguments"]) + "\n" + entry["output"])
+        # 没有参数也没有结果时不展示空详情块（Hook、模型、记忆等状态事件都属此类）。
+        detail_text = self._detail_text(entry)
+        self.query_one(".operation-detail", Static).update(detail_text)
+        self.query_one(Collapsible).display = bool(detail_text.strip())
+
+    def _detail_text(self, entry):
+        """完整参数与结果文本；两者都为空时返回空串，由调用方隐藏详情块。"""
+        parts = []
+        if entry["arguments"]:
+            parts.append(full_text(entry["arguments"]))
+        if entry["output"]:
+            parts.append(entry["output"])
+        return "\n".join(parts)
 
     def _summary_text(self, summary, now=None):
         elapsed = self.elapsed_seconds(now)
@@ -326,19 +340,16 @@ class ConversationRecord(Vertical):
             return
         yield Static(source, classes="record-source", markup=False)
         if kind == "tool_call":
-            yield Static(f"工具 · {data['name']} · {arguments_summary(data.get('input', {}))} · 待执行", markup=False)
+            yield Static(f"工具 · {data['name']} · {arguments_summary(data.get('input', {}))}", markup=False)
             yield Collapsible(DetailScroll(Static(full_text(data.get("input", {})), markup=False)),
                               title="参数详情", collapsed=True)
             if data.get("result_missing"):
                 yield Static("结果未记录，请核对当前状态", markup=False)
         elif kind == "tool_result":
-            labels = {"returned": "已返回结果", "success": "成功", "failed": "失败", "denied": "已拒绝",
-                      "stopped": "已停止", "started": "后台已启动"}
-            status = labels.get(data.get("status"), "已返回结果")
             content = data.get("content", "")
             if not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False, indent=2)
-            yield Static(f"{self.tool_name or '工具'} · {status}\n{short_text(content)}", markup=False)
+            yield Static(f"{self.tool_name or '工具'}\n{short_text(content)}", markup=False)
             yield Collapsible(DetailScroll(Static(content, markup=False)), title="完整结果", collapsed=True)
         elif kind == "execution_status":
             yield Static(lifecycle_summary(data), markup=False)
@@ -346,9 +357,6 @@ class ConversationRecord(Vertical):
                 yield Static(short_text(data["reason"]), markup=False)
         elif kind == "approval_requested":
             yield ApprovalCard(data)
-        elif kind == "approval_decided":
-            labels = {"approve": "已批准", "deny": "已拒绝", "closed": "已关闭"}
-            yield Static(f"{data.get('tool_name', '工具')} · {labels.get(data['decision'], data['decision'])}", markup=False)
         elif kind == "todo_updated":
             text = "\n".join(todo_lines(data.get("todos", []))) or "无待办"
             yield Static("TODO\n" + text, markup=False)

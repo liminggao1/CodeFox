@@ -52,8 +52,11 @@ class ConversationView:
         widget.render_entry(entry)
 
     async def _mount_record(self, record, entry):
-        chat = self.app.query_one("#chat", VerticalScroll)
         data, kind = record["payload"], record["type"]
+        # 审批结果已由审批卡就地展示，不再单独占一行。
+        if kind == "approval_decided":
+            return
+        chat = self.app.query_one("#chat", VerticalScroll)
         index = next(i for i, item in enumerate(self.records) if item["id"] == record["id"])
         if kind == "assistant_message" and data.get("model_call_id"):
             stream = next((item for item in self.projection.entries if item["kind"] == "stream" and

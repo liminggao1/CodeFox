@@ -11,7 +11,7 @@ from .. import core
 from ..workflows import workflow_runtime, workflow_demo
 from ..runtime.interactive_runtime import InteractiveRuntime
 from .conversation import ConversationProjection
-from .presentation import STATUS_LABELS, arguments_summary, lifecycle_summary, short_text
+from .presentation import arguments_summary, lifecycle_summary, short_text
 
 
 class CLIAdapter:
@@ -49,15 +49,14 @@ class CLIAdapter:
         if kind in {"user_message", "assistant_message"}:
             self.write(f"[{ '你' if kind == 'user_message' else source }] {data['text']}")
         elif kind == "tool_call":
-            self.write(f"[{source}] 工具 · {data['name']} · {arguments_summary(data.get('input', {}))} · 待执行")
+            self.write(f"[{source}] 工具 · {data['name']} · {arguments_summary(data.get('input', {}))}")
             if data.get("result_missing"):
                 self.write("结果未记录，请核对当前状态")
         elif kind == "tool_result":
-            status = STATUS_LABELS.get(data.get("status"), "已返回结果")
             content = data.get("content", "")
             if not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False, indent=2)
-            self.write(f"[{source}] {entry['tool_name']} · {status}\n{short_text(content)}")
+            self.write(f"[{source}] {entry['tool_name']}\n{short_text(content)}")
         elif kind == "execution_status":
             self.write(f"[{source}] {lifecycle_summary(data)}" + ("\n" + short_text(data["reason"]) if data.get("reason") else ""))
         elif kind == "todo_updated":

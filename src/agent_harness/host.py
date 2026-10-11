@@ -105,7 +105,8 @@ def remember_after_turn(messages: list) -> None:
     Returns:
         ``None``。
     """
-    if interaction.stopped():
+    # 未开启长期记忆时不产生任何记忆操作事件，界面不出现“记忆检查/记忆整理”行。
+    if not memory_runtime.memory_enabled() or interaction.stopped():
         return
     with interaction.observe_operation("memory", "记忆检查"):
         extracted = memory_runtime.extract_memories(messages)
