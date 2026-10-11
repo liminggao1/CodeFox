@@ -399,10 +399,12 @@ class SessionScreen(ModalScreen[str | None]):
         border: solid $primary; padding: 1 2; background: $surface; }
     SessionScreen ListView { height: 1fr; margin: 1 0; }
     SessionScreen ListItem { padding: 1; height: auto; }
-    SessionScreen Horizontal { height: 3; align-horizontal: left; }
+    SessionScreen Horizontal { height: 1; align-horizontal: left; }
     SessionScreen #sessions-head { height: 1; align-horizontal: right; }
     SessionScreen #sessions-head Label { width: 1fr; color: #80cbc4; text-style: bold; }
-    SessionScreen Button { margin-left: 1; }
+    SessionScreen .session-note { height: 1; color: #999fa5; }
+    SessionScreen #sessions-head Button, SessionScreen #sessions-actions Button {
+        height: 1; min-height: 1; margin-left: 1; padding: 0 1; }
     """
 
     def __init__(self, entries, active_id=None):
@@ -414,15 +416,15 @@ class SessionScreen(ModalScreen[str | None]):
         with Vertical():
             with Horizontal(id="sessions-head"):
                 yield Label("会话历史")
-                yield Button("返回", id="cancel")
-            yield Static("" if self.entries else "暂无保存的会话", markup=False)
+                yield Button("返回", id="cancel", compact=True)
+            yield Static(self._note(), classes="session-note", markup=False)
             with ListView(id="sessions"):
                 for entry in self.entries:
                     yield ListItem(Label(self._label(entry), markup=False))
-            with Horizontal():
-                yield Button("恢复所选", variant="primary", id="resume", disabled=not self.entries)
-                yield Button("删除所选", variant="error", id="delete", disabled=not self.entries)
-                yield Button("刷新", id="refresh")
+            with Horizontal(id="sessions-actions"):
+                yield Button("恢复所选", variant="primary", id="resume", compact=True, disabled=not self.entries)
+                yield Button("删除所选", variant="error", id="delete", compact=True, disabled=not self.entries)
+                yield Button("刷新", id="refresh", compact=True)
 
     def _label(self, entry):
         """列表行文字：当前会话标注占用，读不出来的文件标注无法读取。"""
@@ -432,6 +434,13 @@ class SessionScreen(ModalScreen[str | None]):
         if entry.get("invalid"):
             return f"{entry['id']}（无法读取）\n{entry['summary']}"
         return f"{entry['id']}\n{entry['updated_at']} · {entry['message_count']} 条消息\n{entry['summary']}"
+
+    def _note(self):
+        """结果行只写用户能用的事实，不显示原始解析错误。"""
+        if not self.entries:
+            return "暂无保存的会话"
+        broken = sum(1 for entry in self.entries if entry.get("invalid"))
+        return f"{broken} 个会话文件无法读取，选中后可直接删除" if broken else ""
 
     def _selected(self):
         """当前高亮的会话条目；没有选中返回 None。"""

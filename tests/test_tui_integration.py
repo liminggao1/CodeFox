@@ -15,7 +15,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import Label, ListView, Markdown, Static, TextArea
+from textual.widgets import Button, Label, ListView, Markdown, Static, TextArea
 from textual.widgets.text_area import Selection
 from textual.containers import VerticalScroll
 from agent_harness.frontends.tui.app import HarnessApp
@@ -300,6 +300,9 @@ def test_session_screen_requires_explicit_resume_and_guards_active(runtime_facto
             screen = app.screen
             ids = [entry["id"] for entry in screen.entries]
             list_view = screen.query_one(ListView)
+            # 标题行的返回按钮是 1 行按钮，文字不会被裁掉。
+            assert screen.query_one("#cancel", Button).region.height == 1
+            assert str(screen.query_one(".session-note", Static).content) == ""
             # 点行只改变高亮，不触发恢复（ctrl+r 本身提交的 /resume 是列表命令）。
             listing = [text for text, _ in submissions]
             list_view.index = ids.index(other)
@@ -343,6 +346,7 @@ def test_invalid_session_file_is_listed_and_deletable(runtime_factory, monkeypat
             screen = app.screen
             ids = [entry["id"] for entry in screen.entries]
             assert broken in ids
+            assert "无法读取" in str(screen.query_one(".session-note", Static).content)
             list_view = screen.query_one(ListView)
             list_view.index = ids.index(broken)
             assert "无法读取" in str(list_view.highlighted_child.query_one(Label).content)
