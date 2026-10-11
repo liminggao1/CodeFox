@@ -11,6 +11,9 @@ STATUS_LABELS = {"returned": "已返回结果", "success": "成功", "failed": "
                  "discarded": "本次输出未采用", "interrupted": "上次中断，结束状态未记录"}
 
 
+TODO_LABELS = {"pending": "待办", "in_progress": "进行中", "completed": "完成"}
+
+
 PERMISSION_DEFAULT = "按工具策略"
 PERMISSION_WAITING = "等待审批"
 
@@ -20,11 +23,25 @@ def permission_summary(label):
     return f"权限：{label}"
 
 
-def model_status(snapshot=None, message_count=0, context_limit=0):
+def model_status(snapshot=None, count=0, context_limit=0):
     """Right footer summary: model, message count and static character budget."""
     snapshot = snapshot or {}
-    return (f"模型：{snapshot.get('model') or '未开始'} · 消息：{message_count}"
+    return (f"模型：{snapshot.get('model') or '未开始'} · 消息：{count}"
             f" · 字符预算：{context_limit}")
+
+
+def message_count(snapshot=None, records=()):
+    """One message count for the footer and the state panel."""
+    history = (snapshot or {}).get("history")
+    if history is not None:
+        return len(history)
+    return sum(1 for record in records if record.get("type") in {"user_message", "assistant_message"})
+
+
+def todo_lines(todos):
+    """Shared TODO rendering: localized status label plus content."""
+    return [f"[{TODO_LABELS.get(todo.get('status'), todo.get('status', ''))}] {todo.get('content', '')}"
+            for todo in todos]
 
 
 def full_text(value):
@@ -117,8 +134,7 @@ def format_session_state(snapshot=None, *, records=()):
     goal = snapshot.get("goal") or {}
     goal_text = goal.get("condition") or goal.get("text") if isinstance(goal, dict) else goal
     goal_text = str(goal_text or "无目标")
-    todos = snapshot.get("todos") or []
-    todo_lines = [f"{todo.get('status', '')} · {todo.get('content', '')}" for todo in todos]
+    todos = todo_lines(snapshot.get("todos") or [])
     subagents = snapshot.get("subagents") or []
     child_lines = [f"{child.get('name', '子 agent')} · {child.get('mode', '')} · {child.get('status', '')}"
                    for child in subagents]
@@ -126,9 +142,9 @@ def format_session_state(snapshot=None, *, records=()):
     lines = [
         f"会话  {snapshot.get('session_id') or '未开始'}",
         f"状态  {session_status_label(snapshot)}",
-        f"消息  {len(snapshot.get('history') or records)}",
+        f"消息  {message_count(snapshot, records)}",
         f"Goal  {goal_text}",
-        "TODO  " + ("\n      " + "\n      ".join(todo_lines) if todo_lines else "无"),
+        "TODO  " + ("\n      " + "\n      ".join(todos) if todos else "无"),
         f"工作目录  {snapshot.get('workdir') or '未提供'}",
         f"任务 ID  {snapshot.get('task_id') or '无'}",
         f"工作树  {snapshot.get('worktree') or '无'}",

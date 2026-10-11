@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.text import Text
@@ -13,7 +14,8 @@ from textual.message import Message
 from textual.widgets import Button, Collapsible, Label, ListItem, ListView, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 from ..presentation import (STATUS_LABELS, arguments_summary, arguments_text, format_elapsed,
-                            format_session_state, full_text, lifecycle_summary, record_time, short_text)
+                            format_session_state, full_text, lifecycle_summary, record_time, short_text,
+                            todo_lines)
 
 
 LOGO_PATH = Path(__file__).resolve().parents[4] / "assets" / "logo" / "1F98A.svg"
@@ -40,12 +42,18 @@ class GroupHead(Static):
         self.post_message(self.Toggle())
 
 
-class BrandBar(Horizontal):
-    """Compact CodeFox identity and navigation actions."""
+class BrandBar(Vertical):
+    """Compact CodeFox identity and navigation actions.
+
+    宽屏占 1 行：头像、会话标题和三个入口；窄屏第二行放会话标题和 ``[状态]`` 入口。
+    """
     DEFAULT_CSS = """
     BrandBar { height: 1; padding: 0 1; background: #101214; }
+    BrandBar #brand-row { height: 1; }
+    BrandBar #brand-title-row { height: 1; display: none; }
     BrandBar .brand { width: 12; color: #80cbc4; text-style: bold; }
     BrandBar .session-title { width: 1fr; color: #e1e3e5; }
+    BrandBar #brand-state-toggle { width: auto; min-width: 6; height: 1; display: none; }
     BrandBar #top-actions { width: auto; height: 1; align-horizontal: right; }
     BrandBar #top-actions Button { min-width: 6; height: 1; min-height: 1; border: none;
         margin-left: 1; padding: 0 1; }
@@ -55,15 +63,20 @@ class BrandBar(Horizontal):
     def compose(self) -> ComposeResult:
         # Logo 用终端字符表现；SVG 缺失时退回可稳定显示的狐狸字符，不加装饰符号。
         logo = "🦊" if LOGO_PATH.is_file() else "狐"
-        yield Static(f"{logo} CodeFox", classes="brand", markup=False)
-        yield Static("未开始会话", classes="session-title", markup=False)
-        with Horizontal(id="top-actions"):
-            yield Button("历史", id="history")
-            yield Button("设置", id="settings")
-            yield Button("新会话", id="new-session", variant="primary")
+        with Horizontal(id="brand-row"):
+            yield Static(f"{logo} CodeFox", classes="brand", markup=False)
+            yield Static("未开始会话", classes="session-title", markup=False)
+            with Horizontal(id="top-actions"):
+                yield Button("历史", id="history")
+                yield Button("设置", id="settings")
+                yield Button("新会话", id="new-session", variant="primary")
+        with Horizontal(id="brand-title-row"):
+            yield Static("未开始会话", classes="session-title", markup=False)
+            yield StateToggle("[状态]", id="brand-state-toggle", markup=False)
 
     def update_title(self, title):
-        self.query_one(".session-title", Static).update(title)
+        for widget in self.query(".session-title"):
+            widget.update(title)
 
 
 class StateToggle(Static):
@@ -173,7 +186,9 @@ class OperationEntry(Vertical):
             detail = arguments_text(arguments) if arguments else short_text(entry["output"]) if entry["output"] else ""
             summary = " · ".join(filter(None, ("已运行", entry["tool_name"], detail,
                                                STATUS_LABELS.get(entry["state"], entry["state"]))))
-        self.query_one(".operation-summary", Static).update(self._summary_text(summary))
+        # 进行中事件首次显示就带耗时；计时器随后只刷新这一行。
+        self.query_one(".operation-summary", Static).update(
+            self._summary_text(summary, datetime.now(timezone.utc)))
         preview = self.query_one(".operation-preview", Static)
         preview.update(short_text(entry["output"]) if entry["output"] else "")
         preview.display = bool(entry["output"])
@@ -209,7 +224,6 @@ class StreamingText(Vertical):
     DEFAULT_CSS = "StreamingText { height: auto; } StreamingText Static { height: auto; color: #999fa5; }"
 
     def compose(self):
-        yield Static("Lead", markup=False)
         yield Collapsible(Markdown(""), title="本次输出未采用", collapsed=False)
 
     def on_mount(self):
@@ -296,11 +310,19 @@ class ApprovalCard(Vertical):
         self.post_message(self.Choice(self, event.button.name))
 
 
+class MessageRow(Horizontal):
+    """One conversation record's row; user messages hug the right edge."""
+    DEFAULT_CSS = """
+    MessageRow { height: auto; }
+    MessageRow.user { align-horizontal: right; }
+    """
+
+
 class ConversationRecord(Vertical):
     DEFAULT_CSS = """
     ConversationRecord { height: auto; margin-bottom: 1; }
-    ConversationRecord.user-message { width: 82%; margin-left: 10; background: #202326; padding: 0 1; }
-    ConversationRecord.model-message { width: 82%; margin-right: 10; background: #191b1d; padding: 0 1; }
+    ConversationRecord.user-message { width: 82%; background: #202326; padding: 0 1; }
+    ConversationRecord.model-message { width: 82%; background: #191b1d; padding: 0 1; }
     ConversationRecord.event-record { width: 100%; background: #17191b; color: #999fa5; padding: 0 1; }
     ConversationRecord .record-source { height: 1; color: #80cbc4; }
     ConversationRecord Static { height: auto; }
@@ -318,8 +340,6 @@ class ConversationRecord(Vertical):
         record, data = self.record, self.record["payload"]
         kind, source = record["type"], record["source"]
         if kind in {"user_message", "assistant_message"}:
-            yield Static("你" if kind == "user_message" else "CodeFox" if source == "lead" else source,
-                         classes="record-source", markup=False)
             yield Markdown(data["text"]) if kind == "assistant_message" else Static(data["text"], markup=False)
             return
         yield Static(source, classes="record-source", markup=False)
@@ -348,9 +368,7 @@ class ConversationRecord(Vertical):
             labels = {"approve": "已批准", "deny": "已拒绝", "closed": "已关闭"}
             yield Static(f"{data.get('tool_name', '工具')} · {labels.get(data['decision'], data['decision'])}", markup=False)
         elif kind == "todo_updated":
-            labels = {"pending": "待办", "in_progress": "进行中", "completed": "完成"}
-            text = "\n".join(f"{labels.get(item.get('status'), item.get('status', ''))} · {item.get('content', '')}"
-                             for item in data.get("todos", [])) or "无待办"
+            text = "\n".join(todo_lines(data.get("todos", []))) or "无待办"
             yield Static("TODO\n" + text, markup=False)
         elif kind in {"subagent_status", "background_status"}:
             name = data.get("name") or data.get("task_id", "后台任务")
@@ -381,39 +399,65 @@ class SessionScreen(ModalScreen[str | None]):
         border: solid $primary; padding: 1 2; background: $surface; }
     SessionScreen ListView { height: 1fr; margin: 1 0; }
     SessionScreen ListItem { padding: 1; height: auto; }
-    SessionScreen Horizontal { height: 3; align-horizontal: right; }
+    SessionScreen Horizontal { height: 3; align-horizontal: left; }
+    SessionScreen #sessions-head { height: 1; align-horizontal: right; }
+    SessionScreen #sessions-head Label { width: 1fr; color: #80cbc4; text-style: bold; }
     SessionScreen Button { margin-left: 1; }
     """
 
-    def __init__(self, entries, errors):
+    def __init__(self, entries, errors, active_id=None):
         super().__init__()
         self.entries = entries
         self.errors = errors
+        self.active_id = active_id
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("保存的会话")
+            with Horizontal(id="sessions-head"):
+                yield Label("会话历史")
+                yield Button("返回", id="cancel")
             yield Static("\n".join(self.errors) if self.errors else ("" if self.entries else "暂无保存的会话"), markup=False)
             with ListView(id="sessions"):
                 for entry in self.entries:
-                    yield ListItem(Label(f"{entry['id']}\n{entry['updated_at']} · {entry['message_count']} 条消息\n{entry['summary']}", markup=False))
+                    yield ListItem(Label(self._label(entry), markup=False))
             with Horizontal():
-                yield Button("返回", id="cancel")
-                yield Button("删除", variant="error", id="delete", disabled=not self.entries)
-                yield Button("恢复", variant="primary", id="resume", disabled=not self.entries)
+                yield Button("恢复所选", variant="primary", id="resume", disabled=not self.entries)
+                yield Button("删除所选", variant="error", id="delete", disabled=not self.entries)
+                yield Button("刷新", id="refresh")
+
+    def _label(self, entry):
+        """列表行文字：当前会话标注占用，读不出来的文件标注无法读取。"""
+        if entry["id"] == self.active_id:
+            return (f"{entry['id']}（当前会话 · 正在占用）\n"
+                    f"{entry['updated_at']} · {entry['message_count']} 条消息\n{entry['summary']}")
+        if entry.get("invalid"):
+            return f"{entry['id']}（无法读取）\n{entry['summary']}"
+        return f"{entry['id']}\n{entry['updated_at']} · {entry['message_count']} 条消息\n{entry['summary']}"
+
+    def _selected(self):
+        """当前高亮的会话条目；没有选中返回 None。"""
+        index = self.query_one(ListView).index
+        if index is None or not self.entries:
+            return None
+        return self.entries[index]
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "cancel":
             self.dismiss(None)
             return
-        index = self.query_one(ListView).index
-        if index is not None and self.entries:
-            self.dismiss(f"/{event.button.id} {self.entries[index]['id']}")
-
-    def on_list_view_selected(self, event: ListView.Selected):
-        index = self.query_one(ListView).index
-        if index is not None:
-            self.dismiss(f"/resume {self.entries[index]['id']}")
+        if event.button.id == "refresh":
+            self.dismiss("/resume")
+            return
+        entry = self._selected()
+        if entry is None:
+            return
+        if event.button.id == "delete" and entry["id"] == self.active_id:
+            self.app.notify("当前会话正在使用，不能删除", severity="warning")
+            return
+        if event.button.id == "resume" and entry.get("invalid"):
+            self.app.notify("该会话文件无法读取，不能恢复", severity="warning")
+            return
+        self.dismiss(f"/{event.button.id} {entry['id']}")
 
     def action_cancel(self):
         self.dismiss(None)

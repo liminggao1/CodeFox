@@ -7,7 +7,8 @@ from textual.widgets import Button, Collapsible
 
 from ..conversation import ConversationProjection
 from ..presentation import arguments_text, format_elapsed, session_title
-from .widgets import ApprovalCard, BrandBar, ConversationRecord, OperationEntry, ProcessGroup, StreamingText
+from .widgets import (ApprovalCard, BrandBar, ConversationRecord, MessageRow, OperationEntry, ProcessGroup,
+                      StreamingText)
 
 
 def operation_text(entry):
@@ -83,12 +84,14 @@ class ConversationView:
             group = self._groups.get((record.get("turn_id"), record["source"], data.get("model_call_id")))
             if group is not None and group.is_mounted:
                 group.update_operation(key, operation_text(entry), entry["state"],
-                                       format_elapsed(widget.elapsed_seconds()))
+                                       format_elapsed(widget.elapsed_seconds(datetime.now(timezone.utc))))
         else:
-            widget = ConversationRecord(record, entry["tool_name"])
-            widget.record_start_index = index
-            self._rows[record["id"]] = widget
-            await chat.mount(widget)
+            # 每条记录独占一行：用户消息靠右，模型回复和事件靠左。
+            row = MessageRow(classes="user" if kind == "user_message" else "")
+            row.record_start_index = index
+            self._rows[record["id"]] = row
+            await chat.mount(row)
+            await row.mount(ConversationRecord(record, entry["tool_name"]))
 
     async def text_delta(self, event):
         chat = self.app.query_one("#chat", VerticalScroll)
