@@ -226,6 +226,15 @@ def test_system_prompt_uses_refreshed_runtime_context(host_factory) -> None:
     assert "Active subagents: alice" in prompt
 
 
+def test_system_prompt_explains_dedicated_file_tool_preference(host_factory) -> None:
+    host_factory()
+    prompt = prompts.assemble_system_prompt({})
+
+    assert "prefer it so the change is easier to review" in prompt
+    assert "This is a preference, not a prohibition" in prompt
+    assert "use bash directly when the operation genuinely requires shell semantics" in prompt
+
+
 def test_mcp_permission_uses_host_policy(host_factory, approval_hook) -> None:
     host = host_factory()
     mcp_tools.connect_mcp("deploy")

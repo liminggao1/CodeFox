@@ -15,22 +15,31 @@ TASK_TOOL_NAMES = ("list_tasks", "claim_task", "complete_task")
 # -- Common schemas and the two existing model-facing surfaces --
 
 _SCHEMAS = [
-    {"name": "bash", "description": "Run a shell command.",
+    {"name": "bash", "description":
+     "Run a shell command. Use for system commands, tests, builds, git, pipelines, "
+     "and operations that require shell semantics. For ordinary file reads and "
+     "writes, prefer the dedicated file tools when they can express the operation; "
+     "this preference does not prohibit Bash when Bash is genuinely required.",
      "input_schema": {"type": "object",
                       "properties": {"command": {"type": "string"}},
                       "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
+    {"name": "read_file", "description":
+     "Read file contents. Prefer this over shell commands such as cat, head, or tail.",
      "input_schema": {"type": "object",
                       "properties": {"path": {"type": "string"},
                                      "limit": {"type": "integer"},
                                      "offset": {"type": "integer"}},
                       "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to a file.",
+    {"name": "write_file", "description":
+     "Create a file or replace its complete contents. Prefer this over shell "
+     "redirection, echo, or heredoc when the operation is a direct file write.",
      "input_schema": {"type": "object",
                       "properties": {"path": {"type": "string"},
                                      "content": {"type": "string"}},
                       "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in a file once.",
+    {"name": "edit_file", "description":
+     "Replace exact text in an existing file once. Prefer this for targeted edits "
+     "instead of sed or awk.",
      "input_schema": {"type": "object",
                       "properties": {"path": {"type": "string"},
                                      "old_text": {"type": "string"},
@@ -53,9 +62,9 @@ _SCHEMAS = [
 ]
 
 _CHILD_DESCRIPTIONS = {
-    "read_file": "Read file.",
-    "write_file": "Write file.",
-    "edit_file": "Replace text in a file.",
+    "read_file": "Read file; prefer this over cat, head, or tail.",
+    "write_file": "Create or completely replace a file; prefer this over shell redirection.",
+    "edit_file": "Replace text in an existing file; prefer this over sed or awk.",
     "glob": "Find files by glob pattern; ** matches recursively.",
     "list_tasks": "List all tasks on the board.",
     "complete_task": "Mark an in-progress task as completed.",

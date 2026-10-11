@@ -470,6 +470,7 @@ def spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
         system = (
             f"You are '{name}', a {role} coding subagent at {core.WORKDIR}. "
             f"Environment: {prompts.ENVIRONMENT_PROMPT}. Do not spawn agents. "
+            f"{prompts.TOOL_USAGE_PROMPT} "
             "Follow your current delegation. An [Assigned task] is already claimed. "
             "Before working on a new Task, explicitly call claim_task; never assume ownership. "
             "Each workspace tool uses the current assigned directory, or the startup directory "

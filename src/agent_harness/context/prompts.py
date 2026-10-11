@@ -20,6 +20,18 @@ ENVIRONMENT_PROMPT = (
     if os.name == "nt"
     else "Unix-like: the bash tool runs the system shell"
 )
+TOOL_USAGE_PROMPT = (
+    "Tool selection rules: use read_file to read files, edit_file to make targeted "
+    "changes to existing files, and write_file to create a new file or replace a "
+    "file completely. Reserve bash for system commands and terminal operations "
+    "that require shell execution, such as tests, builds, git, pipelines, or "
+    "operations that the dedicated tools cannot represent. When a dedicated tool "
+    "clearly matches the operation, prefer it so the change is easier to review. "
+    "This is a preference, not a prohibition: use bash directly when the operation "
+    "genuinely requires shell semantics, and do not force a shell operation through "
+    "a dedicated file tool. A failed dedicated tool does not by itself require a "
+    "retry if bash is the appropriate way to complete the requested operation."
+)
 PROMPT_SECTIONS = {
     "identity": f"You are a coding agent. Act, don't explain. Environment: {ENVIRONMENT_PROMPT}.",
     "tools": "Available tools: bash, read_file, write_file, edit_file, glob, "
@@ -31,6 +43,7 @@ PROMPT_SECTIONS = {
              "request_shutdown, request_plan, review_plan, "
              "create_worktree, remove_worktree, "
              "connect_mcp. MCP tools are prefixed mcp__{server}__{tool}.",
+    "tool_usage": TOOL_USAGE_PROMPT,
     "tasks": (
         "Create all task nodes first. Only after create_task returns "
         "runtime-generated IDs, use update_task with those exact IDs to add "
@@ -81,6 +94,7 @@ def assemble_system_prompt(context: dict) -> str:
     sections = [PROMPT_SECTIONS["identity"],
                 PROMPT_SECTIONS["tools"],
                 PROMPT_SECTIONS["tasks"],
+                PROMPT_SECTIONS["tool_usage"],
                 PROMPT_SECTIONS["subagent"],
                 f"Working directory: {core.WORKDIR}",
                 PROMPT_SECTIONS["memory"],
