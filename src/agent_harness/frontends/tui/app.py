@@ -5,24 +5,18 @@ from __future__ import annotations
 import json
 import re
 
-from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Collapsible, Static, TextArea
+from textual.widgets import Button, Static, TextArea
 
 from ... import core
 from ...runtime.interactive_runtime import InteractiveRuntime
 from ...runtime.local_commands import LOCAL_COMMANDS, find_command
-from .widgets import (ApprovalCard, BrandBar, CommandCandidates, ConversationRecord, DetailScroll,
-                      MessageRow, SessionScreen, SessionStatePanel)
+from .widgets import (ApprovalCard, BrandBar, CommandCandidates, SessionScreen, SessionStatePanel, SettingsScreen)
 from ..presentation import (PERMISSION_DEFAULT, PERMISSION_WAITING, message_count, model_status,
                             permission_summary, session_title)
 from .conversation_view import ConversationView
-
-# 只有进行中的状态才占用对话区一行；终态一律清掉，避免残留。
-ACTIVE_STATUSES = frozenset({"正在处理请求", "正在关闭"})
-
 
 class HarnessApp(App):
     TITLE = "Agent Harness"
@@ -88,10 +82,6 @@ class HarnessApp(App):
         self.conversation = ConversationView(self)
         self._consume_timer = None
         self._clock_timer = None
-        self._activity = None
-        self._diagnostics = []
-        self._diagnostic_block = None
-        self._diagnostic_detail = None
 
     @property
     def records(self):
@@ -139,11 +129,8 @@ class HarnessApp(App):
             return
         if event.key not in {"home", "end"}:
             return
-        chat = self.query_one("#chat", VerticalScroll)
-        if self.focused is not chat and not chat.has_focus:
-            return
-        chat.scroll_y = 0 if event.key == "home" else chat.max_scroll_y
-        event.stop()
+        if self.conversation.scroll_key(event.key):
+            event.stop()
 
     def _controls(self):
         button = self.query_one("#send", Button)
@@ -309,22 +296,7 @@ class HarnessApp(App):
         """底部状态行始终更新；对话区的活动行只在执行期间存在。"""
         self._notice = None if label == "就绪" else label
         self._input_status()
-        if label not in ACTIVE_STATUSES:
-            self._clear_activity()
-            return
-        if self._activity is None or self._activity.parent is None:
-            self._activity = Static(label, classes="activity", markup=False)
-            self.query_one("#chat", VerticalScroll).mount(self._activity)
-        else:
-            self._activity.update(label)
-
-    def _clear_activity(self):
-        """终态不留对话区行；结果和状态由记录行或底部状态行承担。"""
-        if self._activity is None:
-            return
-        if self._activity.parent is not None:
-            self._activity.remove()
-        self._activity = None
+        self.conversation.show_activity(label)
 
     def _input_status(self):
         """Input-area status line: runtime state first, then the last notice."""
@@ -360,12 +332,7 @@ class HarnessApp(App):
             return False
         self.busy = True
         if result.kind == "turn":
-            pending = MessageRow(ConversationRecord(
-                {"id": result.submission_id, "type": "user_message", "source": "lead",
-                 "payload": {"text": text.strip()}}), classes="user")
-            self.conversation.pending_inputs[result.submission_id] = pending
-            self.query_one("#chat", VerticalScroll).mount(pending)
-        self._clear_activity()
+            self.conversation.show_pending_input(result.submission_id, text)
         self._controls()
         self._status("正在处理请求")
         return True
@@ -417,7 +384,13 @@ class HarnessApp(App):
             self._controls()
         elif event.button.id == "new-session":
             self.action_new_session()
+        elif event.button.id == "settings":
+            self.push_screen(SettingsScreen(self.conversation.diagnostics_visible),
+                             lambda _: self._focus_input())
         self._focus_input()
+
+    def on_settings_screen_diagnostics_changed(self, event: SettingsScreen.DiagnosticsChanged):
+        self.conversation.set_diagnostics_visible(event.visible)
 
     def _focus_input(self):
         """顶部入口和状态切换不保留焦点，输入框始终可以继续编辑草稿。"""
@@ -426,9 +399,7 @@ class HarnessApp(App):
 
     def _dismiss_approval(self):
         if self.approval is not None:
-            for card in self.query(ApprovalCard):
-                if card.request_id == self.approval.request_id:
-                    card.disable()
+            self.conversation.disable_approval(self.approval.request_id)
             self.approval = None
         if self.is_running:
             self._set_permission(PERMISSION_DEFAULT)
@@ -438,37 +409,10 @@ class HarnessApp(App):
         if request is None or event.card.request_id != request.request_id:
             return
         if self.runtime.channel.respond(request.request_id, request.generation, event.decision):
-            event.card.finish(event.decision)
+            self.conversation.finish_approval(request.request_id, event.decision)
             self.approval = None
             self._set_permission(PERMISSION_DEFAULT)
             self.query_one("#input", TextArea).focus()
-
-    def _log(self, text):
-        text = Text.from_ansi(str(text)).plain
-        self._diagnostics.append(text)
-        self._diagnostics = self._diagnostics[-1000:]
-        self._render_diagnostics()
-
-    def _render_diagnostics(self, collapsed=None):
-        """诊断日志只有一块，挂在当前对话区；窗口重建后由视图再次调用。"""
-        content = "\n".join(self._diagnostics)[-8000:]
-        if not content:
-            return
-        chat = self.query_one("#chat", VerticalScroll)
-        if self._diagnostic_block is not None and self._diagnostic_block in chat.children:
-            self._diagnostic_detail.update(content)
-            return
-        self._diagnostic_detail = Static(content, markup=False)
-        self._diagnostic_block = Collapsible(
-            DetailScroll(self._diagnostic_detail), title="诊断日志",
-            collapsed=True if collapsed is None else collapsed, classes="diagnostic")
-        chat.mount(self._diagnostic_block)
-
-    def restore_diagnostics(self, collapsed=True):
-        """窗口重建后把诊断块重新挂到对话区末尾，展开状态由视图传入。"""
-        self._diagnostic_block = None
-        self._diagnostic_detail = None
-        self._render_diagnostics(collapsed)
 
     async def consume(self):
         if not self.is_running:
@@ -526,10 +470,6 @@ class HarnessApp(App):
             self.query_one(SessionStatePanel).update_snapshot(self.snapshot, self.records)
         elif kind == "session_changed":
             self._dismiss_approval()
-            self._activity = None
-            self._diagnostics.clear()
-            self._diagnostic_block = None
-            self._diagnostic_detail = None
             self._hidden_command_text = None
             self.query_one(CommandCandidates).show_commands(())
             await self.conversation.restore(data["records"], event.session_id, event.generation)
@@ -550,7 +490,7 @@ class HarnessApp(App):
             labels = {"completed": "完成", "failed": "失败", "stopped": "已停止", "truncated": "输出截断"}
             self._status("正在关闭" if self.closing else labels[outcome["status"]])
             if outcome["reason"]:
-                self._log(outcome["reason"])
+                self.conversation.log(outcome["reason"])
         elif kind == "command_result":
             if not data.get("turn_id"):
                 self.busy = False
@@ -569,16 +509,16 @@ class HarnessApp(App):
             self.runtime_closed = True
             self.exit(0 if data["saved"] else 1)
         elif kind == "log":
-            self._log(data["text"])
+            self.conversation.log(data["text"])
         elif kind == "session_saved":
             if not self.busy:
                 self._status("已保存")
         elif kind in {"runtime_error", "session_save_error"}:
-            await self.query_one("#chat", VerticalScroll).mount(Static(data["error"], markup=False))
+            await self.conversation.show_error(data["error"])
             self.notify(data["error"], severity="error")
         elif kind not in {"session_saved", "lead_usage", "user_message", "assistant_message", "tool_call",
                           "tool_result", "todo_updated", "background_status", "approval_requested", "approval_decided", "execution_status"}:
-            self._log(f"[{event.source}] {kind}\n{json.dumps(data, ensure_ascii=False, indent=2)}")
+            self.conversation.log(f"[{event.source}] {kind}\n{json.dumps(data, ensure_ascii=False, indent=2)}")
 
     def on_unmount(self):
         if self._consume_timer is not None:

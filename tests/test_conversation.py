@@ -813,9 +813,9 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
     async def exercise():
         async with app.run_test(size=(110, 30)) as pilot:
             assert app.query_one(BrandBar)
-            # 顶部只有三个固定按钮，第三个是会话状态面板入口。
+            # 顶部四个固定按钮，设置打开弹窗。
             assert [button.id for button in app.query_one(BrandBar).query(Button)] == [
-                "history", "state", "new-session"]
+                "history", "state", "new-session", "settings"]
             assert app.query_one("#conversation-top").region.y == 1
             assert not app.query_one(SessionStatePanel).display
             assert app.query_one("#send", Button).label == "发送"
@@ -1202,7 +1202,7 @@ def test_tui_state_panel_toggles_in_one_layout_and_keeps_input_visible():
             # 只有一套布局：品牌栏固定 1 行，没有窄屏专用入口。
             assert app.query_one(BrandBar).region.height == 1
             assert [button.id for button in app.query_one(BrandBar).query(Button)] == [
-                "history", "state", "new-session"]
+                "history", "state", "new-session", "settings"]
             assert not app.query_one(SessionStatePanel).display
             await pilot.click("#state")
             await pilot.pause()
@@ -1248,6 +1248,56 @@ def test_tui_command_result_notifies_without_conversation_row():
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("size", [(112, 34), (72, 24)])
+def test_tui_settings_dialog_toggles_diagnostics_and_returns_to_draft(size):
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import SettingsScreen
+    from textual.screen import ModalScreen
+    from textual.widgets import Switch, TextArea
+
+    app = HarnessApp(DisplayRuntime())
+
+    async def exercise():
+        async with app.run_test(size=size) as pilot:
+            main_screen = app.screen
+            editor = app.query_one("#input", TextArea)
+            editor.load_text("保留草稿")
+            await pilot.click("#settings")
+            await pilot.pause()
+            assert isinstance(app.screen, SettingsScreen) and isinstance(app.screen, ModalScreen)
+            dialog = app.screen.query_one("Vertical")
+            assert dialog.region.width < size[0] and dialog.region.height < size[1]
+            switch = app.screen.query_one("#diagnostics-toggle", Switch)
+            assert switch.value and app.conversation.diagnostics_visible
+            await pilot.click("#diagnostics-toggle")
+            await pilot.pause()
+            assert not app.conversation.diagnostics_visible
+            # 设置弹窗打开时运行时日志仍能更新，关闭后隐藏日志但保留草稿。
+            await app._event(event("log", {"text": "设置期间的日志"}))
+            await pilot.click("#settings-back")
+            await pilot.pause()
+            assert app.screen is main_screen
+            assert not app.query_one(".diagnostic").display
+            assert editor.text == "保留草稿" and app.focused is editor
+            await pilot.click("#settings")
+            await pilot.pause()
+            assert not app.screen.query_one("#diagnostics-toggle", Switch).value
+            await pilot.click("#diagnostics-toggle")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.screen is main_screen and app.query_one(".diagnostic").display
+            app.query_one(".diagnostic").collapsed = False
+            await pilot.pause()
+            screen = "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
+            assert "设置期间的日志" in screen
+            # 显示选择跨会话保留，日志内容仍在切换时清空。
+            await app._event(event("session_changed", {"records": []}))
+            assert app.conversation.diagnostics_visible and not app.query(".diagnostic")
+            assert editor.text == "保留草稿"
+    asyncio.run(exercise())
+
+
 def test_tui_diagnostics_keep_content_and_place_after_window_rebuild():
     from agent_harness.frontends.tui.app import HarnessApp
     from textual.widgets import Collapsible
@@ -1283,4 +1333,93 @@ def test_tui_diagnostics_keep_content_and_place_after_window_rebuild():
             await pilot.pause()
             assert len(diagnostics()) == 1
             assert "第三条日志" in screen()
+            # 关闭显示后继续收集；重建不能重新打开日志或丢失展开状态。
+            app.conversation.set_diagnostics_visible(False)
+            await app._event(event("log", {"text": "隐藏期间的日志"}))
+            await app.conversation.load_earlier()
+            await pilot.pause()
+            assert len(diagnostics()) == 1 and not diagnostics()[0].display
+            assert "隐藏期间的日志" not in screen()
+            app.conversation.set_diagnostics_visible(True)
+            await pilot.pause()
+            assert diagnostics()[0].display and not diagnostics()[0].collapsed
+            assert "第一条日志" in screen() and "隐藏期间的日志" in screen()
+    asyncio.run(exercise())
+
+
+def test_tui_rebuild_preserves_pending_input_activity_error_and_confirms_once():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import ConversationRecord, MessageRow
+    from textual.widgets import Collapsible, Static
+
+    class SubmitRuntime(DisplayRuntime):
+        def submit(self, text):
+            return SimpleNamespace(status="accepted", kind="turn", submission_id="sub-1", reason="")
+
+    app = HarnessApp(SubmitRuntime())
+    notified = []
+    app.notify = lambda message, **kwargs: notified.append(str(message))
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            assert app._submit("待确认的消息")
+            await app._event(event("runtime_error", {"error": "保存暂不可用"}))
+            await app._event(event("log", {"text": "当前会话日志"}))
+            await pilot.pause()
+            app.query_one(".diagnostic", Collapsible).collapsed = False
+            await app.conversation.load_earlier()
+            await pilot.pause()
+            row = app.query_one(MessageRow)
+            assert "user" in row.classes
+            assert row.query_one(ConversationRecord).record["payload"]["text"] == "待确认的消息"
+            assert str(app.query_one(".activity", Static).content) == "正在处理请求"
+            assert "保存暂不可用" in "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
+            assert not app.query_one(".diagnostic", Collapsible).collapsed
+            assert app.records == [] and notified == ["保存暂不可用"]
+
+            accepted = record(1, "user_message", {"text": "待确认的消息", "submission_id": "sub-1"})
+            await app.conversation.display_record(accepted)
+            await pilot.pause()
+            assert list(app.query(MessageRow)) == [row]
+            assert row.query_one(ConversationRecord).record == accepted
+            app._status("完成")
+            await app.conversation.load_earlier()
+            await pilot.pause()
+            assert len(app.query(MessageRow)) == 1 and not app.query(".activity")
+            assert app.records == [accepted]
+
+            # 切换会话会清空所有临时显示，旧日志和错误不会进入新会话。
+            assert app._submit("切换前待确认的消息")
+            await pilot.pause()
+            assert len(app.query(MessageRow)) == 2
+            await app._event(event("session_changed", {"records": []}))
+            await pilot.pause()
+            assert not app.query(MessageRow) and not app.query(".activity")
+            assert not app.query(".diagnostic")
+            assert not app.query_one("#chat").children
+    asyncio.run(exercise())
+
+
+def test_tui_rebuild_keeps_process_group_expanded():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import ProcessGroup
+    from textual.containers import VerticalScroll
+
+    app = HarnessApp(DisplayRuntime())
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            await app.conversation.display_record(record(1, "tool_call", {
+                "id": "tool", "name": "read_file", "input": {"path": "说明.md"}, "model_call_id": "model"}))
+            await pilot.pause()
+            await pilot.click("#group-head")
+            group = app.query_one(ProcessGroup)
+            assert group.expanded and group.query_one(VerticalScroll).display
+            await app.conversation.load_earlier()
+            await pilot.pause()
+            rebuilt = app.query_one(ProcessGroup)
+            assert rebuilt is not group
+            assert rebuilt.expanded and rebuilt.query_one(VerticalScroll).display
+            await pilot.click("#group-head")
+            assert not rebuilt.expanded and not rebuilt.query_one(VerticalScroll).display
     asyncio.run(exercise())

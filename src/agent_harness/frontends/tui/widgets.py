@@ -11,7 +11,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.message import Message
-from textual.widgets import Button, Collapsible, Label, ListItem, ListView, Markdown, OptionList, Static
+from textual.widgets import Button, Collapsible, Label, ListItem, ListView, Markdown, OptionList, Static, Switch
 from textual.widgets.option_list import Option
 from ..presentation import (STATUS_LABELS, arguments_summary, arguments_text, format_elapsed,
                             format_session_state, full_text, lifecycle_summary, record_time, short_text,
@@ -45,7 +45,7 @@ class GroupHead(Static):
 class BrandBar(Vertical):
     """Compact CodeFox identity and navigation actions.
 
-    固定 1 行：头像、会话标题和三个入口；``会话状态`` 切换右侧只读面板显隐。
+    固定 1 行：头像、会话标题和四个入口；``会话状态`` 切换右侧只读面板显隐。
     """
     DEFAULT_CSS = """
     BrandBar { height: 1; padding: 0 1; background: #101214; }
@@ -68,6 +68,7 @@ class BrandBar(Vertical):
                 yield Button("历史", id="history")
                 yield Button("会话状态", id="state")
                 yield Button("新会话", id="new-session", variant="primary")
+                yield Button("设置", id="settings")
 
     def update_title(self, title):
         for widget in self.query(".session-title"):
@@ -129,7 +130,10 @@ class ProcessGroup(Vertical):
             head.update("已运行的命令")
 
     def on_group_head_toggle(self, event):
-        self.expanded = not self.expanded
+        self.set_expanded(not self.expanded)
+
+    def set_expanded(self, expanded):
+        self.expanded = expanded
         content = self.query(VerticalScroll)
         if content:
             content.first().display = self.expanded
@@ -379,6 +383,58 @@ class ConversationRecord(Vertical):
             if outcome.get("reason"):
                 text += "\n" + outcome["reason"]
             yield Static(text, markup=False)
+
+
+class SettingsScreen(ModalScreen[None]):
+    """设置弹窗，只发送显示设置变更，不执行运行时操作。"""
+
+    BINDINGS = [("escape", "back", "关闭")]
+    DEFAULT_CSS = """
+    SettingsScreen { align: center middle; background: $background 70%; }
+    SettingsScreen > Vertical { width: 64; max-width: 95%; height: auto;
+        border: solid $primary; padding: 1 2; background: $surface; }
+    SettingsScreen #settings-head { height: 1; }
+    SettingsScreen #settings-head Label { width: 1fr; color: #80cbc4; text-style: bold; }
+    SettingsScreen #settings-back { width: auto; min-width: 0; height: 1; min-height: 1;
+        border: none; padding: 0 1; }
+    SettingsScreen .settings-section { height: 1; margin-top: 1; color: #999fa5; }
+    SettingsScreen .settings-row { height: 3; align: left middle; }
+    SettingsScreen .settings-row Label { width: 1fr; height: 1; }
+    SettingsScreen .settings-note { height: auto; color: #999fa5; }
+    """
+
+    class DiagnosticsChanged(Message):
+        def __init__(self, visible):
+            super().__init__()
+            self.visible = visible
+
+    def __init__(self, diagnostics_visible):
+        super().__init__()
+        self.diagnostics_visible = diagnostics_visible
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            with Horizontal(id="settings-head"):
+                yield Label("设置")
+                yield Button("关闭", id="settings-back", compact=True)
+            yield Static("显示", classes="settings-section", markup=False)
+            with Horizontal(classes="settings-row"):
+                yield Label("显示诊断日志")
+                yield Switch(self.diagnostics_visible, id="diagnostics-toggle", animate=False)
+            yield Static("关闭时隐藏日志，重新开启可查看当前会话的日志。",
+                         classes="settings-note", markup=False)
+
+    def on_switch_changed(self, event: Switch.Changed):
+        if event.switch.id == "diagnostics-toggle":
+            self.post_message(self.DiagnosticsChanged(event.value))
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "settings-back":
+            event.stop()
+            self.action_back()
+
+    def action_back(self):
+        self.dismiss()
 
 
 class SessionScreen(ModalScreen[str | None]):

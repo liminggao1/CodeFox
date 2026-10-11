@@ -2,13 +2,17 @@
 
 from datetime import datetime, timezone
 
+from rich.text import Text
 from textual.containers import VerticalScroll
-from textual.widgets import Button, Collapsible
+from textual.widgets import Button, Collapsible, Static
 
 from ..conversation import ConversationProjection
 from ..presentation import arguments_text, format_elapsed, session_title
-from .widgets import (ApprovalCard, BrandBar, ConversationRecord, MessageRow, OperationEntry, ProcessGroup,
+from .widgets import (ApprovalCard, BrandBar, ConversationRecord, DetailScroll, MessageRow, OperationEntry, ProcessGroup,
                       StreamingText)
+
+# 只有进行中的状态才占用对话区一行；终态一律清掉，避免残留。
+ACTIVE_STATUSES = frozenset({"正在处理请求", "正在关闭"})
 
 
 def operation_text(entry):
@@ -23,15 +27,96 @@ class ConversationView:
         self.app = app
         self.projection = ConversationProjection()
         self.start = 0
-        self.pending_inputs = {}
+        self._pending_inputs = {}
+        self._pending_rows = {}
         self._operations = {}
         self._groups = {}
         self._streams = {}
         self._rows = {}
+        self._activity_label = None
+        self._activity = None
+        self._diagnostics = []
+        self.diagnostics_visible = True
+        self._diagnostic_block = None
+        self._diagnostic_detail = None
+        self._errors = []
 
     @property
     def records(self):
         return self.projection.records
+
+    def scroll_key(self, key):
+        chat = self.app.query_one("#chat", VerticalScroll)
+        if self.app.focused is not chat and not chat.has_focus:
+            return False
+        chat.scroll_y = 0 if key == "home" else chat.max_scroll_y
+        return True
+
+    def show_pending_input(self, submission_id, text):
+        record = {"id": submission_id, "type": "user_message", "source": "lead",
+                  "payload": {"text": text.strip()}}
+        self._pending_inputs[submission_id] = record
+        self._mount_pending(record)
+
+    def _mount_pending(self, record):
+        row = MessageRow(ConversationRecord(record), classes="user")
+        self._pending_rows[record["id"]] = row
+        return self.app.query_one("#chat", VerticalScroll).mount(row)
+
+    def show_activity(self, label):
+        """终态不留对话区行；结果和状态由记录行或底部状态行承担。"""
+        self._activity_label = label if label in ACTIVE_STATUSES else None
+        if self._activity_label is None:
+            if self._activity is not None and self._activity.parent is not None:
+                self._activity.remove()
+            self._activity = None
+        elif self._activity is None or self._activity.parent is None:
+            self._activity = Static(label, classes="activity", markup=False)
+            self.app.query_one("#chat", VerticalScroll).mount(self._activity)
+        else:
+            self._activity.update(label)
+
+    def log(self, text):
+        self._diagnostics.append(Text.from_ansi(str(text)).plain)
+        self._diagnostics = self._diagnostics[-1000:]
+        self._render_diagnostics()
+
+    def set_diagnostics_visible(self, visible):
+        """只切换显示，当前会话的日志继续按原有上限收集。"""
+        self.diagnostics_visible = visible
+        if self._diagnostic_block is not None:
+            self._diagnostic_block.display = visible
+
+    def _render_diagnostics(self, collapsed=True):
+        """诊断日志只有一块，窗口重建后重新挂到对话区末尾。"""
+        content = "\n".join(self._diagnostics)[-8000:]
+        if not content:
+            return
+        chat = self.app.query_one("#chat", VerticalScroll)
+        if self._diagnostic_block is not None and self._diagnostic_block.parent is chat:
+            self._diagnostic_detail.update(content)
+            self._diagnostic_block.display = self.diagnostics_visible
+            return
+        self._diagnostic_detail = Static(content, markup=False)
+        self._diagnostic_block = Collapsible(
+            DetailScroll(self._diagnostic_detail), title="诊断日志",
+            collapsed=collapsed, classes="diagnostic")
+        self._diagnostic_block.display = self.diagnostics_visible
+        return chat.mount(self._diagnostic_block)
+
+    async def show_error(self, text):
+        self._errors.append(text)
+        await self.app.query_one("#chat", VerticalScroll).mount(Static(text, markup=False))
+
+    def disable_approval(self, request_id):
+        for card in self.app.query(ApprovalCard):
+            if card.request_id == request_id:
+                card.disable()
+
+    def finish_approval(self, request_id, decision):
+        for card in self.app.query(ApprovalCard):
+            if card.request_id == request_id:
+                card.finish(decision)
 
     def refresh_elapsed(self):
         now = datetime.now(timezone.utc)
@@ -114,9 +199,11 @@ class ConversationView:
         self.app.query_one(BrandBar).update_title(session_title(self.app.snapshot, self.records))
         chat = self.app.query_one("#chat", VerticalScroll)
         follow = chat.scroll_y >= chat.max_scroll_y - 1 and self.app.approval is None
-        pending = self.pending_inputs.pop(record["payload"].get("submission_id"), None) if record["type"] == "user_message" else None
+        submission_id = record["payload"].get("submission_id") if record["type"] == "user_message" else None
+        self._pending_inputs.pop(submission_id, None)
+        pending = self._pending_rows.pop(submission_id, None)
         if pending is not None:
-            pending.record = record
+            pending.query_one(ConversationRecord).record = record
             pending.record_start_index = len(self.records) - 1
             self._rows[record["id"]] = pending
         for change in changes:
@@ -125,11 +212,11 @@ class ConversationView:
             elif change["kind"] in {"confirmed", "discarded"}:
                 await self._render_stream(change["entry"])
         if record["type"] == "approval_decided":
-            for card in self.app.query(ApprovalCard):
-                if card.request_id == record["payload"]["request_id"]:
-                    card.finish(record["payload"]["decision"])
-        while len(chat.children) > 80 and self.app.approval is None and not self.app.busy:
-            first = chat.children[0]
+            self.finish_approval(record["payload"]["request_id"], record["payload"]["decision"])
+        # 历史窗口只裁剪记录行与操作组，临时提示不占记录额度。
+        history = [child for child in chat.children if hasattr(child, "record_start_index")]
+        while len(history) > 80 and self.app.approval is None and not self.app.busy:
+            first = history.pop(0)
             decided = {item["payload"]["request_id"] for item in self.records if item["type"] == "approval_decided"}
             if any(not card.historical and card.request_id not in decided for card in first.query(ApprovalCard)):
                 break
@@ -142,7 +229,10 @@ class ConversationView:
             chat.scroll_end(animate=False)
 
     async def restore(self, records, session_id=None, generation=0):
-        self.pending_inputs.clear()
+        self._pending_inputs.clear()
+        self._activity_label = None
+        self._diagnostics.clear()
+        self._errors.clear()
         self.projection.restore(records, session_id, generation)
         self.start = max(0, len(self.records) - 80)
         await self.render_window(preserve=False)
@@ -155,16 +245,20 @@ class ConversationView:
         # 展开状态属于视图，不参与语义投影或会话持久化。
         expanded = {key for key, widget in widgets.items() if widget.is_mounted and
                     any(not detail.collapsed for detail in widget.query(Collapsible))} if preserve else set()
-        group_scroll = {key: group.query_one(VerticalScroll).scroll_y for key, group in self._groups.items()
-                        if preserve and group.is_mounted}
+        group_state = {key: (group.expanded, group.query_one(VerticalScroll).scroll_y)
+                       for key, group in self._groups.items() if preserve and group.is_mounted}
         # 诊断日志不属于语义记录，重建前记下它的展开状态。
-        diagnostics_collapsed = next((block.collapsed for block in chat.query(Collapsible)
-                                     if "diagnostic" in block.classes), True)
+        diagnostics_collapsed = (self._diagnostic_block.collapsed
+                                 if preserve and self._diagnostic_block is not None else True)
         await chat.remove_children()
         self._streams.clear()
         self._operations.clear()
         self._groups.clear()
         self._rows.clear()
+        self._pending_rows.clear()
+        self._activity = None
+        self._diagnostic_block = None
+        self._diagnostic_detail = None
         records = self.records
         visible = records[self.start:]
         visible_ids = {r["id"] for r in visible}
@@ -188,9 +282,11 @@ class ConversationView:
             if key in widgets:
                 for detail in widgets[key].query(Collapsible):
                     detail.collapsed = False
-        for key, y in group_scroll.items():
+        for key, (is_expanded, y) in group_state.items():
             if key in self._groups:
-                scroll = self._groups[key].query_one(VerticalScroll)
+                group = self._groups[key]
+                group.set_expanded(is_expanded)
+                scroll = group.query_one(VerticalScroll)
                 self.app.call_after_refresh(scroll.scroll_to, y=y, animate=False)
         decisions = {r["payload"]["request_id"]: r["payload"]["decision"] for r in records if r["type"] == "approval_decided"}
         for card in self.app.query(ApprovalCard):
@@ -198,7 +294,16 @@ class ConversationView:
                 card.finish(decisions[card.request_id])
             elif self.app.approval is not None and card.request_id == self.app.approval.request_id:
                 card.enable()
-        self.app.restore_diagnostics(diagnostics_collapsed)
+        # 临时显示只留当前会话内存，重建时与记录一起恢复，不进入语义投影。
+        for text in self._errors:
+            await chat.mount(Static(text, markup=False))
+        for record in self._pending_inputs.values():
+            await self._mount_pending(record)
+        if self._activity_label is not None:
+            self.show_activity(self._activity_label)
+        mounted = self._render_diagnostics(diagnostics_collapsed)
+        if mounted is not None:
+            await mounted
         self.app.query_one("#earlier", Button).display = self.start > 0
         chat.scroll_end(animate=False)
 
