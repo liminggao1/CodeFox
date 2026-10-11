@@ -21,6 +21,17 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
+
+def pytest_ignore_collect(collection_path, config):
+    """只在显式启用时收集真实 API 测试。"""
+    path = Path(str(collection_path))
+    if path.name == "live":
+        enabled = os.getenv("LIVE_API", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        return not enabled
+    return False
+
 # 即使没有本地 .env，也保证导入过程离线且确定。
 os.environ.setdefault("MODEL_ID", "test-model")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")

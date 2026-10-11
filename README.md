@@ -115,6 +115,17 @@ python -m pytest -q
 
 全部离线，不消耗 API：
 
+默认只收集模拟测试。需要使用项目根 `.env` 中的真实 API 时，显式打开真实流式测试：
+
+```sh
+LIVE_API=1 PYTHONPATH=src python -m pytest -q tests/live
+```
+
+真实测试使用临时工作目录，会验证流式文本、`bash` 执行与拒绝、文件写读编辑和 glob、
+工具错误恢复、TODO、任务板生命周期、一次性子 agent、目标评估、长期记忆提取、多轮历史、
+用量累计，以及 `/new`、`/resume` 和会话保存恢复；每次运行会消耗模型额度。
+协议异常、截断响应、停止边界和精确恢复分支仍由下面的离线测试覆盖。
+
 共用设施放在 `tests/support/`：`fakes.py` 提供假模型响应构造器，`helpers.py` 提供运行时事件和会话文件工具；`conftest.py` 提供 host 与运行时工厂。
 
 - `tests/test_goal.py`：控制器用例，以及用脚本化 client 驱动 `agent_loop` 的会话级用例。
