@@ -15,7 +15,7 @@ from ... import core
 from ...runtime.interactive_runtime import InteractiveRuntime
 from ...runtime.local_commands import LOCAL_COMMANDS, find_command
 from .widgets import (ApprovalCard, BrandBar, CommandCandidates, ConversationRecord, DetailScroll,
-                      SessionInfoScreen, SessionScreen, SessionStatePanel, StateToggle)
+                      MessageRow, SessionScreen, SessionStatePanel)
 from ..presentation import (PERMISSION_DEFAULT, PERMISSION_WAITING, message_count, model_status,
                             permission_summary, session_title)
 from .conversation_view import ConversationView
@@ -42,8 +42,6 @@ class HarnessApp(App):
     #conversation { width: 1fr; height: 1fr; padding: 0 1; }
     #conversation-top { height: 1; }
     #conversation-top #earlier { width: auto; min-width: 0; height: 1; min-height: 1; border: none; padding: 0 1; }
-    #conversation-top #state-spacer { width: 1fr; }
-    #conversation-top #state-toggle { width: auto; min-width: 6; height: 1; min-height: 1; }
     #chat { height: 1fr; }
     #earlier { display: none; }
     Markdown { padding: 0 1; margin: 0; background: transparent; }
@@ -66,15 +64,6 @@ class HarnessApp(App):
     .short #input-status { display: none; }
     .short BrandBar { height: 1; }
     .short BrandBar .brand, .short BrandBar .session-title { height: 1; padding: 0; }
-    .short BrandBar #top-actions Button { display: none; }
-    .short #brand-title-row { display: none; }
-    .short.narrow #brand-row .session-title { display: block; }
-    .narrow BrandBar { height: 2; }
-    .narrow #brand-title-row { display: block; }
-    .narrow #brand-row .session-title { display: none; }
-    .narrow #top-actions { width: 1fr; }
-    .narrow #conversation { width: 1fr; }
-    .narrow #session-status { width: 1fr; min-width: 0; }
     """
 
     def __init__(self, runtime=None):
@@ -91,7 +80,6 @@ class HarnessApp(App):
         self.runtime_closed = False
         self.approval = None
         self.snapshot = {}
-        self.narrow = False
         self.short = False
         self._hidden_command_text = None
         self.conversation = ConversationView(self)
@@ -111,13 +99,11 @@ class HarnessApp(App):
             with Vertical(id="conversation"):
                 with Horizontal(id="conversation-top"):
                     yield Button("加载更早记录", id="earlier")
-                    yield Static(id="state-spacer")
-                    yield StateToggle("[状态]", id="state-toggle", markup=False)
                 yield VerticalScroll(id="chat")
                 yield CommandCandidates(id="commands")
                 yield Static(id="command-hint", markup=False)
             yield SessionStatePanel(id="session-status")
-        # 输入区在主体之外：窄屏展开状态面板时对话列让位，输入框不被压缩。
+        # 输入区在主体之外：展开状态面板时对话列让位，输入框不被压缩。
         with Vertical(id="input-area"):
             yield Static("就绪", id="input-status", markup=False)
             with Vertical(id="input-box"):
@@ -138,9 +124,7 @@ class HarnessApp(App):
 
     def on_resize(self, event):
         self.short = event.size.height < 16
-        self.narrow = event.size.width < 90
         self.set_class(self.short, "short")
-        self.set_class(self.narrow, "narrow")
         self._controls()
 
     def on_key(self, event):
@@ -173,11 +157,6 @@ class HarnessApp(App):
         self._input_status()
         self.query_one(SessionStatePanel).update_snapshot(self.snapshot, self.records)
         self.query_one(SessionStatePanel).display = self.state_expanded
-        # 窄屏展开状态面板时对话列让位，面板占满主体宽度，输入区保持可见。
-        self.query_one("#conversation").display = not (self.narrow and self.state_expanded)
-        self.query_one("#state-toggle", StateToggle).display = not self.state_expanded and (self.short or not self.narrow)
-        self.query_one("#brand-state-toggle", StateToggle).display = (
-            self.narrow and not self.short and not self.state_expanded)
         self.query_one(BrandBar).update_title(session_title(self.snapshot, self.records))
         self._refresh_commands()
 
@@ -367,8 +346,9 @@ class HarnessApp(App):
             return False
         self.busy = True
         if result.kind == "turn":
-            pending = ConversationRecord({"id": result.submission_id, "type": "user_message",
-                                          "source": "lead", "payload": {"text": text.strip()}})
+            pending = MessageRow(ConversationRecord(
+                {"id": result.submission_id, "type": "user_message", "source": "lead",
+                 "payload": {"text": text.strip()}}), classes="user")
             self.conversation.pending_inputs[result.submission_id] = pending
             self.query_one("#chat", VerticalScroll).mount(pending)
         self._activity = None
@@ -419,15 +399,11 @@ class HarnessApp(App):
             self._controls()
         elif event.button.id == "history":
             self.action_sessions()
-        elif event.button.id == "settings":
-            self.push_screen(SessionInfoScreen(self.snapshot, self.records))
+        elif event.button.id == "state":
+            self.state_expanded = not self.state_expanded
+            self._controls()
         elif event.button.id == "new-session":
             self.action_new_session()
-        self._focus_input()
-
-    def on_state_toggle_pressed(self, event: StateToggle.Pressed):
-        self.state_expanded = True
-        self._controls()
         self._focus_input()
 
     def _focus_input(self):

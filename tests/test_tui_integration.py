@@ -640,7 +640,7 @@ def test_tui_approval_waits_for_preceding_event_batches(runtime_factory):
     assert "approved" in results[0]["content"]
 
 
-def test_tui_narrow_layout_input_and_conversation_scroll(runtime_factory):
+def test_tui_input_and_conversation_scroll(runtime_factory):
     runtime, host = runtime_factory([response("\n\n".join(f"第 {number} 段" for number in range(80)))])
     app = HarnessApp(runtime)
     async def exercise():

@@ -800,20 +800,18 @@ def test_tui_record_window_expansion_history_and_dedup():
 
 def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
     from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import BrandBar, SessionStatePanel, StateToggle
+    from agent_harness.frontends.tui.widgets import BrandBar, SessionStatePanel
     from textual.widgets import Button, Static
 
     app = HarnessApp(DisplayRuntime())
     async def exercise():
         async with app.run_test(size=(110, 30)) as pilot:
             assert app.query_one(BrandBar)
-            # 顶部只有三个固定按钮，状态入口在对话区顶部行右侧。
+            # 顶部只有三个固定按钮，第三个是会话状态面板入口。
             assert [button.id for button in app.query_one(BrandBar).query(Button)] == [
-                "history", "settings", "new-session"]
+                "history", "state", "new-session"]
             assert app.query_one("#conversation-top").region.y == 1
             assert not app.query_one(SessionStatePanel).display
-            assert app.query_one("#state-toggle", StateToggle).display
-            assert not app.query_one("#brand-state-toggle", StateToggle).display
             assert app.query_one("#send", Button).label == "发送"
             assert not app.query("#stop")
             await app._event(event("state_snapshot", {
@@ -836,7 +834,6 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
             app._controls()
             await pilot.pause()
             assert app.query_one(SessionStatePanel).display
-            assert not app.query_one(StateToggle).display
             assert str(app.query_one("#state-collapse", Button).label) == "收起"
             state = str(app.query_one(SessionStatePanel).query_one(".state-body", Static).content)
             assert "test-model" in state and "/tmp/project" in state and "feature" in state
@@ -854,24 +851,22 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
 
 def test_tui_state_panel_reopens_and_top_entries_keep_editor_focus():
     from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import SessionStatePanel, StateToggle
+    from agent_harness.frontends.tui.widgets import SessionStatePanel
     from textual.widgets import TextArea
 
     app = HarnessApp(DisplayRuntime())
     async def exercise():
         async with app.run_test(size=(112, 34)) as pilot:
             editor = app.query_one("#input", TextArea)
-            await pilot.click("#state-toggle")
+            await pilot.click("#state")
             await pilot.pause()
             assert app.state_expanded and app.query_one(SessionStatePanel).display
-            assert not app.query_one("#state-toggle", StateToggle).display
             assert app.focused is editor
             await pilot.click("#state-collapse")
             await pilot.pause()
             assert not app.state_expanded and not app.query_one(SessionStatePanel).display
-            assert app.query_one("#state-toggle", StateToggle).display
             # 收起后仍可再次展开，且焦点回到输入框。
-            await pilot.click("#state-toggle")
+            await pilot.click("#state")
             await pilot.pause()
             assert app.query_one(SessionStatePanel).display and app.focused is editor
     import asyncio
@@ -1083,6 +1078,27 @@ def test_tui_window_rebuild_preserves_expansion_and_live_body():
     asyncio.run(exercise())
 
 
+def test_tui_pending_user_message_is_right_aligned_before_record_arrives():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import ConversationRecord, MessageRow
+
+    class SubmitRuntime(DisplayRuntime):
+        def submit(self, text):
+            return SimpleNamespace(status="accepted", kind="turn", submission_id="sub-1", reason="")
+
+    app = HarnessApp(SubmitRuntime())
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            assert app._submit("刚发送的消息")
+            await pilot.pause()
+            row = app.query_one(MessageRow)
+            assert "user" in row.classes
+            box = row.query_one(ConversationRecord).region
+            assert box.x > 1
+    asyncio.run(exercise())
+
+
 def test_tui_messages_hide_source_labels_and_user_messages_hug_right():
     from agent_harness.frontends.tui.app import HarnessApp
     from agent_harness.frontends.tui.widgets import ConversationRecord, MessageRow
@@ -1107,29 +1123,30 @@ def test_tui_messages_hide_source_labels_and_user_messages_hug_right():
     asyncio.run(exercise())
 
 
-def test_tui_narrow_state_panel_is_full_screen_and_keeps_input_visible():
+def test_tui_state_panel_toggles_in_one_layout_and_keeps_input_visible():
     from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import BrandBar, SessionStatePanel, StateToggle
+    from agent_harness.frontends.tui.widgets import BrandBar, SessionStatePanel
+    from textual.widgets import Button
 
     app = HarnessApp(DisplayRuntime())
 
     async def exercise():
         async with app.run_test(size=(72, 24)) as pilot:
             await pilot.pause()
-            assert app.narrow
-            # 窄屏品牌栏占 2 行，第二行放会话标题和 `[状态]` 入口。
-            assert app.query_one(BrandBar).region.height == 2
-            assert app.query_one("#brand-state-toggle", StateToggle).display
-            assert not app.query_one("#state-toggle", StateToggle).display
-            await pilot.click("#brand-state-toggle")
+            # 只有一套布局：品牌栏固定 1 行，没有窄屏专用入口。
+            assert app.query_one(BrandBar).region.height == 1
+            assert [button.id for button in app.query_one(BrandBar).query(Button)] == [
+                "history", "state", "new-session"]
+            assert not app.query_one(SessionStatePanel).display
+            await pilot.click("#state")
             await pilot.pause()
             panel = app.query_one(SessionStatePanel)
-            assert panel.display and panel.region.width == 72
-            # 对话列让位，输入框不被压缩且仍在屏幕内。
-            assert not app.query_one("#conversation").display
+            assert panel.display and panel.region.width == 32
+            # 对话列保留，输入框不被压缩且仍在屏幕内。
+            assert app.query_one("#conversation").display
             assert app.query_one("#input").region.width >= 40
             assert app.query_one("#input-box").region.bottom <= 24
             await pilot.click("#state-collapse")
             await pilot.pause()
-            assert not panel.display and app.query_one("#conversation").display
+            assert not panel.display
     asyncio.run(exercise())

@@ -128,7 +128,7 @@ python -m pytest -q
 - `tests/test_worktree_cleanup.py`：Lead 同轮清理、目录切换，以及拒绝和失败后的分配保留。
 - `tests/test_interaction.py`：事件顺序与数据副本、审批关联、来源权限、停止和关闭解除等待。
 - `tests/test_interactive_runtime.py`：实际共享驱动、命令/会话、四种回合结果、停止边界、cron 确认、后台交付、CLI 读取归属和 Lead 状态拥有者。
-- `tests/test_tui_integration.py`：无头界面的中文多行对话、审批、停止、恢复、窄屏和滚动；未安装 Textual 时跳过。
+- `tests/test_tui_integration.py`：无头界面的中文多行对话、审批、停止、恢复和滚动；未安装 Textual 时跳过。
 - `tests/test_conversation.py`：展示记录与前端回放，含审批前保存、后台检查点、重试去重、压缩恢复续聊、CLI/TUI 详情与分段加载。
 
 离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、子 agent、架构图），说明见

@@ -45,15 +45,13 @@ class GroupHead(Static):
 class BrandBar(Vertical):
     """Compact CodeFox identity and navigation actions.
 
-    宽屏占 1 行：头像、会话标题和三个入口；窄屏第二行放会话标题和 ``[状态]`` 入口。
+    固定 1 行：头像、会话标题和三个入口；``会话状态`` 切换右侧只读面板显隐。
     """
     DEFAULT_CSS = """
     BrandBar { height: 1; padding: 0 1; background: #101214; }
     BrandBar #brand-row { height: 1; }
-    BrandBar #brand-title-row { height: 1; display: none; }
     BrandBar .brand { width: 12; color: #80cbc4; text-style: bold; }
     BrandBar .session-title { width: 1fr; color: #e1e3e5; }
-    BrandBar #brand-state-toggle { width: auto; min-width: 6; height: 1; display: none; }
     BrandBar #top-actions { width: auto; height: 1; align-horizontal: right; }
     BrandBar #top-actions Button { min-width: 6; height: 1; min-height: 1; border: none;
         margin-left: 1; padding: 0 1; }
@@ -68,29 +66,12 @@ class BrandBar(Vertical):
             yield Static("未开始会话", classes="session-title", markup=False)
             with Horizontal(id="top-actions"):
                 yield Button("历史", id="history")
-                yield Button("设置", id="settings")
+                yield Button("会话状态", id="state")
                 yield Button("新会话", id="new-session", variant="primary")
-        with Horizontal(id="brand-title-row"):
-            yield Static("未开始会话", classes="session-title", markup=False)
-            yield StateToggle("[状态]", id="brand-state-toggle", markup=False)
 
     def update_title(self, title):
         for widget in self.query(".session-title"):
             widget.update(title)
-
-
-class StateToggle(Static):
-    """One-line entry point that expands the collapsed read-only state panel."""
-
-    class Pressed(Message):
-        pass
-
-    DEFAULT_CSS = """
-    StateToggle { height: 1; color: #80cbc4; padding: 0 1; }
-    """
-
-    def on_click(self):
-        self.post_message(self.Pressed())
 
 
 class ProcessGroup(Vertical):
@@ -489,33 +470,3 @@ class SessionStatePanel(VerticalScroll):
 
     def update_snapshot(self, snapshot, records=()):
         self.query_one(".state-body", Static).update(format_session_state(snapshot, records=records))
-
-
-class SessionInfoScreen(ModalScreen[None]):
-    BINDINGS = [("escape", "cancel", "返回")]
-    DEFAULT_CSS = """
-    SessionInfoScreen { align: center middle; background: $background 70%; }
-    SessionInfoScreen > Vertical { width: 80; max-width: 95%; height: 80%; border: solid $primary;
-        padding: 1 2; background: $surface; }
-    SessionInfoScreen .info-body { height: 1fr; color: #c5c9cc; padding: 1 0; }
-    SessionInfoScreen Horizontal { height: 3; align-horizontal: right; }
-    """
-
-    def __init__(self, snapshot, records=()):
-        super().__init__()
-        self.snapshot = snapshot
-        self.records = records
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label("运行信息")
-            yield Static(format_session_state(self.snapshot, records=self.records), classes="info-body", markup=False)
-            with Horizontal():
-                yield Button("返回", id="cancel")
-
-    def on_button_pressed(self, event: Button.Pressed):
-        if event.button.id == "cancel":
-            self.dismiss(None)
-
-    def action_cancel(self):
-        self.dismiss(None)
