@@ -852,7 +852,7 @@ def test_post_hook_failure_saves_real_result_and_pairs_unexecuted_calls(runtime_
 
     monkeypatch.setitem(hooks.HOOKS, "PostToolUse", [fail])
     submitted = runtime.submit("write")
-    finished, _ = until(runtime, "turn_finished", submission_id=submitted.submission_id)
+    finished, events = until(runtime, "turn_finished", submission_id=submitted.submission_id)
     snapshot = stored(runtime)
     assert finished.payload["outcome"]["status"] == "failed"
     results = snapshot["messages"][-1]["content"]
@@ -860,8 +860,11 @@ def test_post_hook_failure_saves_real_result_and_pairs_unexecuted_calls(runtime_
     assert results[1]["tool_use_id"] == "second" and results[1]["is_error"]
     assert (runtime.session.store.workdir / "first.txt").read_text() == "written"
     assert not (runtime.session.store.workdir / "second.txt").exists()
-    assert any(item["payload"].get("phase") == "hook" and item["payload"].get("state") == "failed"
-               for item in records(snapshot, "execution_status"))
+    assert any(event.type == "log" and "[HOOK] PostToolUse" in event.payload["text"]
+               and "失败" in event.payload["text"] and "RuntimeError: post failed" in event.payload["text"]
+               for event in events)
+    assert not any(item["payload"].get("phase") == "hook"
+                   for item in records(snapshot, "execution_status"))
     restored = runtime.session.store.load(snapshot["id"])
     assert restored["messages"] == snapshot["messages"]
 

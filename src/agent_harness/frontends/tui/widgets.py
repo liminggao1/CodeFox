@@ -175,7 +175,7 @@ class OperationEntry(Vertical):
         preview = self.query_one(".operation-preview", Static)
         preview.update(short_text(entry["output"]) if entry["output"] else "")
         preview.display = bool(entry["output"])
-        # 没有参数也没有结果时不展示空详情块（Hook、模型、记忆等状态事件都属此类）。
+        # 没有参数也没有结果时不展示空详情块（模型、记忆等状态事件都属此类）。
         detail_text = self._detail_text(entry)
         self.query_one(".operation-detail", Static).update(detail_text)
         self.query_one(Collapsible).display = bool(detail_text.strip())

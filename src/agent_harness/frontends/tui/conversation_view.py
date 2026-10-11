@@ -157,6 +157,9 @@ class ConversationView:
                     any(not detail.collapsed for detail in widget.query(Collapsible))} if preserve else set()
         group_scroll = {key: group.query_one(VerticalScroll).scroll_y for key, group in self._groups.items()
                         if preserve and group.is_mounted}
+        # 诊断日志不属于语义记录，重建前记下它的展开状态。
+        diagnostics_collapsed = next((block.collapsed for block in chat.query(Collapsible)
+                                     if "diagnostic" in block.classes), True)
         await chat.remove_children()
         self._streams.clear()
         self._operations.clear()
@@ -195,6 +198,7 @@ class ConversationView:
                 card.finish(decisions[card.request_id])
             elif self.app.approval is not None and card.request_id == self.app.approval.request_id:
                 card.enable()
+        self.app.restore_diagnostics(diagnostics_collapsed)
         self.app.query_one("#earlier", Button).display = self.start > 0
         chat.scroll_end(animate=False)
 

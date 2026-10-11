@@ -130,6 +130,13 @@ def test_saved_records_match_live_order_and_contain_full_tool_payload(runtime_fa
     assert records(snapshot, "turn_finished")[0]["payload"]["summary"] == summary
     assert all(item.get("kind") in {"summary", "display"} for item in snapshot["events"])
     assert not any(item["type"] in {"session_saved", "state_snapshot", "log"} for item in saved)
+    assert not any(item["payload"].get("phase") == "hook" for item in saved)
+    logs = [event.payload["text"] for event in before + after if event.type == "log"]
+    for hook_event in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
+        assert any(f"[HOOK] {hook_event} / " in text and "开始" in text for text in logs)
+        assert any(f"[HOOK] {hook_event} / " in text and "完成" in text for text in logs)
+    assert any("[HOOK] bash" in text for text in logs)
+    assert any("[HOOK] Stop: 1 tool result(s)" in text for text in logs)
 
 
 def _save_trace(monkeypatch, runtime):
@@ -147,21 +154,21 @@ def _save_trace(monkeypatch, runtime):
 
 
 def test_turn_boundary_saves_terminal_fact_before_delivery(runtime_factory, monkeypatch):
-    """C4 验收：简单回合保存 4 次，且终态先落盘再交付。
+    """简单回合保存 3 次，且终态先落盘再交付。
 
-    保存点依次落在模型开始、助手消息接受、模型调用结束与回合终态；最后一次
+    Hook 日志不落盘；保存点依次落在用户输入、助手消息接受与回合终态；最后一次
     保存已包含 turn_finished，前端读到的终态与文件一致。
     """
     runtime, host = runtime_factory([response("Done")])
     trace = _save_trace(monkeypatch, runtime)
     finished, _ = complete(runtime, "run")
-    assert trace == ["execution_status", "assistant_message", "execution_status", "turn_finished"]
+    assert trace == ["user_message", "assistant_message", "turn_finished"]
     assert finished.payload["saved"] is True
     assert stored(runtime)["events"][-1]["type"] == "turn_finished"
 
 
 def test_tool_turn_boundary_saves_each_settled_step(runtime_factory, monkeypatch):
-    """C4 验收：带一次工具往返的回合保存 9 次，逐项结算步骤各落盘一次。"""
+    """带一次工具往返的回合保存 8 次，逐项结算步骤各落盘一次。"""
     runtime, host = runtime_factory([
         response("Before", tools=[tool("bash", command="printf hi")], stop="tool_use"),
         response("After"),
@@ -171,9 +178,8 @@ def test_tool_turn_boundary_saves_each_settled_step(runtime_factory, monkeypatch
     request, _ = displayed_approval(runtime)
     assert runtime.channel.respond(request.request_id, request.generation, "approve")
     finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
-    assert trace == ["execution_status", "tool_call", "approval_requested", "approval_decided",
-                     "tool_result", "tool_result", "assistant_message", "execution_status",
-                     "turn_finished"]
+    assert trace == ["user_message", "tool_call", "approval_requested", "approval_decided",
+                     "tool_result", "tool_result", "assistant_message", "turn_finished"]
     assert finished.payload["saved"] is True
 
 
@@ -947,10 +953,10 @@ def test_empty_operation_details_are_hidden():
 
     async def exercise():
         async with app.run_test(size=(112, 34)) as pilot:
-            # Hook、模型、记忆等状态行没有参数也没有结果，不显示空详情块。
+            # 目标、模型、记忆等状态行没有参数也没有结果，不显示空详情块。
             await app.conversation.display_record(record(1, "execution_status", {
-                "operation_id": "hook", "phase": "hook", "name": "user_prompt_hook",
-                "event": "UserPromptSubmit", "state": "completed", "elapsed_seconds": 0.0}))
+                "operation_id": "goal", "phase": "goal", "name": "检查目标",
+                "state": "completed", "elapsed_seconds": 0.0}))
             await app.conversation.display_record(record(2, "execution_status", {
                 "operation_id": "mem", "phase": "memory", "name": "记忆检查",
                 "state": "completed", "elapsed_seconds": 0.0}))
@@ -961,10 +967,10 @@ def test_empty_operation_details_are_hidden():
             entries = list(app.query(OperationEntry))
             assert len(entries) == 3
             by_name = {str(entry.query_one(".operation-summary", Static).content): entry for entry in entries}
-            hook = next(entry for text, entry in by_name.items() if "user_prompt_hook" in text)
+            goal = next(entry for text, entry in by_name.items() if "检查目标" in text)
             memory = next(entry for text, entry in by_name.items() if "记忆检查" in text)
             tool = next(entry for text, entry in by_name.items() if "read_file" in text)
-            assert not hook.query_one(Collapsible).display
+            assert not goal.query_one(Collapsible).display
             assert not memory.query_one(Collapsible).display
             assert tool.query_one(Collapsible).display
     asyncio.run(exercise())
@@ -1239,4 +1245,42 @@ def test_tui_command_result_notifies_without_conversation_row():
                 "data": {"text": "已删除会话 20261011-072015-6526e2ec"}}))
             await pilot.pause()
             assert not app.query(ConversationRecord)
+    asyncio.run(exercise())
+
+
+def test_tui_diagnostics_keep_content_and_place_after_window_rebuild():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from textual.widgets import Collapsible
+
+    app = HarnessApp(DisplayRuntime())
+
+    def diagnostics():
+        return [block for block in app.query(Collapsible) if "diagnostic" in block.classes]
+
+    def screen():
+        return "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
+
+    async def show(pilot):
+        diagnostics()[0].collapsed = False
+        await pilot.pause()
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            await app.conversation.display_record(record(1, "user_message", {"text": "问题"}))
+            # 同一批日志只产生一块诊断日志，内容累积。
+            await app._event(event("log", {"text": "第一条日志"}))
+            await app._event(event("log", {"text": "第二条日志"}))
+            await pilot.pause()
+            assert len(diagnostics()) == 1
+            await show(pilot)
+            assert "第一条日志" in screen() and "第二条日志" in screen()
+            # 窗口重建会移除整个对话区：诊断日志必须重新挂载，内容和展开状态都不能丢。
+            await app.conversation.load_earlier()
+            await pilot.pause()
+            assert len(diagnostics()) == 1 and not diagnostics()[0].collapsed
+            assert "第一条日志" in screen() and "第二条日志" in screen()
+            await app._event(event("log", {"text": "第三条日志"}))
+            await pilot.pause()
+            assert len(diagnostics()) == 1
+            assert "第三条日志" in screen()
     asyncio.run(exercise())

@@ -48,6 +48,49 @@ def test_context_is_scoped_and_independent_threads_do_not_inherit():
     assert current_context() is None
 
 
+@pytest.mark.parametrize("event,result,failure,state", [
+    ("UserPromptSubmit", None, False, "完成"),
+    ("PreToolUse", "拒绝原因", False, "拒绝"),
+    ("PostToolUse", None, True, "失败"),
+    ("Stop", "继续工作", False, "完成"),
+])
+def test_hook_lifecycle_is_logged_without_display_status(monkeypatch, event, result, failure, state):
+    from agent_harness.runtime import hooks
+
+    channel = InteractionChannel()
+    calls = []
+
+    def check(value):
+        calls.append(value)
+        if failure:
+            raise RuntimeError("hook failed")
+        return result
+
+    def following(value):
+        raise AssertionError("Callbacks after a result or failure must not run")
+
+    callbacks = [check] if result is None and not failure else [check, following]
+    monkeypatch.setitem(hooks.HOOKS, event, callbacks)
+    with execution_context(frontend(channel)):
+        if failure:
+            with pytest.raises(RuntimeError, match="hook failed"):
+                hooks.trigger_hooks(event, "中文输入")
+        else:
+            assert hooks.trigger_hooks(event, "中文输入") == result
+    assert calls == ["中文输入"]
+    events = [channel.next_event(), channel.next_event()]
+    assert all(item is not None and item.type == "log" for item in events)
+    assert channel.next_event() is None
+    assert all(f"[HOOK] {event} / " in item.payload["text"] and "check" in item.payload["text"]
+               for item in events)
+    assert "开始" in events[0].payload["text"]
+    assert state in events[1].payload["text"] and "耗时" in events[1].payload["text"]
+    if result is not None:
+        assert result in events[1].payload["text"]
+    if failure:
+        assert "RuntimeError: hook failed" in events[1].payload["text"]
+
+
 def test_runtime_notifications_have_no_session_or_approval_capability():
     channel = InteractionChannel()
     context = ExecutionContext(channel, None, 0, source="cron", scope="runtime")

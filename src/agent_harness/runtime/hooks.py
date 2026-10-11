@@ -7,6 +7,7 @@ Hooks 位于工具处理器之外，因此权限、日志和 Stop 行为可独�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 
 from .. import core
 from ..tools import tool_registry
@@ -34,19 +35,22 @@ def trigger_hooks(event: str, *args):
     输入：event 为事件名；args 为原样传给各回调的位置参数。
     返回：第一个非 None 的回调结果；全部放行时返回 None。
         回调异常继续抛出。工具执行入口将拒绝结果转为工具结果文本。
+        执行过程和原因只写诊断日志，不发布正文状态事件。
     """
     for callback in HOOKS[event]:
         name = getattr(callback, "__qualname__", type(callback).__name__)
-        operation = interaction.operation_status("hook", name, "running", event=event)
+        label = f"[HOOK] {event} / {name}"
+        started = perf_counter()
+        core.terminal_print(f"{label}: 开始")
         try:
             result = callback(*args)
         except Exception as exc:
-            interaction.operation_status("hook", name, "failed", operation_id=operation,
-                                         event=event, reason=f"{type(exc).__name__}: {exc}")
+            core.terminal_print(f"{label}: 失败 · 耗时 {perf_counter() - started:.3f}s · "
+                                f"{type(exc).__name__}: {exc}")
             raise
-        state = "denied" if event == "PreToolUse" and result is not None else "completed"
-        interaction.operation_status("hook", name, state, operation_id=operation,
-                                     event=event, **({"reason": str(result)} if result is not None else {}))
+        state = "拒绝" if event == "PreToolUse" and result is not None else "完成"
+        reason = f" · {result}" if result is not None else ""
+        core.terminal_print(f"{label}: {state} · 耗时 {perf_counter() - started:.3f}s{reason}")
         if result is not None:
             return result
     return None
@@ -116,27 +120,23 @@ def permission_hook(block):
 
 
 def log_hook(block):
-    if interaction.current_context() is None:
-        core.terminal_print(f"\033[90m[HOOK] {block.name}\033[0m")
+    core.terminal_print(f"\033[90m[HOOK] {block.name}\033[0m")
     return None
 
 
 def large_output_hook(block, output):
-    if interaction.current_context() is None and len(str(output)) > core.LARGE_OUTPUT_WARNING_CHARS:
+    if len(str(output)) > core.LARGE_OUTPUT_WARNING_CHARS:
         core.terminal_print(f"\033[33m[HOOK] large output from {block.name}: "
               f"{len(str(output))} chars\033[0m")
     return None
 
 
 def user_prompt_hook(query: str):
-    if interaction.current_context() is None:
-        core.terminal_print(f"\033[90m[HOOK] UserPromptSubmit: {core.WORKDIR}\033[0m")
+    core.terminal_print(f"\033[90m[HOOK] UserPromptSubmit: {core.WORKDIR}\033[0m")
     return None
 
 
 def stop_hook(messages: list):
-    if interaction.current_context() is not None:
-        return None
     tool_count = 0
     for msg in messages:
         content = msg.get("content")

@@ -90,6 +90,7 @@ class HarnessApp(App):
         self._clock_timer = None
         self._activity = None
         self._diagnostics = []
+        self._diagnostic_block = None
         self._diagnostic_detail = None
 
     @property
@@ -365,7 +366,6 @@ class HarnessApp(App):
             self.conversation.pending_inputs[result.submission_id] = pending
             self.query_one("#chat", VerticalScroll).mount(pending)
         self._clear_activity()
-        self._diagnostic_detail = None
         self._controls()
         self._status("正在处理请求")
         return True
@@ -447,13 +447,28 @@ class HarnessApp(App):
         text = Text.from_ansi(str(text)).plain
         self._diagnostics.append(text)
         self._diagnostics = self._diagnostics[-1000:]
+        self._render_diagnostics()
+
+    def _render_diagnostics(self, collapsed=None):
+        """诊断日志只有一块，挂在当前对话区；窗口重建后由视图再次调用。"""
         content = "\n".join(self._diagnostics)[-8000:]
-        if self._diagnostic_detail is None:
-            self._diagnostic_detail = Static(content, markup=False)
-            self.query_one("#chat", VerticalScroll).mount(Collapsible(
-                DetailScroll(self._diagnostic_detail), title="诊断日志", collapsed=True, classes="diagnostic"))
-        else:
+        if not content:
+            return
+        chat = self.query_one("#chat", VerticalScroll)
+        if self._diagnostic_block is not None and self._diagnostic_block in chat.children:
             self._diagnostic_detail.update(content)
+            return
+        self._diagnostic_detail = Static(content, markup=False)
+        self._diagnostic_block = Collapsible(
+            DetailScroll(self._diagnostic_detail), title="诊断日志",
+            collapsed=True if collapsed is None else collapsed, classes="diagnostic")
+        chat.mount(self._diagnostic_block)
+
+    def restore_diagnostics(self, collapsed=True):
+        """窗口重建后把诊断块重新挂到对话区末尾，展开状态由视图传入。"""
+        self._diagnostic_block = None
+        self._diagnostic_detail = None
+        self._render_diagnostics(collapsed)
 
     async def consume(self):
         if not self.is_running:
@@ -513,6 +528,7 @@ class HarnessApp(App):
             self._dismiss_approval()
             self._activity = None
             self._diagnostics.clear()
+            self._diagnostic_block = None
             self._diagnostic_detail = None
             self._hidden_command_text = None
             self.query_one(CommandCandidates).show_commands(())
