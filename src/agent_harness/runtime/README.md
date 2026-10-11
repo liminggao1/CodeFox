@@ -30,6 +30,6 @@
 `session_store.py` 负责会话存储与恢复准备；目标是否能激活、切换步骤与失败回滚由 `session_switch.py` 独占，共享驱动只调 `switch(target)`。
 `InteractiveSession` 按 ID 追加展示记录，维护模型历史与展示历史的不同用途，失败保留内存待重试；`SessionStore` 只校验当前结构及操作文件。
 任务和工作树绑定的校验由 [workspace/](../workspace/README.md) 提供，子 agent 生命周期由 [agents/](../agents/README.md) 提供。
-状态与失败顺序的当前契约见 [仓库事实](../../../docs/facts.md) 第 8 节。
+状态与失败顺序的当前契约见 [仓库事实](../../../docs/architecture/facts.md) 第 8 节。
 
 包级入口与职责分组见 [上级 README](../README.md)。

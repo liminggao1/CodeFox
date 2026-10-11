@@ -150,7 +150,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 /home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q tests/test_interaction.py tests/test_interactive_runtime.py tests/test_tui_integration.py tests/test_conversation.py
 ```
 
-当前界面、展示与恢复事实见 [仓库事实](../docs/facts.md) 第 6 节。
+当前界面、展示与恢复事实见 [仓库事实](../docs/architecture/facts.md) 第 6 节。
 当前已完成离线集成验证及 Linux PTY 的中文多行粘贴、发送和退出验证；真实 API 的 TUI 交互尚未实测。
 
 ## 二、离线自检：改完先跑这个
@@ -543,7 +543,7 @@ F10 单步，F11 进入函数，Shift+F11 返回，F5 继续。暂时不看的�
 ```
 
 在 [run_todo_write](../src/agent_harness/tools/file_tools.py#L295) 和 [工具结果回填](../src/agent_harness/host.py#L394) 下断点，观察模型提交的 `todos`、工具返回的清单统计及下一次请求的 `messages`。
-这个离线测试跨六个模型轮次执行普通工具，再由模拟模型明确更新和清空 Todo。完整职责及失败边界见 [仓库事实](../docs/facts.md) 第 8 节。
+这个离线测试跨六个模型轮次执行普通工具，再由模拟模型明确更新和清空 Todo。完整职责及失败边界见 [仓库事实](../docs/architecture/facts.md) 第 8 节。
 
 #### 6. 工具池装配
 
