@@ -93,22 +93,28 @@ def map_module(module_name, nodes):
     return {head} if head in nodes else set()
 
 
-def imported_nodes(tree, path, nodes):
-    """一个源文件导入到的所有节点。"""
+def imported_modules(tree, path):
+    """还原静态 import 目标，包含函数内的延迟导入，不执行代码。"""
     package_parts = list(path.relative_to(SRC_ROOT).parts[:-1])
     found = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                found.update(map_module(alias.name, nodes))
+                found.add(alias.name)
         elif isinstance(node, ast.ImportFrom):
             base = absolute_base(package_parts, node.level, node.module)
             if base is None:
                 continue
-            found.update(map_module(base, nodes))
+            found.add(base)
             for alias in node.names:
-                found.update(map_module(base + "." + alias.name, nodes))
+                found.add(base + "." + alias.name)
     return found
+
+
+def imported_nodes(tree, path, nodes):
+    """一个源文件导入到的所有包级节点。"""
+    return {node for module in imported_modules(tree, path)
+            for node in map_module(module, nodes)}
 
 
 def build_edges(nodes):
@@ -123,6 +129,24 @@ def build_edges(nodes):
             if target != source:
                 edges.add((source, target))
     return edges
+
+
+def build_file_edges():
+    """按实际 Python 文件建图，避免把包级相互依赖当作文件导入环。"""
+    modules = {}
+    for path in iter_source_files():
+        parts = list(path.relative_to(SRC_ROOT).with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        name = ".".join([PACKAGE, *parts])
+        modules[name] = path
+    edges = set()
+    for source, path in modules.items():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for target in imported_modules(tree, path):
+            if target in modules and target != source:
+                edges.add((source, target))
+    return list(modules), edges
 
 
 def find_cycles(nodes, edges):
@@ -262,7 +286,7 @@ def render_mermaid(nodes, edges):
     return "\n".join(lines) + "\n"
 
 
-def render_markdown(mermaid_text, cycles):
+def render_markdown(mermaid_text, cycles, file_cycles):
     """把 Mermaid 文本包成可预览的 Markdown，并把线型图例与循环依赖写在图外。
 
     图只保留模块架构本身；图例和循环依赖是说明性内容，放在图前面的正文里，
@@ -271,6 +295,9 @@ def render_markdown(mermaid_text, cycles):
     cycle_text = "\n".join(
         "- {0}".format(" ↔ ".join(component)) for component in cycles
     ) if cycles else "- 无"
+    file_cycle_text = "\n".join(
+        "- {0}".format(" ↔ ".join(component)) for component in file_cycles
+    ) if file_cycles else "- 无"
     return (
         "# 模块依赖图\n"
         "\n"
@@ -286,17 +313,25 @@ def render_markdown(mermaid_text, cycles):
         "| --- | --- | --- |\n"
         "| 深色实线 | 跨层依赖 | 架构主干 |\n"
         "| 浅灰细线 | 同层依赖 | 弱化显示 |\n"
-        "| 红色实线 | 回边 | 指向层序上方的反馈边；删掉这些边后，其余依赖可排成无环的层序 |\n"
+        "| 红色实线 | 回边 | 按图的层序选出的反馈边，用于定位跨职责依赖，不代表该依赖必须删除 |\n"
         "\n"
         "## 节点颜色\n"
         "\n"
         "蓝=入口，黄=装配，绿=核心，紫=底层。\n"
         "\n"
-        "## 循环依赖（需收敛）\n"
+        "## 包级相互依赖\n"
         "\n"
-        "下面每个强连通分量是一个循环；红线是用贪心法挑出的反馈边集合（不保证最少），收敛目标就是消除这些回边。\n"
+        "下面是聚合到职责包后的强连通分量。不同文件的依赖聚合后可能形成包级循环，不能据此认定存在 Python 文件导入环。\n"
         "\n"
         + cycle_text + "\n"
+        "\n"
+        "红线由贪心法选择（不保证最少）；是否调整依赖，需要继续核对具体文件的职责、状态归属和调用顺序。\n"
+        "\n"
+        "## Python 文件静态导入环\n"
+        "\n"
+        + file_cycle_text + "\n"
+        "\n"
+        "此检查包含函数内的延迟导入，不执行代码，也不覆盖动态导入。\n"
         "\n"
         "节点是 `agent_harness` 的子包与顶层模块，箭头 `A --> B` 表示 A 导入 B。\n"
         "全部依赖都在图上，没有省略；同层边只是弱化，不会藏住问题。\n"
@@ -318,12 +353,14 @@ def generate(out_dir):
     edges = build_edges(nodes)
     mermaid_text = render_mermaid(nodes, edges)
     cycles = find_cycles(nodes, edges)
+    file_nodes, file_edges = build_file_edges()
+    file_cycles = find_cycles(file_nodes, file_edges)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     mmd_path = out_dir / "deps.mmd"
     md_path = out_dir / "deps.md"
     mmd_path.write_text(mermaid_text, encoding="utf-8", newline="\n")
-    md_path.write_text(render_markdown(mermaid_text, cycles), encoding="utf-8", newline="\n")
+    md_path.write_text(render_markdown(mermaid_text, cycles, file_cycles), encoding="utf-8", newline="\n")
     return len(nodes), len(edges), mmd_path, md_path
 
 

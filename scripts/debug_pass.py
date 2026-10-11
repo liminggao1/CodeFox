@@ -338,13 +338,15 @@ def _main() -> int:
         edges = arch_views.build_edges(nodes)
         assert nodes and edges, "dependency graph is empty"
         cycles = arch_views.find_cycles(nodes, edges)
-        assert cycles, "expected at least one import cycle to be reported"
+        file_nodes, file_edges = arch_views.build_file_edges()
+        assert file_nodes and file_edges, "file dependency graph is empty"
+        file_cycles = arch_views.find_cycles(file_nodes, file_edges)
         count, edge_count, mmd_path, md_path = arch_views.generate(arch_views.DEFAULT_OUT_DIR)
         assert (count, edge_count) == (len(nodes), len(edges))
         assert "graph TD" in mmd_path.read_text(encoding="utf-8")
         assert "```mermaid" in md_path.read_text(encoding="utf-8")
-        return "{0} nodes, {1} edges, {2} cycles -> docs/architecture/".format(
-            count, edge_count, len(cycles))
+        return "{0} nodes, {1} edges, {2} package groups, {3} file cycles -> docs/architecture/".format(
+            count, edge_count, len(cycles), len(file_cycles))
 
     check("tool pool assembled", t_tool_pool)
     check("agent loop: tool call round-trip", t_loop_toolcall)

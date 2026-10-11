@@ -453,7 +453,7 @@ def test_reactive_archive_failure_ends_with_cron_restored(host_factory, monkeypa
     history = [{"role": "user", "content": "go"}]
     host.agent_loop(history, "go")
     assert "Reactive compaction failed" in history[-1]["content"][0]["text"]
-    assert scheduler.cron_queue == [job]
+    assert scheduler._cron_queue == [job]
     assert history[0]["content"] == "go"
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,7 +74,7 @@ def test_background_permission_is_checked_before_dispatch(
 
     host.agent_loop(history, "delete")
 
-    assert not scheduler.background_tasks
+    assert not scheduler._background_tasks
     result = history[2]["content"][0]
     assert result["type"] == "tool_result"
     assert "Permission denied" in result["content"]
@@ -83,7 +84,7 @@ def test_completed_result_is_collected_once(host_factory) -> None:
     host = host_factory()
     task_id = scheduler.start_background_task(bash_block("printf ready"), {})
     assert wait_until(
-        lambda: scheduler.background_tasks
+        lambda: scheduler._background_tasks
         .get(task_id, {}).get("status") == "completed"
     )
 
@@ -95,6 +96,64 @@ def test_completed_result_is_collected_once(host_factory) -> None:
     assert "ready" in notifications[0]
     assert scheduler.collect_background_results() == []
     assert not scheduler.has_pending_background()
+
+
+def test_directory_scope_blocks_background_registration(host_factory, monkeypatch):
+    host_factory()
+    reached_directory = threading.Event()
+    started_command = threading.Event()
+    tool_cwd = file_tools.tool_cwd
+
+    def resolve_directory(owner):
+        directory = tool_cwd(owner)
+        reached_directory.set()
+        return directory
+
+    def run_command(command, cwd):
+        started_command.set()
+        from agent_harness.tools.tool_result import ToolResult
+        return ToolResult("guarded result", "success")
+
+    monkeypatch.setattr(file_tools, "tool_cwd", resolve_directory)
+    monkeypatch.setattr(file_tools, "run_bash", run_command)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with scheduler.require_idle_background_directory(core.WORKDIR):
+            future = pool.submit(copy_context().run, scheduler.start_background_task,
+                                 bash_block("guarded"), {})
+            assert reached_directory.wait(2)
+            assert not future.done()
+            assert not started_command.is_set()
+        future.result(timeout=2)
+        assert wait_until(scheduler.has_pending_background)
+    assert started_command.is_set()
+    assert "guarded result" in scheduler.collect_background_results()[0]
+
+
+def test_session_scope_blocks_cron_enqueue(host_factory, monkeypatch):
+    host_factory()
+    checked_time = threading.Event()
+    stop = threading.Event()
+    instant = datetime(2026, 10, 11, 9, 0)
+
+    def now():
+        checked_time.set()
+        return instant
+
+    monkeypatch.setattr(scheduler, "datetime", SimpleNamespace(now=now))
+    monkeypatch.setattr(core, "CRON_POLL_SECONDS", 0.01)
+    scheduler.schedule_job("0 9 * * *", "deliver after activation", durable=False)
+    worker = threading.Thread(target=scheduler.cron_scheduler_loop, args=(stop,))
+    try:
+        with scheduler.require_idle_cron():
+            worker.start()
+            assert checked_time.wait(2)
+            assert not scheduler.has_pending_cron()
+        assert wait_until(scheduler.has_pending_cron)
+        assert scheduler.pending_cron_prompts() == ("deliver after activation",)
+    finally:
+        stop.set()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
 
 
 def test_import_does_not_start_cron_threads(host_factory) -> None:
@@ -153,32 +212,32 @@ def test_pending_one_shot_is_requeued_after_restart(host_factory) -> None:
     host = host_factory()
     job = scheduler.schedule_job("0 9 * * *", "persist me", recurring=False)
     scheduler._enqueue_due_job(job)
-    scheduler.scheduled_jobs.clear()
-    scheduler.cron_queue.clear()
+    scheduler._scheduled_jobs.clear()
+    scheduler._cron_queue.clear()
 
     scheduler.load_durable_jobs()
 
-    assert [queued.id for queued in scheduler.cron_queue] == [job.id]
-    restored = scheduler.scheduled_jobs[job.id]
+    assert [queued.id for queued in scheduler._cron_queue] == [job.id]
+    restored = scheduler._scheduled_jobs[job.id]
     scheduler.load_durable_jobs()
-    assert scheduler.cron_queue == [restored]
-    assert scheduler.scheduled_jobs[job.id] is restored
+    assert scheduler._cron_queue == [restored]
+    assert scheduler._scheduled_jobs[job.id] is restored
     delivered = scheduler.consume_cron_queue()
     # Reinitialization must not requeue a delivery already being processed.
     scheduler.load_durable_jobs()
-    assert not scheduler.cron_queue
+    assert not scheduler._cron_queue
     scheduler.acknowledge_cron_jobs(delivered)
-    scheduler.scheduled_jobs.clear()
+    scheduler._scheduled_jobs.clear()
     scheduler.load_durable_jobs()
-    assert scheduler.scheduled_jobs == {}
+    assert scheduler._scheduled_jobs == {}
 
 
 def test_only_runtime_startup_loads_pending_cron(host_factory, monkeypatch) -> None:
     host = host_factory()
     job = scheduler.schedule_job("0 9 * * *", "persist me", recurring=False)
     scheduler._enqueue_due_job(job)
-    scheduler.scheduled_jobs.clear()
-    scheduler.cron_queue.clear()
+    scheduler._scheduled_jobs.clear()
+    scheduler._cron_queue.clear()
     load = scheduler.load_durable_jobs
     calls = []
     def load_once():
@@ -186,12 +245,12 @@ def test_only_runtime_startup_loads_pending_cron(host_factory, monkeypatch) -> N
         load()
     monkeypatch.setattr(scheduler, "load_durable_jobs", load_once)
     importlib.reload(host)
-    assert calls == [] and not scheduler.cron_queue
+    assert calls == [] and not scheduler._cron_queue
     try:
         scheduler.start_runtime_services()
         scheduler.start_runtime_services()
         assert calls == [True]
-        assert [queued.id for queued in scheduler.cron_queue] == [job.id]
+        assert [queued.id for queued in scheduler._cron_queue] == [job.id]
     finally:
         scheduler.stop_runtime_services()
 
@@ -203,7 +262,7 @@ def test_schedule_write_failure_does_not_register_job(host_factory, monkeypatch)
     with pytest.raises(OSError, match="disk unavailable"):
         scheduler.schedule_job("0 9 * * *", "persist me")
 
-    assert scheduler.scheduled_jobs == {}
+    assert scheduler._scheduled_jobs == {}
     assert not scheduler._durable_path().exists()
 
 
@@ -217,8 +276,8 @@ def test_cancel_write_failure_keeps_job_and_queue(host_factory, monkeypatch) -> 
     with pytest.raises(OSError, match="disk unavailable"):
         scheduler.cancel_job(job.id)
 
-    assert scheduler.scheduled_jobs[job.id] is job
-    assert scheduler.cron_queue == [job]
+    assert scheduler._scheduled_jobs[job.id] is job
+    assert scheduler._cron_queue == [job]
     assert scheduler._durable_path().read_text(encoding="utf-8") == disk_before
 
 
@@ -231,7 +290,7 @@ def test_enqueue_write_failure_keeps_job_due(host_factory, monkeypatch) -> None:
         scheduler._enqueue_due_job(job)
 
     assert job.pending_delivery is False
-    assert scheduler.cron_queue == []
+    assert scheduler._cron_queue == []
     assert json.loads(scheduler._durable_path().read_text())[0][
         "pending_delivery"] is False
 
@@ -248,7 +307,7 @@ def test_acknowledge_write_failure_retains_pending_delivery(
     with pytest.raises(OSError, match="disk unavailable"):
         scheduler.acknowledge_cron_jobs(delivered)
 
-    assert scheduler.scheduled_jobs[job.id] is job
+    assert scheduler._scheduled_jobs[job.id] is job
     assert job.pending_delivery is True
     assert scheduler.consume_cron_queue() == [job]
     assert json.loads(scheduler._durable_path().read_text())[0][
@@ -286,19 +345,19 @@ def test_corrupt_durable_store_is_ignored(host_factory) -> None:
     scheduler.load_durable_jobs()
 
     # 存储文件不可读时，不能恢复出不存在的任务。
-    assert scheduler.scheduled_jobs == {}
+    assert scheduler._scheduled_jobs == {}
 
 
 def test_restore_cron_jobs_does_not_duplicate_queue_entries(host_factory) -> None:
     host = host_factory()
     job = scheduler.CronJob(id="cron_1", cron="0 9 * * *", prompt="p",
                        recurring=False, durable=False, pending_delivery=True)
-    scheduler.scheduled_jobs[job.id] = job
+    scheduler._scheduled_jobs[job.id] = job
 
     scheduler.restore_cron_jobs([job])
     scheduler.restore_cron_jobs([job])
 
-    assert [queued.id for queued in scheduler.cron_queue] == ["cron_1"]
+    assert [queued.id for queued in scheduler._cron_queue] == ["cron_1"]
 
 
 def finish_task(host, monkeypatch, output, exit_code=0):
@@ -322,8 +381,8 @@ def test_long_output_tail_is_readable(host_factory, monkeypatch, length, exit_co
             raise RuntimeError("hook failed")
         monkeypatch.setattr(hooks, "trigger_hooks", fail_hook)
     task_id = finish_task(host, monkeypatch, output, exit_code)
-    expected = scheduler.background_results[task_id]
-    result = scheduler.background_tasks[task_id]["result"]
+    expected = scheduler._background_results[task_id]
+    result = scheduler._background_tasks[task_id]["result"]
     assert result.status == ("failed" if exit_code else "success")
     note, = scheduler.collect_background_results()
     path = full_path(note)
@@ -347,7 +406,7 @@ def test_bound_lead_reads_background_full_output_through_tool_loop(host_factory,
     tasks.save_task(task)
     assert tasks.claim_task(task.id, owner="agent").startswith("Claimed")
     task_id = finish_task(host, monkeypatch, "中" * 250 + "\nTAIL")
-    assert scheduler.background_tasks[task_id]["cwd"] == str(checkout)
+    assert scheduler._background_tasks[task_id]["cwd"] == str(checkout)
     note, = scheduler.collect_background_results()
     path = full_path(note)
     responses = [
@@ -383,13 +442,13 @@ def test_batch_save_failure_keeps_records_and_reuses_saved_path(host_factory, mo
     monkeypatch.setattr(compaction, "save_output", fail_second)
     with pytest.raises(OSError, match="disk unavailable"):
         scheduler.collect_background_results()
-    assert set(scheduler.background_tasks) == {first, second}
-    saved = scheduler.background_tasks[first]["saved_output_path"]
+    assert set(scheduler._background_tasks) == {first, second}
+    saved = scheduler._background_tasks[first]["saved_output_path"]
     notes = scheduler.collect_background_results()
     assert str(full_path(notes[0])) == saved
     assert len(calls) == 3
     assert calls[0] != calls[1] == calls[2]
-    assert not scheduler.background_results
+    assert not scheduler._background_results
 
 
 def test_two_collectors_deliver_each_result_once(host_factory, monkeypatch):

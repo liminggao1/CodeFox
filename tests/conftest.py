@@ -67,10 +67,10 @@ def host_factory(tmp_path, monkeypatch):
         tasks.assignment_versions.clear()
         contexts.enter_context(lead_context_scope(LeadContext(tasks.task_lock)))
         mcp_tools.mcp_clients.clear()
-        scheduler.scheduled_jobs.clear()
-        scheduler.cron_queue.clear()
-        scheduler.background_tasks.clear()
-        scheduler.background_results.clear()
+        scheduler._scheduled_jobs.clear()
+        scheduler._cron_queue.clear()
+        scheduler._background_tasks.clear()
+        scheduler._background_results.clear()
         host.initialize_runtime()
         # 记忆提取会调用模型，测试中由用例显式控制。
         if not enable_memory:

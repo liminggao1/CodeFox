@@ -53,9 +53,8 @@ class SessionSwitch:
         if (scheduler.has_background_tasks() or subagent_runtime.list_subagents()
                 or subagent_runtime.has_pending_inbox()):
             raise SessionError("仍有后台任务或结果未处理，请先完成再 /resume")
-        with scheduler.cron_lock:
-            if scheduler.cron_queue:
-                raise SessionError("仍有计划任务结果未处理，请先完成再 /resume")
+        if scheduler.has_pending_cron():
+            raise SessionError("仍有计划任务结果未处理，请先完成再 /resume")
         assignment = tasks.validate_lead_context(target, snapshot, workdir=root)
         return snapshot, root, restored_goal, assignment
 
@@ -85,15 +84,15 @@ class SessionSwitch:
         if directory_changed:
             scheduler.stop_runtime_services()
         try:
-            with scheduler.cron_lock:
-                if scheduler.cron_queue:
-                    raise SessionError("仍有计划任务结果未处理，请先完成再 /resume")
+            with scheduler.require_idle_cron():
                 if directory_changed:
                     os.chdir(root)
                 self._activate(snapshot, root, restored_goal, assignment)
-        except Exception:
+        except Exception as exc:
             if directory_changed and core.WORKDIR.resolve() != root:
                 scheduler.start_runtime_services(load_jobs=False)
+            if isinstance(exc, scheduler.PendingCronDeliveryError):
+                raise SessionError(f"{exc}，请先完成再 /resume") from exc
             raise
         with interaction.execution_context(self._context()):
             try:
@@ -123,16 +122,19 @@ class SessionSwitch:
         if (scheduler.has_background_tasks() or subagent_runtime.list_subagents()
                 or subagent_runtime.has_pending_inbox()):
             raise SessionError("仍有后台任务或结果未处理，请先完成再 /new")
-        with scheduler.cron_lock:
-            if scheduler.cron_queue:
-                raise SessionError("仍有计划任务结果未处理，请先完成再 /new")
+        if scheduler.has_pending_cron():
+            raise SessionError("仍有计划任务结果未处理，请先完成再 /new")
         if not self._checkpoint():
             raise SessionError("当前会话保存失败，未开启新会话")
         current_goal = self._read_goal()
         fresh_goal = goal.GoalController(current_goal.evaluator, current_goal.block_cap)
         snapshot = self._store.create()
         assignment = tasks.validate_lead_context(snapshot["id"], snapshot, workdir=root)
-        self._activate(snapshot, root, fresh_goal, assignment)
+        try:
+            with scheduler.require_idle_cron():
+                self._activate(snapshot, root, fresh_goal, assignment)
+        except scheduler.PendingCronDeliveryError as exc:
+            raise SessionError(f"{exc}，请先完成再 /new") from exc
         with interaction.execution_context(self._context()):
             self._record("new_session", snapshot["id"], save=False)
             self._checkpoint()

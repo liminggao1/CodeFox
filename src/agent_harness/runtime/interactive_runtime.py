@@ -133,9 +133,8 @@ class InteractiveRuntime:
     def _background_ready(self):
         if self.session.session_id is None:
             return False
-        with scheduler.cron_lock:
-            fired = bool(scheduler.cron_queue)
-        return fired or subagent_runtime.has_pending_inbox() or scheduler.has_pending_background()
+        return (scheduler.has_pending_cron() or subagent_runtime.has_pending_inbox()
+                or scheduler.has_pending_background())
 
     @staticmethod
     def _display_record(fact):

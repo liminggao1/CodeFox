@@ -188,10 +188,9 @@ class TurnRunner:
                         inbox = subagent_runtime.consume_lead_inbox(route_protocol=True)
                         if inbox:
                             self._session.history.append({"role": "user", "content": subagent_runtime.format_subagent_events(inbox)})
-                        with scheduler.cron_lock:
-                            fired = list(scheduler.cron_queue)
-                        if fired:
-                            text = "\n".join(f"Run scheduled task: {job.prompt}" for job in fired)
+                        prompts = scheduler.pending_cron_prompts()
+                        if prompts:
+                            text = "\n".join(f"Run scheduled task: {prompt}" for prompt in prompts)
                         self._record("background_notification", text, save=False)
                     else:
                         self._session.history.append({"role": "user", "content": text})

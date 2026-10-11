@@ -166,13 +166,13 @@ def test_preparation_failure_restores_cron_and_next_turn_can_deliver(host_factor
     history = [{"role": "user", "content": "go"}]
     host.agent_loop(history, "go")
     assert calls == []
-    assert scheduler.cron_queue == [job]
-    assert scheduler.scheduled_jobs[job.id].pending_delivery
+    assert scheduler._cron_queue == [job]
+    assert scheduler._scheduled_jobs[job.id].pending_delivery
     assert "[Error]" in history[-1]["content"][0]["text"]
 
     monkeypatch.setattr(memory_runtime, "read_memory_index", original_index)
     mcp_tools.mcp_clients.clear()
     host.agent_loop(history, "retry")
     assert calls == [True]
-    assert scheduler.cron_queue == []
-    assert job.id not in scheduler.scheduled_jobs
+    assert scheduler._cron_queue == []
+    assert job.id not in scheduler._scheduled_jobs

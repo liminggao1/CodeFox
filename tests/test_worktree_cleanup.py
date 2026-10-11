@@ -135,7 +135,7 @@ def test_running_background_command_keeps_lead_assignment(worktree_runtime):
     host, task, checkout, _ = worktree_runtime()
     assert tasks.complete_task(task.id).startswith("Completed")
     version = tasks.assignment_versions["agent"]
-    scheduler.background_tasks["bg_test"] = {
+    scheduler._background_tasks["bg_test"] = {
         "status": "running", "cwd": str(checkout)}
 
     result = registrations.run_remove_worktree("feature").content

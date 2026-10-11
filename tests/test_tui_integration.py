@@ -115,20 +115,20 @@ def test_tui_cron_error_after_resume_keeps_current_session_generation(runtime_fa
     runtime.session.store.save(target)
     app = HarnessApp(runtime)
     logs = []
-    monkeypatch.setattr(app, "_log", logs.append)
+    monkeypatch.setattr(app.conversation, "log", logs.append)
     monkeypatch.setattr(core, "CRON_POLL_SECONDS", 0.01)
     async def exercise():
         async with app.run_test(size=(100, 30)) as pilot:
             app._submit("/resume " + target["id"])
             await wait_for(pilot, lambda: app.generation == 2 and not app.busy)
-            with scheduler.cron_lock:
+            with scheduler._cron_lock:
                 scheduler.schedule_job("* * * * *", "cannot persist", recurring=False)
                 def fail():
                     raise OSError("cron disk unavailable")
                 monkeypatch.setattr(scheduler, "save_durable_jobs", fail)
             await wait_for(pilot, lambda: any("cron disk unavailable" in log for log in logs))
             assert app.generation == 2 and app.snapshot["session_id"] == target["id"]
-            assert not scheduler.cron_queue
+            assert not scheduler.has_pending_cron()
             old = ExecutionContext(runtime.channel, "old", 1, "old-turn")
             old.publish("assistant_message", text="stale")
             await pilot.pause(0.15)

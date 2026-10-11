@@ -38,6 +38,8 @@
   缺 `tokens` 的旧格式记录在 resume 时明确报错（旧文件保留，重跑生成新格式）。
 - cron：循环 cron 仅在本进程内按分钟去重，重启后同一分钟可再次触发；持久化的一次性任务采用至少一次交付
   （入队前落盘，模型调用被接受后才确认，确认前崩溃允许重投）。
+- 调度器独占后台任务、cron 队列与锁。调用方只查询待交付状态或进入操作作用域；会话激活前重新检查 cron，
+  检查到激活完成期间阻止新任务入队；工作树移除从后台占用检查到目录移除与任务解绑保持同一互斥范围。
 - Lead 与子 agent 保持独立循环、独立工具集合与停止条件；只共用底层文件工具实现、handler 调用和 hook 规则。
 
 ## 3. 两轮架构深化（2026-10-08）
@@ -211,7 +213,7 @@
   `/resume` 委托 `SessionSwitch`。
 - 回合执行由 `runtime/turn_runner.py` 的 `TurnRunner.run(submission_id, kind, text)` 拥有：接受到终态的事件、
   `_pending`/`_busy`/`_turn`/`_stop`、后台暂停与 lead 用量账本。
-- `InteractiveRuntime` 只保留提交排队、生命周期标志、线程启动与关闭编排。
+- `InteractiveRuntime` 负责生命周期、线程启动与关闭，以及展示事实的保存和交付；提交排队与回合状态归 `TurnRunner`。
 - 子 agent 操作成为 Lead interface，模块级全局降为私有；锁序由单一私有 `_team_lock()` 上下文管理器强制，
   嵌套点统一经它进入；提供 `has_pending_inbox()` 与 `active_names()` 只读 interface。
 - 回合由 `agents/lead_turn.py` 的 `LeadTurn` 唯一拥有：会话历史、展示发布、checkpoint、`model_call_id`、

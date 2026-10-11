@@ -158,7 +158,7 @@ def test_lead_protocol_failure_executes_no_tools_or_stop_and_restores_cron(host_
     messages = [{"role": "user", "content": "go"}]
     host.agent_loop(messages, "go")
     assert "Stop" not in stops
-    assert scheduler.cron_queue == [job]
+    assert scheduler._cron_queue == [job]
     assert not (core.WORKDIR / "bad.txt").exists()
     assert "ProtocolResponseError" in messages[-1]["content"][0]["text"]
     assert not any("tool_use" in str(msg) for msg in messages)

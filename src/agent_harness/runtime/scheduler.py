@@ -1,7 +1,7 @@
 """后台任务与 cron 调度器。
 
 后台命令在工作线程中执行工具调用，并通过 task_notification 返回结果。
-cron 任务持久化到启动目录的 .scheduled_tasks.json，再通过 cron_queue 送入主循环。
+cron 任务持久化到启动目录的 .scheduled_tasks.json，再通过 _cron_queue 送入主循环。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -30,9 +31,9 @@ BACKGROUND_SUMMARY_CHARS = 200
 
 # 慢工具先返回占位 tool_result，实际结果随后作为 task_notification 注入主循环。
 _bg_counter = 0
-background_tasks: dict[str, dict] = {}
-background_results: dict[str, str] = {}
-background_lock = threading.Lock()
+_background_tasks: dict[str, dict] = {}
+_background_results: dict[str, str] = {}
+_background_lock = threading.Lock()
 _background_threads: list[threading.Thread] = []
 
 
@@ -82,22 +83,22 @@ def start_background_task(block, handlers: dict) -> str:
             hook_error = f"{type(execution.post_error).__name__}: {execution.post_error}"
             result = f"Error: PostToolUse hook failed: {hook_error}\n{result}"
             status = "failed"
-        with background_lock:
-            task = background_tasks.get(bg_id)
+        with _background_lock:
+            task = _background_tasks.get(bg_id)
             if task is None:
                 return
             task["status"] = status
             task["command_status"] = execution.result.status
             task["hook_error"] = hook_error
             task["result"] = execution.result
-            background_results[bg_id] = result
+            _background_results[bg_id] = result
 
     with tasks.task_lock:
         cwd, cwd_error = file_tools.tool_cwd("agent")
-        with background_lock:
+        with _background_lock:
             _bg_counter += 1
             bg_id = f"bg_{_bg_counter:04d}"
-            background_tasks[bg_id] = {
+            _background_tasks[bg_id] = {
                 "tool_use_id": block.id,
                 "command": command,
                 "status": "running",
@@ -109,20 +110,20 @@ def start_background_task(block, handlers: dict) -> str:
         with interaction.execution_context(context):
             interaction.publish("background_status", task_id=bg_id, status="running")
             worker()
-            with background_lock:
-                status = background_tasks.get(bg_id, {}).get("status", "finished")
+            with _background_lock:
+                status = _background_tasks.get(bg_id, {}).get("status", "finished")
             interaction.publish("background_status", task_id=bg_id, status=status)
 
     thread = threading.Thread(target=run_worker, daemon=True)
     try:
         thread.start()
     except Exception:
-        with background_lock:
-            background_tasks.pop(bg_id, None)
-            background_results.pop(bg_id, None)
+        with _background_lock:
+            _background_tasks.pop(bg_id, None)
+            _background_results.pop(bg_id, None)
         raise
     if context is not None:
-        with background_lock:
+        with _background_lock:
             _background_threads[:] = [item for item in _background_threads if item.is_alive()]
             _background_threads.append(thread)
     core.terminal_print(f"  \033[33m[background] {bg_id}: {str(command)[:60]}\033[0m")
@@ -130,11 +131,11 @@ def start_background_task(block, handlers: dict) -> str:
 
 
 def wait_for_background_tasks():
-    with background_lock:
+    with _background_lock:
         threads = list(_background_threads)
     for thread in threads:
         thread.join()
-    with background_lock:
+    with _background_lock:
         _background_threads.clear()
 
 
@@ -145,13 +146,13 @@ def collect_background_results() -> list[str]:
         超过 200 字符的结果保存全文；整批构造成功后删除内存登记。
         文件保存失败会抛出异常，整批仍保持待交付，重试可复用已经保存的路径。
     """
-    with background_lock:
-        ready = [bg_id for bg_id, task in background_tasks.items()
+    with _background_lock:
+        ready = [bg_id for bg_id, task in _background_tasks.items()
                  if task["status"] in {"completed", "failed"}]
         notifications = []
         for bg_id in ready:
-            task = background_tasks[bg_id]
-            output = background_results.get(bg_id, "")
+            task = _background_tasks[bg_id]
+            output = _background_results.get(bg_id, "")
             full_output = ""
             if len(output) > BACKGROUND_SUMMARY_CHARS:
                 saved_path = task.get("saved_output_path")
@@ -176,8 +177,8 @@ def collect_background_results() -> list[str]:
                 f"</task_notification>")
         # A failed save leaves the entire batch ready for a later collection.
         for bg_id in ready:
-            background_tasks.pop(bg_id)
-            background_results.pop(bg_id, None)
+            _background_tasks.pop(bg_id)
+            _background_results.pop(bg_id, None)
         return notifications
 
 
@@ -188,16 +189,33 @@ def has_pending_background() -> bool:
         有待交付的后台任务时返回 ``True``，否则返回 ``False``。
     """
     # 读取后台任务表时加锁，避免与后台线程同时修改状态。
-    with background_lock:
+    with _background_lock:
         # 只要有一个任务已经完成或失败，就需要延迟目标评估。
         return any(task["status"] in {"completed", "failed"}
-                   for task in background_tasks.values())
+                   for task in _background_tasks.values())
 
 
 def has_background_tasks() -> bool:
     """Include running commands and undelivered results at session boundaries."""
-    with background_lock:
-        return bool(background_tasks)
+    with _background_lock:
+        return bool(_background_tasks)
+
+
+@contextmanager
+def require_idle_background_directory(path: Path):
+    """拒绝占用中的目录，并在调用方完成目录操作前阻止新的后台登记。
+
+    调用方先持有任务锁；这里拥有后台任务的状态查询和锁生命周期。
+    已结束的命令不占用目录，待交付结果仍由正常领取流程处理。
+    """
+    root = path.resolve()
+    with _background_lock:
+        if any(task.get("status") == "running" and task.get("cwd")
+               and Path(task["cwd"]).resolve() == root
+               for task in _background_tasks.values()):
+            raise ValueError(f"Error: Directory '{root}' has a running background "
+                             "command; wait for it to finish")
+        yield
 
 
 
@@ -218,10 +236,39 @@ class CronJob:
     pending_delivery: bool = False
 
 
-scheduled_jobs: dict[str, CronJob] = {}
-cron_queue: list[CronJob] = []
-cron_lock = threading.RLock()
+_scheduled_jobs: dict[str, CronJob] = {}
+_cron_queue: list[CronJob] = []
+_cron_lock = threading.RLock()
 _last_fired: dict[str, str] = {}
+
+
+class PendingCronDeliveryError(ValueError):
+    """定时任务尚待交付，不能激活另一个会话。"""
+
+
+def pending_cron_prompts() -> tuple[str, ...]:
+    """读取待交付提示词，不消费队列，也不交出可变任务对象。"""
+    with _cron_lock:
+        return tuple(job.prompt for job in _cron_queue)
+
+
+def has_pending_cron() -> bool:
+    """判断是否有到期但尚未交给 Lead 的定时任务。"""
+    with _cron_lock:
+        return bool(_cron_queue)
+
+
+@contextmanager
+def require_idle_cron():
+    """确认没有待交付任务，并在会话激活完成前阻止新的任务入队。
+
+    等待调度线程退出必须在进入本作用域前完成，避免持锁等待线程。
+    调用方只负责会话操作；队列检查与互斥由调度器拥有。
+    """
+    with _cron_lock:
+        if _cron_queue:
+            raise PendingCronDeliveryError("仍有计划任务结果未处理")
+        yield
 
 
 def _cron_field_matches(field: str, value: int) -> bool:
@@ -323,8 +370,8 @@ def save_durable_jobs():
     返回：None。持有 cron 锁，写临时文件后替换正式文件；非持久化任务不写入。
         写入错误继续抛出，临时文件在 finally 中清理。
     """
-    with cron_lock:
-        durable = [asdict(job) for job in scheduled_jobs.values() if job.durable]
+    with _cron_lock:
+        durable = [asdict(job) for job in _scheduled_jobs.values() if job.durable]
         durable_path = _durable_path()
         temporary = durable_path.with_suffix(".json.tmp")
         try:
@@ -337,19 +384,19 @@ def save_durable_jobs():
 def load_durable_jobs():
     """启动时从文件恢复持久化 cron 及尚未确认交付的任务。
 
-    返回：None。有效记录加入 scheduled_jobs；pending_delivery 记录同时加入队列。
+    返回：None。有效记录加入 _scheduled_jobs；pending_delivery 记录同时加入队列。
         文件缺失时不操作，读取或解析异常忽略；已登记 ID 保留内存状态。
     """
     if not _durable_path().exists():
         return
     try:
-        with cron_lock:
+        with _cron_lock:
             for item in json.loads(_durable_path().read_text(encoding="utf-8")):
                 job = CronJob(**item)
-                if job.id not in scheduled_jobs and not validate_cron(job.cron):
-                    scheduled_jobs[job.id] = job
+                if job.id not in _scheduled_jobs and not validate_cron(job.cron):
+                    _scheduled_jobs[job.id] = job
                     if job.pending_delivery:
-                        cron_queue.append(job)
+                        _cron_queue.append(job)
     except Exception:
         pass
 
@@ -370,17 +417,17 @@ def schedule_job(cron: str, prompt: str,
         id=f"cron_{random.randint(0, 999999):06d}",
         cron=cron, prompt=prompt,
         recurring=recurring, durable=durable)
-    with cron_lock:
-        previous = scheduled_jobs.get(job.id)
-        scheduled_jobs[job.id] = job
+    with _cron_lock:
+        previous = _scheduled_jobs.get(job.id)
+        _scheduled_jobs[job.id] = job
         if durable:
             try:
                 save_durable_jobs()
             except Exception:
                 if previous is None:
-                    scheduled_jobs.pop(job.id, None)
+                    _scheduled_jobs.pop(job.id, None)
                 else:
-                    scheduled_jobs[job.id] = previous
+                    _scheduled_jobs[job.id] = previous
                 raise
     return job
 
@@ -392,16 +439,16 @@ def cancel_job(job_id: str) -> str:
     返回：取消确认文本；未找到时抛出 ValueError。
         持久化写入失败时恢复登记和队列，再抛出异常。
     """
-    with cron_lock:
-        previous_queue = list(cron_queue)
-        job = scheduled_jobs.pop(job_id, None)
-        cron_queue[:] = [queued for queued in cron_queue if queued.id != job_id]
+    with _cron_lock:
+        previous_queue = list(_cron_queue)
+        job = _scheduled_jobs.pop(job_id, None)
+        _cron_queue[:] = [queued for queued in _cron_queue if queued.id != job_id]
         if job and job.durable:
             try:
                 save_durable_jobs()
             except Exception:
-                scheduled_jobs[job_id] = job
-                cron_queue[:] = previous_queue
+                _scheduled_jobs[job_id] = job
+                _cron_queue[:] = previous_queue
                 raise
     if not job:
         raise ValueError(f"Job {job_id} not found")
@@ -412,7 +459,7 @@ def _enqueue_due_job(job: CronJob):
     """将到期任务入队，一次性任务先记录待交付状态。
 
     输入：job 为到期的 CronJob，调用方持有 cron 锁。
-    返回：None。一次性 durable 任务先保存 pending_delivery，再加入 cron_queue；
+    返回：None。一次性 durable 任务先保存 pending_delivery，再加入 _cron_queue；
         保存失败时撤销待交付标志并抛出异常，不发布队列项。
     """
     if not job.recurring:
@@ -423,7 +470,7 @@ def _enqueue_due_job(job: CronJob):
         except Exception:
             job.pending_delivery = False
             raise
-    cron_queue.append(job)
+    _cron_queue.append(job)
 
 
 def cron_scheduler_loop(stop_event):
@@ -435,8 +482,8 @@ def cron_scheduler_loop(stop_event):
     while not stop_event.wait(core.CRON_POLL_SECONDS):
         now = datetime.now()
         marker = now.strftime("%Y-%m-%d %H:%M")
-        with cron_lock:
-            for job in list(scheduled_jobs.values()):
+        with _cron_lock:
+            for job in list(_scheduled_jobs.values()):
                 try:
                     if job.pending_delivery:
                         continue
@@ -450,11 +497,11 @@ def cron_scheduler_loop(stop_event):
 def consume_cron_queue() -> list[CronJob]:
     """取出本批到期任务，交给主循环注入模型历史。
 
-    返回：队列快照并清空原队列；不确认交付、不删除 scheduled_jobs 中的任务。
+    返回：队列快照并清空原队列；不确认交付、不删除 _scheduled_jobs 中的任务。
     """
-    with cron_lock:
-        fired = list(cron_queue)
-        cron_queue.clear()
+    with _cron_lock:
+        fired = list(_cron_queue)
+        _cron_queue.clear()
     return fired
 
 
@@ -466,19 +513,19 @@ def acknowledge_cron_jobs(jobs: list[CronJob]):
         持久化失败时恢复任务登记并重新入队，然后抛出异常。
     """
     durable_changed = False
-    with cron_lock:
-        previous_jobs = dict(scheduled_jobs)
+    with _cron_lock:
+        previous_jobs = dict(_scheduled_jobs)
         for job in jobs:
-            current = scheduled_jobs.get(job.id)
+            current = _scheduled_jobs.get(job.id)
             if current and not current.recurring and current.pending_delivery:
-                scheduled_jobs.pop(job.id, None)
+                _scheduled_jobs.pop(job.id, None)
                 durable_changed = durable_changed or current.durable
         if durable_changed:
             try:
                 save_durable_jobs()
             except Exception:
-                scheduled_jobs.clear()
-                scheduled_jobs.update(previous_jobs)
+                _scheduled_jobs.clear()
+                _scheduled_jobs.update(previous_jobs)
                 restore_cron_jobs(jobs)
                 raise
 
@@ -489,12 +536,12 @@ def restore_cron_jobs(jobs: list[CronJob]):
     输入：jobs 为需要恢复的任务列表。
     返回：None。按 ID 去重，不重新加入已经取消或删除的任务。
     """
-    with cron_lock:
-        queued_ids = {job.id for job in cron_queue}
+    with _cron_lock:
+        queued_ids = {job.id for job in _cron_queue}
         for job in jobs:
-            current = scheduled_jobs.get(job.id)
+            current = _scheduled_jobs.get(job.id)
             if current and current.id not in queued_ids:
-                cron_queue.append(current)
+                _cron_queue.append(current)
                 queued_ids.add(current.id)
 
 
@@ -516,8 +563,8 @@ def run_list_crons() -> ToolResult:
 
     返回：任务 ID、表达式、提示词预览及重复/持久化标志的文本；无任务时给出提示。
     """
-    with cron_lock:
-        jobs = list(scheduled_jobs.values())
+    with _cron_lock:
+        jobs = list(_scheduled_jobs.values())
     if not jobs:
         return ToolResult("No cron jobs.", "success")
     return ToolResult("\n".join(
@@ -582,7 +629,7 @@ def stop_runtime_services():
 
 def clear_runtime_jobs():
     """Discard the old directory's in-memory schedule after stopping services."""
-    with cron_lock:
-        scheduled_jobs.clear()
-        cron_queue.clear()
+    with _cron_lock:
+        _scheduled_jobs.clear()
+        _cron_queue.clear()
         _last_fired.clear()

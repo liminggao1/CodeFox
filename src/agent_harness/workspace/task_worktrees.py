@@ -138,15 +138,7 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
         if leased:
             raise ValueError(f"Error: Worktree '{name}' is still in use by "
                     f"{', '.join(sorted(leased))}; wait for the turn to end")
-        with scheduler.background_lock:
-            running = [item for item in scheduler.background_tasks.values()
-                       if item.get("status") == "running"
-                       and item.get("cwd")
-                       and Path(item["cwd"]).resolve() == path.resolve()]
-            if running:
-                raise ValueError(f"Error: Worktree '{name}' has a running background "
-                        "command; wait for it to finish")
-
+        with scheduler.require_idle_background_directory(path):
             ok, status = worktrees.run_git(
                 ["status", "--porcelain", "--ignored"], cwd=path
             )

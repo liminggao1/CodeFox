@@ -158,12 +158,12 @@ def test_cross_process_claim_waits_for_worktree_binding(
     with pytest.raises(ValueError, match="still in use"):
         task_worktrees.remove_worktree("concurrent")
     assert tasks.release_completed_assignment("alice") is True
-    scheduler.background_tasks["bg_test"] = {
+    scheduler._background_tasks["bg_test"] = {
         "status": "running", "cwd": str(tmp_path / ".worktrees" / "concurrent"),
     }
     with pytest.raises(ValueError, match="running background"):
         task_worktrees.remove_worktree("concurrent")
-    scheduler.background_tasks.clear()
+    scheduler._background_tasks.clear()
     assert task_worktrees.remove_worktree("concurrent", discard_changes=True).startswith(
         "Worktree"
     )

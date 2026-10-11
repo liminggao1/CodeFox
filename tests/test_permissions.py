@@ -220,7 +220,7 @@ def test_stop_after_pre_hook_takes_priority_over_denial(host_factory, monkeypatc
     assert results[0].payload["content"] == "Interrupted before execution"
     assert results[0].payload["is_error"] is True
     assert outcome.status == "stopped"
-    assert posted == [] and not scheduler.background_tasks
+    assert posted == [] and not scheduler._background_tasks
     assert not (tmp_path / "must-not-exist").exists()
 
 
@@ -287,4 +287,4 @@ def test_background_dispatch_rechecks_stop_after_selection(host_factory, monkeyp
     with execution_context(context):
         outcome = host.agent_loop(messages, "run")
     assert outcome.status == "stopped"
-    assert not scheduler.background_tasks and not (tmp_path / "not-started").exists()
+    assert not scheduler._background_tasks and not (tmp_path / "not-started").exists()

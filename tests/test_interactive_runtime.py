@@ -269,8 +269,8 @@ def test_stop_model_context_error_does_not_start_reactive_summary(runtime_factor
     assert finished.payload["outcome"]["status"] == "failed"
     assert "context_length_exceeded" in finished.payload["outcome"]["reason"]
     assert calls == [True] and summaries == []
-    assert scheduler.cron_queue == [job]
-    assert scheduler.scheduled_jobs[job.id].pending_delivery
+    assert scheduler._cron_queue == [job]
+    assert scheduler._scheduled_jobs[job.id].pending_delivery
     if operation == "close":
         until(runtime, "runtime_closed")
 
@@ -340,8 +340,8 @@ def test_stop_cron_delivery_boundary(runtime_factory, monkeypatch, boundary):
     assert finished.payload["outcome"]["status"] == "stopped"
     assert runtime.turns.background_paused
     # A cancelled stream has no accepted response to confirm cron delivery.
-    assert scheduler.cron_queue == [job]
-    assert scheduler.scheduled_jobs[job.id].pending_delivery
+    assert scheduler._cron_queue == [job]
+    assert scheduler._scheduled_jobs[job.id].pending_delivery
 
 
 def test_background_delivery_runs_with_noninteractive_permissions(runtime_factory):
@@ -773,7 +773,7 @@ def test_switch_directory_reloads_cron_and_keeps_each_session_root(runtime_facto
     result, _ = resume_command(runtime, other["id"])
     assert result.payload["status"] == "completed", result.payload
     assert Path.cwd() == core.WORKDIR == other_root
-    assert not scheduler.scheduled_jobs
+    assert not scheduler._scheduled_jobs
     assert tasks.assignment_cwd("agent") == other_root
     assert file_tools.run_agent_write("here.txt", "other").content.startswith("Wrote")
     assert (other_root / "here.txt").read_text() == "other"
@@ -782,13 +782,13 @@ def test_switch_directory_reloads_cron_and_keeps_each_session_root(runtime_facto
     result, _ = resume_command(runtime, original_id)
     assert result.payload["status"] == "completed", result.payload
     assert Path.cwd() == core.WORKDIR == original_root
-    assert set(scheduler.scheduled_jobs) == {original_job.id}
-    assert transient_job.id not in scheduler.scheduled_jobs
+    assert set(scheduler._scheduled_jobs) == {original_job.id}
+    assert transient_job.id not in scheduler._scheduled_jobs
     assert runtime.session.store.load(original_id)["workdir"] == str(original_root)
     assert runtime.session.store.load(other["id"])["workdir"] == str(other_root)
     result, _ = resume_command(runtime, other["id"])
     assert result.payload["status"] == "completed", result.payload
-    assert set(scheduler.scheduled_jobs) == {other_job.id}
+    assert set(scheduler._scheduled_jobs) == {other_job.id}
 
 
 @pytest.mark.parametrize("failure", ["save", "chdir", "task", "queued_cron"])
@@ -807,7 +807,7 @@ def test_cross_directory_failure_preserves_current_context(runtime_factory, monk
     runtime.session.store.save(target)
     job = scheduler.schedule_job("0 0 1 1 *", "keep scheduler", durable=True)
     if failure == "queued_cron":
-        with scheduler.cron_lock:
+        with scheduler._cron_lock:
             scheduler._enqueue_due_job(job)
         runtime.turns.pause_background()
     def fail(*args):
@@ -822,8 +822,49 @@ def test_cross_directory_failure_preserves_current_context(runtime_factory, monk
     assert runtime.session.session_id == current_id
     assert runtime.session.history == before_history
     assert Path.cwd() == core.WORKDIR == runtime.session.store.workdir == original_root
-    assert set(scheduler.scheduled_jobs) == {job.id}
+    assert set(scheduler._scheduled_jobs) == {job.id}
     assert scheduler._runtime_thread.is_alive()
+
+
+@pytest.mark.parametrize("command", ["/new", "/resume"])
+def test_session_activation_rechecks_cron_after_save(runtime_factory, monkeypatch, command):
+    from agent_harness.runtime.session_store import SessionError
+
+    runtime, host = runtime_factory(client=lambda **kwargs: response())
+    submission = runtime.submit("keep current")
+    until(runtime, "turn_finished", submission_id=submission.submission_id)
+    switch = runtime.session_switch
+    current_id = runtime.session.session_id
+    current_goal = host.GOAL
+    generation = runtime._generation
+    root = core.WORKDIR
+    history = list(runtime.session.history)
+    target = runtime.session.store.create()
+    target.update(goal=host.GOAL.snapshot())
+    runtime.session.store.save(target)
+    job = scheduler.schedule_job("0 0 1 1 *", "arrived while saving", recurring=False)
+    checkpoint = switch._checkpoint
+
+    def save_then_enqueue():
+        saved = checkpoint()
+        with scheduler._cron_lock:
+            scheduler._enqueue_due_job(job)
+        return saved
+
+    monkeypatch.setattr(switch, "_checkpoint", save_then_enqueue)
+    with host.agent_lock:
+        runtime.turns.pause_background()
+        with pytest.raises(SessionError, match=f"计划任务结果未处理.*{command}"):
+            if command == "/new":
+                switch.start_new()
+            else:
+                switch.switch(target["id"])
+        assert runtime.session.session_id == current_id
+        assert runtime.session.history == history
+        assert host.GOAL is current_goal
+        assert runtime._generation == generation
+        assert Path.cwd() == core.WORKDIR == root
+        assert scheduler.pending_cron_prompts() == (job.prompt,)
 
 
 def test_todo_input_and_snapshot_cannot_mutate_runtime_state(runtime_factory):
