@@ -405,10 +405,9 @@ class SessionScreen(ModalScreen[str | None]):
     SessionScreen Button { margin-left: 1; }
     """
 
-    def __init__(self, entries, errors, active_id=None):
+    def __init__(self, entries, active_id=None):
         super().__init__()
         self.entries = entries
-        self.errors = errors
         self.active_id = active_id
 
     def compose(self) -> ComposeResult:
@@ -416,7 +415,7 @@ class SessionScreen(ModalScreen[str | None]):
             with Horizontal(id="sessions-head"):
                 yield Label("会话历史")
                 yield Button("返回", id="cancel")
-            yield Static("\n".join(self.errors) if self.errors else ("" if self.entries else "暂无保存的会话"), markup=False)
+            yield Static("" if self.entries else "暂无保存的会话", markup=False)
             with ListView(id="sessions"):
                 for entry in self.entries:
                     yield ListItem(Label(self._label(entry), markup=False))

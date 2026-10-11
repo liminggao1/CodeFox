@@ -111,10 +111,12 @@ class CLIAdapter:
         elif event.type == "command_result":
             data = payload["data"]
             for entry in data.get("sessions", []):
+                if entry.get("invalid"):
+                    continue
                 self.write(f"{entry['id']}  {entry['updated_at']}  {entry['message_count']} messages  {entry['summary']}")
             for error in data.get("errors", []):
                 self.write(f"[session error] {error}")
-            if "sessions" in data and not data["sessions"]:
+            if "sessions" in data and not [entry for entry in data["sessions"] if not entry.get("invalid")]:
                 self.write("No saved sessions")
             if not payload.get("recorded") and (data.get("text") or data.get("error")):
                 self.write(data.get("text") or data["error"])

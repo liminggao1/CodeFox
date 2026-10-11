@@ -229,7 +229,11 @@ class SessionStore:
                                  "summary": str(first).replace("\n", " ")[:80],
                                  "message_count": len(snapshot["messages"])})
             except SessionError as exc:
+                # 读不出来的文件也列进会话列表，让用户能直接删除它。
+                # 字段只是展示占位，不代表文件内容有效。
                 errors.append(f"{path.name}: {exc}")
+                sessions.append({"id": path.stem, "updated_at": "", "summary": str(exc),
+                                 "message_count": 0, "invalid": True})
         sessions.sort(key=lambda item: item["updated_at"], reverse=True)
         return sessions[:limit], errors
 

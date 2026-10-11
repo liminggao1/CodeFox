@@ -6,6 +6,7 @@ import agent_harness.agents.subagent as subagent_runtime
 
 
 import asyncio
+import json
 import threading
 import time
 from xml.etree import ElementTree
@@ -14,7 +15,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import Markdown, Static, TextArea
+from textual.widgets import Label, ListView, Markdown, Static, TextArea
 from textual.widgets.text_area import Selection
 from textual.containers import VerticalScroll
 from agent_harness.frontends.tui.app import HarnessApp
@@ -185,8 +186,9 @@ def test_tui_failed_command_finishes_status_and_accepts_next_input(runtime_facto
         async with app.run_test(size=(100, 30)) as pilot:
             app._submit("/resume invalid")
             await wait_for(pilot, lambda: not app.busy)
-            assert any("失败" in str(widget.content) for widget in app.query(Static))
-            assert not app.query("#status")
+            # 命令失败只弹窗提示，状态行回到就绪，不把错误留在状态行。
+            assert any(notification.severity == "error" for notification in app._notifications)
+            assert str(app.query_one("#input-status", Static).content) == "就绪"
             app._submit("next")
             await wait_for(pilot, lambda: len(app.query(Markdown)) == 1 and not app.busy)
             await pilot.press("ctrl+d")
@@ -265,6 +267,100 @@ def record_submissions(runtime, monkeypatch):
         return result
     monkeypatch.setattr(runtime, "submit", record)
     return submissions
+
+
+def clone_session(runtime, source_id, *, keep_goal=True):
+    """复制一份可读会话文件并换新 id，作为历史列表里的目标会话。"""
+    store = runtime.session.store
+    payload = json.loads(store.path(source_id).read_text(encoding="utf-8"))
+    target = store.create()
+    payload["id"] = target["id"]
+    if not keep_goal:
+        payload.pop("goal")
+    store.path(target["id"]).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return target["id"]
+
+
+def test_session_screen_requires_explicit_resume_and_guards_active(runtime_factory, monkeypatch):
+    """点行只高亮，恢复要按按钮；当前会话标注占用并拒绝删除。"""
+    runtime, host = runtime_factory([response("ok")])
+    app = HarnessApp(runtime)
+    submissions = record_submissions(runtime, monkeypatch)
+    async def exercise():
+        async with app.run_test(size=(110, 35)) as pilot:
+            editor = app.query_one("#input", TextArea)
+            editor.load_text("你好")
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: not app.busy)
+            active = runtime.session.session_id
+            other = clone_session(runtime, active)
+            await pilot.press("ctrl+r")
+            await wait_for(pilot, lambda: isinstance(app.screen, SessionScreen))
+            screen = app.screen
+            ids = [entry["id"] for entry in screen.entries]
+            list_view = screen.query_one(ListView)
+            # 点行只改变高亮，不触发恢复（ctrl+r 本身提交的 /resume 是列表命令）。
+            listing = [text for text, _ in submissions]
+            list_view.index = ids.index(other)
+            await pilot.pause()
+            assert isinstance(app.screen, SessionScreen)
+            assert [text for text, _ in submissions] == listing
+            # 当前会话行带占用标注，删除被拒且只弹窗。
+            list_view.index = ids.index(active)
+            assert "当前会话 · 正在占用" in str(list_view.highlighted_child.query_one(Label).content)
+            before = len(submissions)
+            await pilot.click("#delete")
+            await pilot.pause()
+            assert isinstance(app.screen, SessionScreen)
+            assert len(submissions) == before
+            assert any("不能删除" in notification.message for notification in app._notifications)
+            # 显式点“恢复所选”才提交恢复命令。
+            list_view.index = ids.index(other)
+            await pilot.click("#resume")
+            await wait_for(pilot, lambda: len(app.screen_stack) == 1)
+            await pilot.pause()
+            assert [text for text, _ in submissions][-1] == "/resume " + other
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    asyncio.run(exercise())
+
+
+def test_invalid_session_file_is_listed_and_deletable(runtime_factory, monkeypatch):
+    """读不出来的会话文件进列表，可以直接删除，不能恢复。"""
+    runtime, host = runtime_factory([response("ok")])
+    app = HarnessApp(runtime)
+    submissions = record_submissions(runtime, monkeypatch)
+    async def exercise():
+        async with app.run_test(size=(110, 35)) as pilot:
+            editor = app.query_one("#input", TextArea)
+            editor.load_text("你好")
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: not app.busy)
+            broken = clone_session(runtime, runtime.session.session_id, keep_goal=False)
+            await pilot.press("ctrl+r")
+            await wait_for(pilot, lambda: isinstance(app.screen, SessionScreen))
+            screen = app.screen
+            ids = [entry["id"] for entry in screen.entries]
+            assert broken in ids
+            list_view = screen.query_one(ListView)
+            list_view.index = ids.index(broken)
+            assert "无法读取" in str(list_view.highlighted_child.query_one(Label).content)
+            # 坏文件不能恢复，只弹窗。
+            before = len(submissions)
+            await pilot.click("#resume")
+            await pilot.pause()
+            assert isinstance(app.screen, SessionScreen) and len(submissions) == before
+            assert any("无法读取" in notification.message for notification in app._notifications)
+            # 但可以直接删除。
+            await pilot.click("#delete")
+            await wait_for(pilot, lambda: len(app.screen_stack) == 1)
+            await wait_for(pilot, lambda: not app.busy)
+            await pilot.pause()
+            assert not runtime.session.store.path(broken).exists()
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    asyncio.run(exercise())
 
 
 def test_command_menu_navigation_fill_escape_and_editor_boundaries(runtime_factory):

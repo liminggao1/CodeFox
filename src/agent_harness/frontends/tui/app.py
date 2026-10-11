@@ -550,12 +550,16 @@ class HarnessApp(App):
             if not data.get("turn_id"):
                 self.busy = False
                 self._controls()
-                self._status("正在关闭" if self.closing else "失败" if data["status"] == "failed" else "就绪")
+                self._status("正在关闭" if self.closing else "就绪")
             result = data["data"]
-            if "sessions" in result and not self.closing:
-                self.push_screen(SessionScreen(result["sessions"], result["errors"]), lambda command: self._submit(command) if command else None)
-            elif not data.get("recorded") and (result.get("text") or result.get("error")):
-                await self.query_one("#chat", VerticalScroll).mount(Static(result.get("text") or result["error"], markup=False))
+            # 命令错误只弹窗提示，不再占用状态行；错误正文仍由展示记录留在对话区。
+            if data["status"] == "failed":
+                self.notify(result.get("error") or "命令执行失败", severity="error", markup=False)
+            elif "sessions" in result and not self.closing:
+                self.push_screen(SessionScreen(result["sessions"], self.snapshot.get("session_id")),
+                                 lambda command: self._submit(command) if command else None)
+            elif not data.get("recorded") and result.get("text"):
+                await self.query_one("#chat", VerticalScroll).mount(Static(result["text"], markup=False))
         elif kind == "runtime_closed":
             self.runtime_closed = True
             self.exit(0 if data["saved"] else 1)

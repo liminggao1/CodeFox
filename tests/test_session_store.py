@@ -48,13 +48,15 @@ def test_first_event_creates_one_atomic_snapshot_and_round_trips_blocks(tmp_path
     assert list(session.store.directory.glob("*.tmp")) == []
 
 
-def test_invalid_target_does_not_appear_in_listing_or_load(tmp_path):
+def test_invalid_target_is_listed_as_deletable_and_rejected_by_load(tmp_path):
     store = SessionStore(tmp_path)
     store.directory.mkdir(parents=True)
     bad = store.directory / "20261009-000000-deadbeef.json"
     bad.write_text("{not json", encoding="utf-8")
     entries, errors = store.list_sessions()
-    assert entries == [] and errors
+    # 坏文件列进列表（标记 invalid）方便删除，但读取仍然报错。
+    assert [entry["id"] for entry in entries] == ["20261009-000000-deadbeef"]
+    assert entries[0]["invalid"] and errors
     with pytest.raises(SessionError):
         store.load("20261009-000000-deadbeef")
 
