@@ -12,6 +12,7 @@ import pytest
 from agent_harness.agents import recovery
 from agent_harness.providers import llm_client
 import agent_harness.agents.goal as goal_module
+import agent_harness.agents.goal_evaluator as evaluator_module
 import agent_harness.core as core
 import agent_harness.runtime.hooks as hooks
 import agent_harness.runtime.scheduler as scheduler
@@ -184,7 +185,7 @@ def test_workflow_protocol_failure_writes_no_successful_agent_journal(host_facto
 def test_goal_protocol_failure_preserves_active_condition(host_factory, monkeypatch):
     host = host_factory()
     client = stubbed_client(monkeypatch, {"status": "failed", "output": []})
-    evaluator = goal_module.PromptGoalEvaluator(client=client, model="test")
+    evaluator = evaluator_module.PromptGoalEvaluator(client=client, model="test")
     goal = goal_module.GoalController(evaluator=evaluator)
     goal.set_goal("tests pass")
     result = asyncio.run(goal.evaluate_after_turn([]))

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_harness.agents import goal as goal_module
+from agent_harness.agents import goal_evaluator as evaluator_module
 
 
 # -- 测试夹具 --
@@ -183,9 +184,9 @@ def test_goal_length_is_bounded():
 def test_evaluator_rejects_conflicting_terminal_states():
     payload = '{"ok": true, "reason": "done", "impossible": true}'
     with pytest.raises(goal_module.GoalError, match="both ok and impossible"):
-        goal_module._parse_json_object(payload)
+        evaluator_module._parse_json_object(payload)
     with pytest.raises(goal_module.GoalError, match="invalid JSON"):
-        goal_module._parse_json_object("not json")
+        evaluator_module._parse_json_object("not json")
 
 
 def test_prompt_evaluator_uses_a_tool_free_json_response():
@@ -201,7 +202,7 @@ def test_prompt_evaluator_uses_a_tool_free_json_response():
         )
 
     client = SimpleNamespace(messages=SimpleNamespace(create=create))
-    evaluator = goal_module.PromptGoalEvaluator(client=client, model="judge")
+    evaluator = evaluator_module.PromptGoalEvaluator(client=client, model="judge")
 
     result = asyncio.run(evaluator.evaluate("tests pass", [
         {"role": "user", "content": "ran pytest"},
@@ -217,14 +218,14 @@ def test_prompt_evaluator_uses_a_tool_free_json_response():
 def test_transcript_keeps_recent_messages_whole():
     messages = [{"role": "user", "content": f"turn {i} " + "x" * 50}
                 for i in range(10)]
-    text = goal_module.transcript_text(messages, max_characters=200)
+    text = evaluator_module.transcript_text(messages, max_characters=200)
     assert "turn 9" in text
     assert "turn 0" not in text
 
 
 def test_transcript_trims_the_middle_of_one_oversized_message():
     messages = [{"role": "user", "content": "START" + "y" * 5000 + "END"}]
-    text = goal_module.transcript_text(messages, max_characters=400)
+    text = evaluator_module.transcript_text(messages, max_characters=400)
     assert "START" in text
     assert "END" in text
     assert "middle omitted" in text
@@ -266,7 +267,7 @@ def test_worker_tool_result_reaches_the_goal_evaluator(host_factory):
     )
 
     assert len(client.calls) == 2
-    transcript = goal_module.transcript_text(evaluator.seen[0])
+    transcript = evaluator_module.transcript_text(evaluator.seen[0])
     assert "tool_use todo_write" in transcript
     assert "write the test" in transcript
 

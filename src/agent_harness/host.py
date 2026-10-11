@@ -38,6 +38,7 @@ from .tools import tool_registry
 from .context import memory_runtime
 from . import runtime_context
 from .agents import goal as goal_module
+from .agents.goal_evaluator import PromptGoalEvaluator
 from .workflows import workflow_runtime
 from .workflows import workflow_demo
 from .runtime import interaction
@@ -61,7 +62,7 @@ def _create_goal(evaluator_model: str | None = None):
              or os.getenv("GOAL_EVALUATOR_MODEL_ID")
              or os.getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL")
              or core.MODEL)
-    evaluator = goal_module.PromptGoalEvaluator(client=core.client, model=model)
+    evaluator = PromptGoalEvaluator(client=core.client, model=model)
     block_cap = int(os.getenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",
                               str(goal_module.DEFAULT_STOP_HOOK_BLOCK_CAP)))
     return goal_module.GoalController(evaluator=evaluator, block_cap=block_cap)

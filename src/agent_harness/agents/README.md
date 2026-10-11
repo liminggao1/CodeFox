@@ -10,7 +10,8 @@
 | [subagent.py](subagent.py) | `spawn_subagent` 统一创建 once/persistent 子 agent；维护生命周期、信箱和协议投递 |
 | [subagent_protocol.py](subagent_protocol.py) | 唯一计划门禁与计划/关闭请求状态；集中提交、审核、回复校验、任务版本失效与清理 |
 | [subagent_session.py](subagent_session.py) | `SubagentSession`：两种模式共用的模型回合、工具能力选择与白名单、执行门禁和历史压缩；共用定义与身份绑定委托 tools |
-| [goal.py](goal.py) | `GoalController` 与 `PromptGoalEvaluator`：目标状态、评估与 Stop 边界的继续/结束决定 |
+| [goal.py](goal.py) | `GoalController`：目标状态、事件与 Stop 边界的继续/结束决定 |
+| [goal_evaluator.py](goal_evaluator.py) | `PromptGoalEvaluator`：无工具模型评估、对话转录与结果校验 |
 | [recovery.py](recovery.py) | `RecoveryState`：Lead 模型调用的重试、错误分类及恢复状态 |
 
 [host.py](../host.py) 接入 goal 和 recovery，并调用子 agent 的创建和通信能力。
