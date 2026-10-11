@@ -225,7 +225,10 @@ def render_mermaid(nodes, edges):
     不删任何边，避免藏住潜在问题；靠视觉权重分出主次：
     - 跨层依赖：深色实线，是架构主干
     - 同层依赖：浅灰细线，数量多但语义弱，弱化后不抢视线
-    - 制造循环的边：红色虚线，是循环依赖的根源
+    - 制造循环的回边：红色实线，是循环依赖的根源
+
+    回边用实线而非虚线：Mermaid 对较长的虚线边会覆盖 stroke-dasharray，
+    同一批回边会渲染成实线与虚线混杂，图例无法与图对应。
 
     只用颜色分层，不用 subgraph：子图会让连线跨框、布局重叠，反而更难读。
     """
@@ -249,13 +252,13 @@ def render_mermaid(nodes, edges):
         lines.append("    {0} --> {1}".format(source, target))
     back_start = len(forward)
     for source, target in backward:
-        lines.append("    {0} -.-> {1}".format(source, target))
+        lines.append("    {0} --> {1}".format(source, target))
     for node in nodes:
         lines.append("    class {0} {1}".format(node, layer_of(node, layers)))
     for index in same_layer_indexes:
         lines.append("    linkStyle {0} stroke:#cbd5e1,stroke-width:1px".format(index))
     for index in range(back_start, back_start + len(backward)):
-        lines.append("    linkStyle {0} stroke:#b91c1c,stroke-width:2px,stroke-dasharray:6 4".format(index))
+        lines.append("    linkStyle {0} stroke:#b91c1c,stroke-width:2px".format(index))
     return "\n".join(lines) + "\n"
 
 
@@ -283,13 +286,15 @@ def render_markdown(mermaid_text, cycles):
         "| --- | --- | --- |\n"
         "| 深色实线 | 跨层依赖 | 架构主干 |\n"
         "| 浅灰细线 | 同层依赖 | 弱化显示 |\n"
-        "| 红色虚线 | 循环依赖 | 需收敛 |\n"
+        "| 红色实线 | 回边 | 指向层序上方的反馈边；删掉这些边后，其余依赖可排成无环的层序 |\n"
         "\n"
         "## 节点颜色\n"
         "\n"
         "蓝=入口，黄=装配，绿=核心，紫=底层。\n"
         "\n"
         "## 循环依赖（需收敛）\n"
+        "\n"
+        "下面每个强连通分量是一个循环；红线是用贪心法挑出的反馈边集合（不保证最少），收敛目标就是消除这些回边。\n"
         "\n"
         + cycle_text + "\n"
         "\n"

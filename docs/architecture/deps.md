@@ -12,13 +12,15 @@ python scripts/arch_views.py
 | --- | --- | --- |
 | 深色实线 | 跨层依赖 | 架构主干 |
 | 浅灰细线 | 同层依赖 | 弱化显示 |
-| 红色虚线 | 循环依赖 | 需收敛 |
+| 红色实线 | 回边 | 指向层序上方的反馈边；删掉这些边后，其余依赖可排成无环的层序 |
 
 ## 节点颜色
 
 蓝=入口，黄=装配，绿=核心，紫=底层。
 
 ## 循环依赖（需收敛）
+
+下面每个强连通分量是一个循环；红线是用贪心法挑出的反馈边集合（不保证最少），收敛目标就是消除这些回边。
 
 - agents ↔ context ↔ core ↔ host ↔ registrations ↔ runtime ↔ runtime_context ↔ tools ↔ workflows ↔ workspace
 
@@ -75,12 +77,12 @@ graph TD
     workflows --> tools
     workspace --> core
     workspace --> runtime
-    runtime -.-> agents
-    runtime -.-> context
-    runtime -.-> core
-    runtime -.-> host
-    runtime -.-> tools
-    runtime -.-> workspace
+    runtime --> agents
+    runtime --> context
+    runtime --> core
+    runtime --> host
+    runtime --> tools
+    runtime --> workspace
     class agents 核心
     class context 核心
     class core 装配
@@ -108,10 +110,10 @@ graph TD
     linkStyle 38 stroke:#cbd5e1,stroke-width:1px
     linkStyle 39 stroke:#cbd5e1,stroke-width:1px
     linkStyle 41 stroke:#cbd5e1,stroke-width:1px
-    linkStyle 42 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:6 4
-    linkStyle 43 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:6 4
-    linkStyle 44 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:6 4
-    linkStyle 45 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:6 4
-    linkStyle 46 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:6 4
-    linkStyle 47 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:6 4
+    linkStyle 42 stroke:#b91c1c,stroke-width:2px
+    linkStyle 43 stroke:#b91c1c,stroke-width:2px
+    linkStyle 44 stroke:#b91c1c,stroke-width:2px
+    linkStyle 45 stroke:#b91c1c,stroke-width:2px
+    linkStyle 46 stroke:#b91c1c,stroke-width:2px
+    linkStyle 47 stroke:#b91c1c,stroke-width:2px
 ```
