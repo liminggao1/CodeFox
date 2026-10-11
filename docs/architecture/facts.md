@@ -125,7 +125,7 @@
   → 发布一次 `runtime_closed` 后释放 adapter。
 - 命令补全：输入框键入 `/` 出现候选，前缀过滤、上下键选择、回车执行；`OptionList` 不获取焦点，App 转发导航。
   Esc 隐藏草稿保留，下次编辑重开；菜单只产生提交文本，业务由 runtime 执行。
-- 命令目录统一在 `runtime/local_commands.py`，当前为 `/goal`、`/new`、`/resume`、`/delete`、`/quit`。
+- 命令目录统一在 `runtime/local_commands.py`，当前为 `/goal`、`/compact`、`/new`、`/resume`、`/delete`、`/quit`。
   菜单只展示已实现能力，不补全会话 ID、路径、工具名或 skills。
 - TUI 当前为 CodeFox 工作台：顶部品牌栏与入口、左侧对话区、右侧只读会话状态（默认收起）、底部输入区；
   同次模型调用按关联 ID 分组，工具行摘要默认可见、详情可展开，Hook/模型/记忆等无参数无结果的状态行不显示详情块；

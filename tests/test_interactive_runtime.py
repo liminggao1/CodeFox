@@ -978,3 +978,19 @@ def test_command_dispatch_lists_sessions_and_rejects_bad_usage(runtime_factory):
     assert listed.followup is None
     with pytest.raises(SessionError):
         runtime.command_router.dispatch("/delete")
+
+
+def test_compact_command_summarizes_current_history(runtime_factory, monkeypatch):
+    runtime, _ = runtime_factory([response("hello there")])
+    submitted = runtime.submit("hi")
+    until(runtime, "turn_finished", submission_id=submitted.submission_id)
+
+    monkeypatch.setattr(compaction, "summarize_history",
+                        lambda messages, **kwargs: "summary text")
+    compacted = runtime.submit("/compact")
+    event, _ = until(runtime, "command_result", submission_id=compacted.submission_id)
+    assert event.payload["status"] == "completed"
+    assert event.payload["data"]["text"] == "已压缩当前会话上下文"
+    messages = stored(runtime)["messages"]
+    assert messages[0]["content"].startswith("[Compacted]")
+    assert "summary text" in messages[0]["content"]
