@@ -12,6 +12,7 @@
 | [interaction.py](interaction.py) | 执行上下文、事件通道、独立事实队列、稳定记录 ID、审批请求及展示确认，关联会话代次和停止状态 |
 | [local_commands.py](local_commands.py) | `LocalCommand`、命令元数据和查找；供运行时路由与前端补全共用 |
 | [session_store.py](session_store.py) | `SessionStore` 和 `InteractiveSession`：会话格式校验、原子保存、读取/列出/删除及上下文保存与恢复准备 |
+| [diagnostics.py](diagnostics.py) | 与模型历史分离的会话诊断文件、实时追加、读取校验、失败重试与删除后的内存清理；行为见仓库事实第 7 节 |
 | [scheduler.py](scheduler.py) | 后台任务结果、cron 校验/持久化/调度、私有待消费队列和服务启动/停止；提供待交付查询、会话激活与目录操作的互斥作用域 |
 | [hooks.py](hooks.py) | 用户输入、工具执行和停止边界的 hooks；权限检查、审批请求、日志及大结果处理 |
 | [permissions.py](permissions.py) | 统一默认权限规则、有限 Bash 分类、文件目标解析和用户权限模式的原子保存；行为见仓库事实第 9 节 |

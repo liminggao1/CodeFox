@@ -25,7 +25,7 @@ class SessionSwitch:
 
     def __init__(self, *, store, session, lead_context, channel, context,
                  checkpoint, record, pause_background, after_activate,
-                 read_goal, replace_goal):
+                 read_goal, replace_goal, diagnostics):
         self._store = store
         self._session = session
         self._lead_context = lead_context
@@ -38,6 +38,7 @@ class SessionSwitch:
         # goal 由运行时持有；这里只经注入的访问器读写，不直接引用 host 模块绑定。
         self._read_goal = read_goal
         self._replace_goal = replace_goal
+        self._diagnostics = diagnostics
 
     # -- 读取阶段：只读，不改任何状态 --
 
@@ -110,7 +111,8 @@ class SessionSwitch:
                 raise SessionError(f"已切换到会话 {target}（工作目录 {root}），但切换后的处理失败：{exc}") from exc
             finally:
                 self._context().publish("session_changed",
-                                        records=self._session.display_records(historical=True))
+                                        records=self._session.display_records(historical=True),
+                                        diagnostics=self._diagnostics())
         text = f"已切换到会话 {target}（工作目录 {root}）"
         if not saved:
             text += "；上下文未能保存，将在下次交互时重试"
@@ -139,5 +141,6 @@ class SessionSwitch:
             self._record("new_session", snapshot["id"], save=False)
             self._checkpoint()
             self._context().publish("session_changed",
-                                    records=self._session.display_records(historical=True))
+                                    records=self._session.display_records(historical=True),
+                                    diagnostics=self._diagnostics())
         return {"text": f"已开启新会话 {snapshot['id']}", "workdir": str(root), "saved": True}

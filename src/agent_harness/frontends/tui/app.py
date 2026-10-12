@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 
 from textual.app import App, ComposeResult
@@ -11,6 +10,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Static, TextArea
 
 from ...runtime.interactive_runtime import InteractiveRuntime
+from ...runtime.diagnostics import log_record
 from ...runtime.local_commands import LOCAL_COMMANDS, find_command
 from ...runtime.permissions import MODE_LABELS
 from .widgets import (ApprovalCard, BrandBar, CommandCandidates, PermissionModeScreen, SessionScreen, SessionStatePanel, SettingsScreen)
@@ -530,7 +530,8 @@ class HarnessApp(App):
             self._dismiss_approval()
             self._hidden_command_text = None
             self.query_one(CommandCandidates).show_commands(())
-            await self.conversation.restore(data["records"], event.session_id, event.generation)
+            await self.conversation.restore(data["records"], event.session_id, event.generation,
+                                            diagnostics=data.get("diagnostics", ()))
             self._controls()
         elif kind == "turn_started":
             self.turn_id = event.turn_id
@@ -547,15 +548,6 @@ class HarnessApp(App):
             outcome = data["outcome"]
             labels = {"completed": "完成", "failed": "失败", "stopped": "已停止", "truncated": "失败"}
             self._status(labels[outcome["status"]])
-            summary = data.get("summary") or {}
-            usage = summary.get("lead_usage") or {}
-            self.conversation.log(
-                f"[TURN] {labels[outcome['status']]} · {summary.get('elapsed_seconds', 0):.1f}s"
-                f" · 工具 {summary.get('tool_calls', 0)} · 审批 {summary.get('approvals', 0)}"
-                f" · 请求 {usage.get('model_calls', 0)}"
-                f" · 输入 {usage.get('input_tokens', 0)} · 输出 {usage.get('output_tokens', 0)}")
-            if outcome["reason"]:
-                self.conversation.log(outcome["reason"])
         elif kind == "command_result":
             if not data.get("turn_id"):
                 self.busy = False
@@ -576,19 +568,16 @@ class HarnessApp(App):
             self.runtime_closed = True
             self.exit(0 if data["saved"] else 1)
         elif kind == "log":
-            self.conversation.log(data["text"])
+            await self.conversation.log(log_record(event))
         elif kind == "session_saved":
             pass
         elif kind == "runtime_error":
-            self.conversation.log(data["error"])
             self.notify(data["error"], severity="error")
+        elif kind == "diagnostic_error":
+            self.notify(data["error"], severity="error", markup=False)
         elif kind == "session_save_error":
             await self.conversation.show_error(data["error"])
             self.notify(data["error"], severity="error")
-        elif kind not in {"session_saved", "lead_usage", "user_message", "assistant_message", "tool_call",
-                          "tool_result", "todo_updated", "background_status", "approval_requested", "approval_decided",
-                          "execution_status", "system_error"}:
-            self.conversation.log(f"[{event.source}] {kind}\n{json.dumps(data, ensure_ascii=False, indent=2)}")
 
     def on_unmount(self):
         if self._consume_timer is not None:

@@ -26,7 +26,7 @@ class CommandRouter:
     """把命令分派依赖显式注入；不持有运行时状态。"""
 
     def __init__(self, *, store, session_id, read_goal, record, close, session_switch, new_session,
-                 compact_history, active_request):
+                 compact_history, active_request, delete_session):
         self._store = store
         self._session_id = session_id
         self._read_goal = read_goal
@@ -36,6 +36,7 @@ class CommandRouter:
         self._new_session = new_session
         self._compact_history = compact_history
         self._active_request = active_request
+        self._delete_session = delete_session
 
     def dispatch(self, text: str) -> CommandOutcome:
         """执行一条本地命令；参数错误按既有文案抛出 SessionError。"""
@@ -60,7 +61,7 @@ class CommandRouter:
         if command == "/delete":
             if target == self._session_id():
                 raise SessionError("不能删除当前正在使用的会话")
-            self._store.delete(target)
+            self._delete_session(target)
             return CommandOutcome(command, {"text": f"已删除会话 {target}"})
         if target == self._session_id():
             return CommandOutcome(command, {"text": f"当前已在会话 {target}"})

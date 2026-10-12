@@ -36,9 +36,12 @@ class ConversationView:
         self._activity_label = None
         self._activity = None
         self._diagnostics = []
+        self._diagnostic_ids = set()
         self.diagnostics_visible = True
-        self._diagnostic_block = None
-        self._diagnostic_detail = None
+        self._diagnostic_blocks = {}
+        self._diagnostic_details = {}
+        self._diagnostic_counts = {}
+        self._diagnostic_collapsed = {}
         self._errors = []
 
     @property
@@ -76,33 +79,100 @@ class ConversationView:
         else:
             self._activity.update(label)
 
-    def log(self, text):
-        self._diagnostics.append(Text.from_ansi(str(text)).plain)
-        self._diagnostics = self._diagnostics[-1000:]
-        self._render_diagnostics()
+    async def log(self, record):
+        if record["id"] not in self._diagnostic_ids:
+            self._diagnostic_ids.add(record["id"])
+            self._diagnostics.append(record)
+        await self._render_diagnostics()
 
     def set_diagnostics_visible(self, visible):
-        """只切换显示，当前会话的日志继续按原有上限收集。"""
+        """只切换显示；运行时继续收集和保存完整日志。"""
         self.diagnostics_visible = visible
-        if self._diagnostic_block is not None:
-            self._diagnostic_block.display = visible
+        for block in self._diagnostic_blocks.values():
+            block.display = visible
 
-    def _render_diagnostics(self, collapsed=True):
-        """诊断日志只有一块，窗口重建后重新挂到对话区末尾。"""
-        content = "\n".join(self._diagnostics)[-8000:]
-        if not content:
-            return
+    async def _render_diagnostics(self):
+        """One block per turn below its user row; unanchored logs use their first timestamp."""
         chat = self.app.query_one("#chat", VerticalScroll)
-        if self._diagnostic_block is not None and self._diagnostic_block.parent is chat:
-            self._diagnostic_detail.update(content)
-            self._diagnostic_block.display = self.diagnostics_visible
-            return
-        self._diagnostic_detail = Static(content, markup=False)
-        self._diagnostic_block = Collapsible(
-            DetailScroll(self._diagnostic_detail), title="诊断日志",
-            collapsed=collapsed, classes="diagnostic")
-        self._diagnostic_block.display = self.diagnostics_visible
-        return chat.mount(self._diagnostic_block)
+        users = {record["turn_id"]: record for record in self.records
+                 if record["type"] == "user_message" and record["turn_id"] is not None}
+        groups = {}
+        for record in self._diagnostics:
+            turn = record["turn_id"]
+            if turn in users:
+                kind = "turn"
+            elif turn is not None or (record["source"] != "lead" and
+                                     record["origin"] in {"background", "persistent", "workflow"}):
+                kind = "background"
+            else:
+                kind = "session"
+            groups.setdefault((kind, turn), []).append(record)
+        visible = {}
+        for key, logs in groups.items():
+            anchor = self._rows.get(users[key[1]]["id"]) if key[0] == "turn" else None
+            if key[0] == "turn" and (anchor is None or anchor.parent is not chat):
+                continue
+            first_at = logs[0]["at"]
+            if (anchor is None and self.start > 0 and self.records[self.start:]
+                    and first_at < self.records[self.start]["at"]):
+                continue
+            visible[key] = (logs, anchor)
+        for key, block in list(self._diagnostic_blocks.items()):
+            if key not in visible:
+                self._diagnostic_collapsed[key] = block.collapsed
+                await block.remove()
+                del self._diagnostic_blocks[key]
+                del self._diagnostic_details[key]
+                self._diagnostic_counts.pop(key, None)
+        for key, (logs, anchor) in visible.items():
+            content = None
+            if self._diagnostic_counts.get(key) != len(logs):
+                content = "\n".join(f"[{record['source']}] {Text.from_ansi(record['text']).plain}"
+                                    for record in logs)
+                self._diagnostic_counts[key] = len(logs)
+            block = self._diagnostic_blocks.get(key)
+            if block is None:
+                detail = Static(content, markup=False)
+                title = {"turn": "本轮诊断日志", "background": "后台诊断日志",
+                         "session": "会话诊断日志"}[key[0]]
+                block = Collapsible(DetailScroll(detail), title=title,
+                                    collapsed=self._diagnostic_collapsed.get(key, True),
+                                    classes="diagnostic")
+                block.display = self.diagnostics_visible
+                block.diagnostic_at = logs[0]["at"]
+                self._diagnostic_blocks[key] = block
+                self._diagnostic_details[key] = detail
+                if anchor is not None:
+                    await chat.mount(block, after=anchor)
+                else:
+                    following = self._diagnostic_following(logs[0]["at"])
+                    if following:
+                        await chat.mount(block, before=following)
+                    else:
+                        await chat.mount(block)
+            else:
+                if content is not None:
+                    self._diagnostic_details[key].update(content)
+                # New messages may arrive after an independent block was first mounted.
+                if anchor is not None:
+                    chat.move_child(block, after=anchor)
+                else:
+                    following = self._diagnostic_following(logs[0]["at"], block)
+                    if following:
+                        chat.move_child(block, before=following)
+                block.display = self.diagnostics_visible
+
+    def _diagnostic_following(self, at, exclude=None):
+        chat = self.app.query_one("#chat", VerticalScroll)
+        for child in chat.children:
+            if child is exclude:
+                continue
+            index = getattr(child, "record_start_index", None)
+            child_at = (self.records[index]["at"] if index is not None else
+                        getattr(child, "diagnostic_at", None))
+            if child_at is not None and child_at > at:
+                return child
+        return None
 
     async def show_error(self, text):
         self._errors.append(text)
@@ -196,6 +266,8 @@ class ConversationView:
         follow = chat.scroll_y >= chat.max_scroll_y - 1 and self.app.approval is None
         for change in self.projection.apply_delta(event):
             await self._render_stream(change["entry"])
+            widget = self._streams[change["entry"]["key"]]
+            widget.diagnostic_at = getattr(widget, "diagnostic_at", event.at)
         if follow:
             chat.scroll_end(animate=False)
 
@@ -235,13 +307,16 @@ class ConversationView:
             if hasattr(first, "record_start_index"):
                 self.start = max(self.start, first.record_start_index + 1)
         self.app.query_one("#earlier", Button).display = self.start > 0
+        await self._render_diagnostics()
         if follow:
             chat.scroll_end(animate=False)
 
-    async def restore(self, records, session_id=None, generation=0):
+    async def restore(self, records, session_id=None, generation=0, *, diagnostics=()):
         self._pending_inputs.clear()
         self._activity_label = None
-        self._diagnostics.clear()
+        self._diagnostics = list(diagnostics)
+        self._diagnostic_ids = {record["id"] for record in diagnostics}
+        self._diagnostic_collapsed.clear()
         self._errors.clear()
         self.projection.restore(records, session_id, generation)
         self.start = max(0, len(self.records) - 80)
@@ -258,8 +333,9 @@ class ConversationView:
         group_state = {key: (group.expanded, group.query_one(VerticalScroll).scroll_y)
                        for key, group in self._groups.items() if preserve and group.is_mounted}
         # 诊断日志不属于语义记录，重建前记下它的展开状态。
-        diagnostics_collapsed = (self._diagnostic_block.collapsed
-                                 if preserve and self._diagnostic_block is not None else True)
+        if preserve:
+            self._diagnostic_collapsed.update({key: block.collapsed
+                                              for key, block in self._diagnostic_blocks.items()})
         await chat.remove_children()
         self._streams.clear()
         self._operations.clear()
@@ -267,8 +343,9 @@ class ConversationView:
         self._rows.clear()
         self._pending_rows.clear()
         self._activity = None
-        self._diagnostic_block = None
-        self._diagnostic_detail = None
+        self._diagnostic_blocks.clear()
+        self._diagnostic_details.clear()
+        self._diagnostic_counts.clear()
         records = self.records
         visible = records[self.start:]
         visible_ids = {r["id"] for r in visible}
@@ -311,9 +388,7 @@ class ConversationView:
             await self._mount_pending(record)
         if self._activity_label is not None:
             self.show_activity(self._activity_label)
-        mounted = self._render_diagnostics(diagnostics_collapsed)
-        if mounted is not None:
-            await mounted
+        await self._render_diagnostics()
         self.app.query_one("#earlier", Button).display = self.start > 0
         chat.scroll_end(animate=False)
 

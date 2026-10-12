@@ -174,6 +174,12 @@ class InteractionChannel:
         self._closed = False
         self._approvals_closed = False
         self._projector = None
+        self._log_sink = None
+
+    def set_log_sink(self, sink):
+        """Runtime-owned diagnostics are independent of display fact projection."""
+        with self._changed:
+            self._log_sink = sink
 
     def set_projector(self, projector):
         """Install the runtime's pure fact projection before starting execution."""
@@ -200,6 +206,8 @@ class InteractionChannel:
     def publish(self, context: ExecutionContext, event_type: str,
                 payload: dict, *, deliver=True, capture=True) -> InteractionEvent:
         copied = data_copy(payload)
+        if event_type == "log":
+            copied.setdefault("origin", context.origin)
         for key in ("model_call_id", "tool_call_id"):
             value = getattr(context, key)
             if value is not None:
@@ -227,6 +235,11 @@ class InteractionChannel:
                         self._facts.append(replace(display, payload=data_copy(display.payload)))
                     elif self._projector is None:
                         self._facts.append(replace(event, payload=data_copy(event.payload)))
+                if event.type == "log" and self._log_sink is not None:
+                    error = self._log_sink(event)
+                    if error:
+                        # This notification is not a log and cannot re-enter the sink.
+                        self.publish(context, "diagnostic_error", {"error": error}, capture=False)
             self._changed.notify_all()
             return replace(event, payload=data_copy(event.payload))
 

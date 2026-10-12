@@ -105,8 +105,10 @@ class CLIAdapter:
                 if change["kind"] == "record":
                     self._render_record(change["record"], change["entry"])
         elif event.type == "log":
-            self._end_stream_line()
-            self.write(payload["text"])
+            # Existing CLI completion/error output already includes these details.
+            if payload.get("category") not in {"turn_summary", "runtime_error"}:
+                self._end_stream_line()
+                self.write(payload["text"])
         elif event.type == "command_result":
             data = payload["data"]
             for entry in data.get("sessions", []):
@@ -119,7 +121,7 @@ class CLIAdapter:
                 self.write("No saved sessions")
             if not payload.get("recorded") and (data.get("text") or data.get("error")):
                 self.write(data.get("text") or data["error"])
-        elif event.type in {"runtime_error", "session_save_error"}:
+        elif event.type in {"runtime_error", "session_save_error", "diagnostic_error"}:
             self._end_stream_line()
             self.write(payload["error"])
         elif event.type == "runtime_closed":

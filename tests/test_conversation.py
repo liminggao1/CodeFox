@@ -9,6 +9,7 @@ import copy
 import json
 import threading
 import time
+import uuid
 
 import pytest
 
@@ -724,7 +725,8 @@ def record(number, kind, payload, source="lead", turn="turn"):
 
 def event(kind, payload):
     return SimpleNamespace(type=kind, payload=payload, scope="session", generation=1,
-                           session_id="test", sequence=1, turn_id="turn", source="lead")
+                           session_id="test", sequence=1, turn_id="turn", source="lead",
+                           id=uuid.uuid4().hex, at="2026-10-09T00:00:00+00:00")
 
 
 def test_cli_record_replay_details_status_and_dedup():
@@ -1316,7 +1318,7 @@ def test_tui_theme_switch_updates_reply_and_logs_without_losing_draft():
             editor.load_text("保留配色切换前的草稿")
             await app._event(event("display_record", {"record": record(
                 1, "assistant_message", {"text": "模型回复正文"})}))
-            app.conversation.log("诊断日志正文")
+            await app._event(event("log", {"text": "诊断日志正文"}))
             await pilot.pause()
             assert app.theme == DEFAULT_THEME
             await pilot.click("#settings")
@@ -1332,7 +1334,7 @@ def test_tui_theme_switch_updates_reply_and_logs_without_losing_draft():
                 await pilot.pause()
                 assert app.theme == theme.name
                 reply = main_screen.query_one(Markdown)
-                log = app.conversation._diagnostic_detail
+                log = next(iter(app.conversation._diagnostic_details.values()))
                 assert reply.styles.color.hex.lower() == theme.foreground
                 assert log.styles.color.hex.lower() == theme.variables["codefox-muted"]
                 assert reply.styles.color.brightness > log.styles.color.brightness
@@ -1369,7 +1371,7 @@ def test_tui_diagnostics_keep_content_and_place_after_window_rebuild():
     async def exercise():
         async with app.run_test(size=(112, 34)) as pilot:
             await app.conversation.display_record(record(1, "user_message", {"text": "问题"}))
-            # 同一批日志只产生一块诊断日志，内容累积。
+            # 同一回合只产生一块诊断日志，内容累积。
             await app._event(event("log", {"text": "第一条日志"}))
             await app._event(event("log", {"text": "第二条日志"}))
             await pilot.pause()
@@ -1415,6 +1417,7 @@ def test_tui_rebuild_preserves_pending_input_activity_error_and_confirms_once():
     async def exercise():
         async with app.run_test(size=(112, 34)) as pilot:
             assert app._submit("待确认的消息")
+            await app._event(event("log", {"text": "保存暂不可用"}))
             await app._event(event("runtime_error", {"error": "保存暂不可用"}))
             await app._event(event("log", {"text": "当前会话日志"}))
             await pilot.pause()
@@ -1449,6 +1452,123 @@ def test_tui_rebuild_preserves_pending_input_activity_error_and_confirms_once():
             assert not app.query(MessageRow) and not app.query(".activity")
             assert not app.query(".diagnostic")
             assert not app.query_one("#chat").children
+    asyncio.run(exercise())
+
+
+def test_tui_diagnostics_follow_each_user_row_and_keep_late_child_logs_in_original_turn():
+    from agent_harness.frontends.tui.app import HarnessApp
+
+    app = HarnessApp(DisplayRuntime())
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            for number in range(3):
+                turn = f"turn-{number}"
+                await app.conversation.display_record(record(number * 2 + 1, "user_message",
+                                                             {"text": f"问题{number}"}, turn=turn))
+                log = event("log", {"text": f"日志{number}", "origin": "frontend"})
+                log.turn_id = turn
+                await app._event(log)
+                await app.conversation.display_record(record(number * 2 + 2, "assistant_message",
+                                                             {"text": f"回答{number}"}, turn=turn))
+            await pilot.pause()
+            blocks = app.conversation._diagnostic_blocks
+            assert len(blocks) == 3 and all(block.collapsed for block in blocks.values())
+            children = list(app.query_one("#chat").children)
+            for number in range(3):
+                assert children[number * 3] is app.conversation._rows[f"{number * 2 + 1:032x}"]
+                assert children[number * 3 + 1] is blocks[("turn", f"turn-{number}")]
+                assert children[number * 3 + 2] is app.conversation._rows[f"{number * 2 + 2:032x}"]
+            late = event("log", {"text": "第一轮子代理延迟日志", "origin": "persistent"})
+            late.turn_id, late.source = "turn-0", "helper"
+            await app._event(late)
+            first = app.conversation._diagnostic_details[("turn", "turn-0")]
+            assert "[helper] 第一轮子代理延迟日志" in str(first.content)
+            assert "延迟日志" not in str(app.conversation._diagnostic_details[("turn", "turn-2")].content)
+            blocks[("turn", "turn-0")].collapsed = False
+            await app.conversation.load_earlier()
+            assert not app.conversation._diagnostic_blocks[("turn", "turn-0")].collapsed
+            assert app.conversation._diagnostic_blocks[("turn", "turn-1")].collapsed
+            app.conversation.set_diagnostics_visible(False)
+            await app._event(late)
+            assert len(app.conversation._diagnostics) == 4
+            assert all(not block.display for block in app.query(".diagnostic"))
+            app.conversation.set_diagnostics_visible(True)
+            assert all(block.display for block in app.query(".diagnostic"))
+            assert "延迟日志" in str(app.conversation._diagnostic_details[("turn", "turn-0")].content)
+    asyncio.run(exercise())
+
+
+def test_tui_restored_logs_are_complete_and_follow_history_window():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.runtime.diagnostics import log_record
+
+    app = HarnessApp(DisplayRuntime())
+    history, logs = [], []
+    for number in range(65):
+        turn = f"turn-{number}"
+        history.extend([record(number * 2 + 1, "user_message", {"text": f"问题{number}"}, turn=turn),
+                        record(number * 2 + 2, "assistant_message", {"text": f"回答{number}"}, turn=turn)])
+        log = event("log", {"text": f"日志{number}", "origin": "frontend"})
+        log.turn_id = turn
+        logs.append(log_record(log))
+    long_text = "开头" + "x" * 9000 + "结尾"
+    for number in range(1002):
+        log = event("log", {"text": long_text if number == 0 else str(number), "origin": "frontend"})
+        log.turn_id = "turn-64"
+        logs.append(log_record(log))
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            await app._event(event("session_changed", {"records": history, "diagnostics": logs}))
+            assert len(app.query(".diagnostic")) == 40
+            assert ("turn", "turn-0") not in app.conversation._diagnostic_blocks
+            detail = app.conversation._diagnostic_details[("turn", "turn-64")]
+            assert long_text in str(detail.content) and "[lead] 1001" in str(detail.content)
+            assert len(app.conversation._diagnostics) == 1067
+            app.conversation._diagnostic_blocks[("turn", "turn-64")].collapsed = False
+            await app.conversation.load_earlier()
+            assert len(app.query(".diagnostic")) == 65
+            assert not app.conversation._diagnostic_blocks[("turn", "turn-64")].collapsed
+            await app._event(event("session_changed", {"records": history, "diagnostics": logs}))
+            assert all(block.collapsed for block in app.query(".diagnostic"))
+            await app._event(event("session_changed", {"records": []}))
+            assert not app.query(".diagnostic") and not app.conversation._diagnostics
+    asyncio.run(exercise())
+
+
+def test_tui_unanchored_logs_use_original_time_and_do_not_attach_to_next_user():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.runtime.diagnostics import log_record
+
+    app = HarnessApp(DisplayRuntime())
+    first = record(1, "user_message", {"text": "第一轮"}, turn="first")
+    first["at"] = "2026-10-09T00:00:00+00:00"
+    last = record(2, "user_message", {"text": "下一轮"}, turn="last")
+    last["at"] = "2026-10-09T00:03:00+00:00"
+    background = event("log", {"text": "后台处理", "origin": "background"})
+    background.turn_id, background.at = "background-turn", "2026-10-09T00:01:00+00:00"
+    session = event("log", {"text": "会话维护", "origin": "frontend"})
+    session.turn_id, session.at = None, "2026-10-09T00:02:00+00:00"
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            await app._event(event("session_changed", {"records": [first, last],
+                             "diagnostics": [log_record(background), log_record(session)]}))
+            blocks = app.conversation._diagnostic_blocks
+            children = list(app.query_one("#chat").children)
+            assert children == [app.conversation._rows[first["id"]],
+                                blocks[("background", "background-turn")], blocks[("session", None)],
+                                app.conversation._rows[last["id"]]]
+            assert blocks[("background", "background-turn")].title == "后台诊断日志"
+            assert blocks[("session", None)].title == "会话诊断日志"
+            assert ("turn", "last") not in blocks
+            background.id = uuid.uuid4().hex
+            background.payload["text"] = "后台延迟日志"
+            background.at = "2026-10-09T00:04:00+00:00"
+            await app._event(background)
+            assert list(app.query_one("#chat").children) == children
+            assert "后台延迟日志" in str(app.conversation._diagnostic_details[("background", "background-turn")].content)
     asyncio.run(exercise())
 
 

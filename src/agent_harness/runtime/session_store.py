@@ -83,6 +83,9 @@ class SessionStore:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
+    def diagnostics_path(self, session_id: str) -> Path:
+        return self.path(session_id).with_suffix(".diagnostics.jsonl")
+
     def load(self, session_id: str) -> dict:
         path = self.path(session_id)
         try:
@@ -240,6 +243,7 @@ class SessionStore:
 
     def delete(self, session_id: str) -> None:
         try:
+            self.diagnostics_path(session_id).unlink(missing_ok=True)
             self.path(session_id).unlink()
         except OSError as exc:
             raise SessionError(f"Cannot delete session {session_id}: {exc}") from exc

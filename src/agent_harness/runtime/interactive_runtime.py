@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 
 from .. import core
 from .. import host
@@ -14,6 +15,7 @@ from . import scheduler
 from . import interaction, permissions
 from .commands import CommandRouter
 from .lead_context import LeadContext
+from .diagnostics import DiagnosticError, DiagnosticStore
 from .session_switch import SessionSwitch
 from .session_store import InteractiveSession, SessionStore, json_value
 from .turn_runner import TurnRunner
@@ -27,6 +29,8 @@ class InteractiveRuntime:
         self.session = InteractiveSession(store or SessionStore(core.WORKDIR), [],
                                           lambda: host.GOAL, core.terminal_print,
                                           self._session_context)
+        self.diagnostics = DiagnosticStore(self.session.store.diagnostics_path)
+        self.channel.set_log_sink(self._capture_log)
         self._lifecycle = threading.RLock()
         self._wake = threading.Event()
         self._closing = False
@@ -47,13 +51,34 @@ class InteractiveRuntime:
             context=self._context, checkpoint=self._checkpoint,
             record=self._record, pause_background=self._pause_background,
             after_activate=self._after_activate,
-            read_goal=self._read_goal, replace_goal=self._replace_goal)
+            read_goal=self._read_goal, replace_goal=self._replace_goal,
+            diagnostics=self.diagnostic_records)
         self.command_router = CommandRouter(
             store=self.session.store, session_id=lambda: self.session.session_id,
             read_goal=self._read_goal, record=self._record, close=self.close,
             session_switch=self.session_switch, new_session=self.session_switch.start_new,
             compact_history=self._compact_history,
-            active_request=lambda: self.session.active_request)
+            active_request=lambda: self.session.active_request,
+            delete_session=self._delete_session)
+
+    def _delete_session(self, session_id):
+        self.session.store.delete(session_id)
+        self.diagnostics.forget(session_id)
+
+    def _capture_log(self, event):
+        # Runtime services have no fixed session context; bind at publication time.
+        if event.scope == "runtime" and event.session_id is None:
+            event = replace(event, session_id=self.session.session_id)
+        return self.diagnostics.capture(event)
+
+    def diagnostic_records(self):
+        if self.session.session_id is None:
+            return []
+        try:
+            return self.diagnostics.read(self.session.session_id)
+        except DiagnosticError as exc:
+            self._context().publish("diagnostic_error", error=str(exc))
+            return []
 
     def _compact_history(self, active_request):
         """用户主动压缩当前会话历史；成功后由终态结算统一保存。"""
@@ -166,6 +191,8 @@ class InteractiveRuntime:
         return record
 
     def _checkpoint(self, *, poll=False):
+        for error in self.diagnostics.retry():
+            self._context().publish("diagnostic_error", error=error)
         facts = self.channel.drain_facts()
         changed = False
         for fact in facts:
@@ -191,6 +218,16 @@ class InteractiveRuntime:
         recorded = self.session.session_id is not None and "sessions" not in payload.get("data", {})
         if kind == "turn_finished":
             outcome = payload.get("outcome", {})
+            summary = payload.get("summary") or {}
+            usage = summary.get("lead_usage") or {}
+            labels = {"completed": "完成", "failed": "失败", "stopped": "已停止", "truncated": "失败"}
+            text = (f"[TURN] {labels[outcome['status']]} · {summary.get('elapsed_seconds', 0):.1f}s"
+                    f" · 工具 {summary.get('tool_calls', 0)} · 审批 {summary.get('approvals', 0)}"
+                    f" · 请求 {usage.get('model_calls', 0)}"
+                    f" · 输入 {usage.get('input_tokens', 0)} · 输出 {usage.get('output_tokens', 0)}")
+            if outcome.get("reason"):
+                text += "\n" + outcome["reason"]
+            self.channel.publish(context, "log", {"text": text, "category": "turn_summary"})
             if outcome.get("status") == "failed" and outcome.get("reason"):
                 # 错误卡是会话展示事实，不进入模型消息历史；在终态保存前发布，
                 # 因而既能立即显示，也能随会话恢复。
@@ -233,6 +270,7 @@ class InteractiveRuntime:
         except Exception as exc:
             context = self._context()
             error = f"{type(exc).__name__}: {exc}"
+            context.publish("log", text=error, category="runtime_error")
             context.publish("system_error", error=error)
             context.publish("runtime_error", error=error)
             self.close()
@@ -282,6 +320,7 @@ class InteractiveRuntime:
             except OSError as exc:
                 collected = False
                 error = f"Could not save background results: {exc}"
+                self._context().publish("log", text=error, category="runtime_error")
                 self._context().publish("system_error", error=error)
                 self._context().publish("runtime_error", error=error)
             saved = self._checkpoint() and collected
