@@ -99,3 +99,36 @@ def test_invalid_context_fields_are_rejected(tmp_path, field, value):
     session.store.save(saved)
     with pytest.raises(SessionError):
         session.store.load(session.session_id)
+
+
+def test_session_input_measurement_is_independent_of_history_and_can_be_unknown(tmp_path):
+    session, history, _, _ = make_session(tmp_path)
+    assert session.last_input_tokens() == 0
+    session.record("user_input", "你好", save=False)
+    history.append({"role": "user", "content": "你好"})
+    assert session.last_input_tokens() is None
+    session.append_record({"id": "user", "at": session.snapshot["created_at"],
+                           "kind": "display", "type": "user_message", "source": "lead",
+                           "turn_id": "turn", "payload": {"text": "你好"}})
+    session.record_input_tokens(2100)
+    session.record_input_tokens(3200)
+    assert session.last_input_tokens() == 3200
+    assert history == [{"role": "user", "content": "你好"}]
+    assert session.save()
+    restored, _, _, _ = make_session(tmp_path)
+    restored.activate(session.store.load(session.session_id))
+    assert restored.last_input_tokens() == 3200
+
+
+@pytest.mark.parametrize("value", [-1, True, "3200", None])
+def test_invalid_input_measurement_is_rejected_without_rewriting_file(tmp_path, value):
+    session, _, _, _ = make_session(tmp_path)
+    session.record("goal_query")
+    snapshot = session.store.load(session.session_id)
+    snapshot["events"].append({"id": "bad-usage", "at": snapshot["created_at"],
+                               "kind": "summary", "type": "model_usage", "input_tokens": value})
+    session.store.save(snapshot)
+    original = session.store.path(session.session_id).read_bytes()
+    with pytest.raises(SessionError, match="input token measurement"):
+        session.store.load(session.session_id)
+    assert session.store.path(session.session_id).read_bytes() == original

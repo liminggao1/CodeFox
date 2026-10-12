@@ -119,10 +119,7 @@ def test_background_approval_availability_and_mcp_policy(host_factory, monkeypat
     permissions.SETTINGS.mode = mode
     assert hooks.permission_hook(call("bash", command="ls -la")) is None
     write = hooks.permission_hook(call("write_file", path="background.txt", content="done"))
-    if mode == "default":
-        assert "approval is unavailable" in write
-    else:
-        assert write is None
+    assert write is None
     monkeypatch.setattr(permissions.tool_registry.REGISTRY, "policy_for", lambda name: "deny")
     assert "Permission denied" in hooks.permission_hook(call("mcp__test__write"))
     monkeypatch.setattr(permissions.tool_registry.REGISTRY, "policy_for", lambda name: "confirm")
@@ -151,11 +148,12 @@ def test_missing_file_is_an_execution_error_after_permission_check(host_factory,
 
 
 def test_runtime_write_approval_records_same_result_for_model_and_user(runtime_factory, tmp_path):
-    runtime, _ = runtime_factory([response(tools=[tool("write_file", path="approved.txt", content="done")], stop="tool_use"), response()])
+    target = tmp_path.parent / (tmp_path.name + "-approved.txt")
+    runtime, _ = runtime_factory([response(tools=[tool("write_file", path=str(target), content="done")], stop="tool_use"), response()])
     submitted = runtime.submit("write")
     request, _ = displayed_approval(runtime)
     assert request.tool_name == "write_file"
-    assert request.arguments["path"] == str(tmp_path / "approved.txt")
+    assert request.arguments["path"] == str(target)
     with pytest.raises(ValueError, match="不能切换"):
         runtime.set_permission_mode("no_approval")
     runtime.channel.respond(request.request_id, request.generation, "approve")
@@ -164,7 +162,41 @@ def test_runtime_write_approval_records_same_result_for_model_and_user(runtime_f
     result = next(message for message in snapshot["messages"] if message["role"] == "user" and isinstance(message["content"], list))["content"][0]
     display = next(record for record in snapshot["events"] if record["type"] == "tool_result")
     assert display["payload"]["content"] == result["content"]
-    assert (tmp_path / "approved.txt").read_text() == "done"
+    assert target.read_text() == "done"
+    target.unlink()
+
+
+@pytest.mark.parametrize("name", ["read_file", "write_file", "edit_file"])
+def test_workspace_file_tools_execute_without_approval(host_factory, monkeypatch, tmp_path, name):
+    host_factory()
+    target = tmp_path / "中文文件.txt"
+    target.write_text("before", encoding="utf-8")
+    args = {"path": target.name}
+    if name == "write_file":
+        args["content"] = "after"
+    elif name == "edit_file":
+        args.update(old_text="before", new_text="after")
+    monkeypatch.setattr(hooks, "_confirm", lambda *args: pytest.fail("unexpected approval"))
+    block = call(name, **args)
+    assert hooks.check_tool_use(block).status == "allowed"
+    assert block.input["path"] == str(target)
+    handler = {"read_file": file_tools.run_read, "write_file": file_tools.run_write,
+               "edit_file": file_tools.run_edit}[name]
+    assert handler(**block.input).status == "success"
+    assert target.read_text() == ("before" if name == "read_file" else "after")
+
+
+def test_default_mode_creates_and_edits_workspace_file_without_approval(runtime_factory, tmp_path):
+    runtime, _ = runtime_factory([
+        response(tools=[tool("write_file", path="new.txt", content="before")], stop="tool_use"),
+        response(tools=[tool("edit_file", "edit", path="new.txt", old_text="before", new_text="after")], stop="tool_use"),
+        response("完成")])
+    submission = runtime.submit("创建并编辑文件")
+    finished, events = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    assert finished.payload["outcome"]["status"] == "completed"
+    assert finished.payload["summary"]["approvals"] == 0
+    assert not any(event.type == "approval_requested" for event in events)
+    assert (tmp_path / "new.txt").read_text() == "after"
 
 
 def test_no_approval_mode_executes_outside_path_and_invalid_input_still_fails(runtime_factory, tmp_path):

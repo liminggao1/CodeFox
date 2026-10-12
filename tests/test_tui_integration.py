@@ -68,7 +68,7 @@ def test_tui_dialogue_approval_sessions_and_shutdown(runtime_factory):
 def test_tui_permission_switch_persists_and_stays_visible_during_approval(runtime_factory):
     from agent_harness.runtime import permissions
     from agent_harness.frontends.tui.widgets import PermissionModeScreen
-    runtime, _ = runtime_factory([response(tools=[tool("write_file", path="mode.txt", content="done")], stop="tool_use"), response()])
+    runtime, _ = runtime_factory([response(tools=[tool("bash", command="printf done")], stop="tool_use"), response()])
     app = HarnessApp(runtime)
     async def exercise():
         async with app.run_test(size=(110, 35)) as pilot:
@@ -93,6 +93,55 @@ def test_tui_permission_switch_persists_and_stays_visible_during_approval(runtim
             app._submit("/new")
             await wait_for(pilot, lambda: not app.busy)
             assert runtime.permission_mode == "default"
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    asyncio.run(exercise())
+
+
+def test_tui_resume_preserves_context_footer_and_new_session_clears_it(runtime_factory):
+    from support.helpers import complete, until
+    reply = response("回答")
+    reply.usage.input_tokens = 3200
+    runtime, _ = runtime_factory([reply])
+    complete(runtime, "你好")
+    session_id = runtime.session.session_id
+    runtime.close()
+    until(runtime, "runtime_closed")
+    runtime._thread.join(3)
+    restored, _ = runtime_factory()
+    app = HarnessApp(restored)
+
+    async def exercise():
+        async with app.run_test(size=(110, 35)) as pilot:
+            app._submit(f"/resume {session_id}")
+            await wait_for(pilot, lambda: app.generation == 2 and not app.busy)
+            assert app.snapshot["context_input_tokens"] == 3200
+            footer = app.query_one("#bottom-status", Static)
+            assert "3.20k/50k（6%）" in str(footer.content)
+            app._submit("/new")
+            await wait_for(pilot, lambda: app.generation == 3 and not app.busy)
+            assert app.snapshot["context_input_tokens"] == 0
+            assert "0/50k（0%）" in str(footer.content)
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    asyncio.run(exercise())
+
+
+def test_tui_workspace_file_tools_do_not_show_approval_card(runtime_factory, tmp_path):
+    runtime, _ = runtime_factory([
+        response(tools=[tool("write_file", path="ui.txt", content="before")], stop="tool_use"),
+        response(tools=[tool("edit_file", "edit", path="ui.txt", old_text="before", new_text="after")], stop="tool_use"),
+        response("完成")])
+    app = HarnessApp(runtime)
+
+    async def exercise():
+        async with app.run_test(size=(110, 35)) as pilot:
+            app._submit("创建并编辑文件")
+            await wait_for(pilot, lambda: not app.busy)
+            assert app.approval is None
+            assert not app.query(ApprovalCard)
+            assert str(app.query_one("#permission", Button).label) == "权限：默认 ▾"
+            assert (tmp_path / "ui.txt").read_text() == "after"
             await pilot.press("ctrl+d")
             await wait_for(pilot, lambda: app.runtime_closed)
     asyncio.run(exercise())

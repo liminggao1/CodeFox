@@ -310,7 +310,7 @@ class PermissionModeScreen(ModalScreen[str | None]):
             yield Static("权限模式", markup=False)
             yield Button("默认", name="default", id="permission-default",
                          variant="primary" if self.mode == "default" else "default")
-            yield Static("只读直接执行，修改和目录外文件访问询问。", markup=False)
+            yield Static("工作区内文件工具直接执行；目录外文件和需审批的命令询问。", markup=False)
             yield Button("免审批", name="no_approval", id="permission-no-approval",
                          variant="primary" if self.mode == "no_approval" else "default")
             yield Static("需要审批的操作直接执行，禁止命令仍拒绝。", markup=False)

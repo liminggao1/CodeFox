@@ -128,6 +128,9 @@ class SessionStore:
                     self._validate_record(event)
                 elif event.get("kind") != "summary":
                     raise SessionError("Invalid event kind; expected display or summary")
+                if event.get("kind") == "summary" and event["type"] == "model_usage":
+                    if type(event.get("input_tokens")) is not int or event["input_tokens"] < 0:
+                        raise SessionError("Invalid model input token measurement")
             if messages and not any(event.get("kind") == "display" and
                                     event["type"] in {"user_message", "assistant_message", "tool_call"}
                                     for event in events):
@@ -292,6 +295,20 @@ class InteractiveSession:
         self.snapshot["events"].append(json_value(record))
         self.dirty = True
         return True
+
+    def record_input_tokens(self, value: int) -> None:
+        """Persist each API input measurement at the next normal checkpoint."""
+        self.append_record({"id": uuid.uuid4().hex, "at": utc_now(),
+                            "kind": "summary", "type": "model_usage", "input_tokens": value})
+
+    def last_input_tokens(self) -> int | None:
+        """Session measurement, separate from cumulative per-turn usage."""
+        if self.snapshot is not None:
+            for event in reversed(self.snapshot["events"]):
+                if event.get("kind") == "summary" and event["type"] == "model_usage":
+                    return event["input_tokens"]
+        # A populated history without a measurement is unknown, not zero usage.
+        return None if self.history else 0
 
     def display_records(self, *, historical=False) -> list[dict]:
         records = json_value([event for event in self.snapshot["events"]

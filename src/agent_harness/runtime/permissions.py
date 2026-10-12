@@ -222,7 +222,7 @@ def evaluate(block, *, mode):
             path = (cwd / args["path"]).resolve()
         except (ValueError, OSError, RuntimeError) as exc:
             return _invalid(str(exc))
-        action = "allow" if name == "read_file" and path.is_relative_to(core.WORKDIR.resolve()) else "ask"
+        action = "allow" if path.is_relative_to(core.WORKDIR.resolve()) else "ask"
         reason = "file"
     elif name.startswith("mcp__"):
         policy = tool_registry.REGISTRY.policy_for(name)

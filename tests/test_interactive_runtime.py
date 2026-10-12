@@ -72,6 +72,38 @@ def test_serial_submission_history_events_and_usage(runtime_factory):
     assert runtime.submit("/goal").status == "accepted"
 
 
+def test_resume_restores_last_request_context_tokens_after_multiple_model_calls(runtime_factory):
+    from agent_harness.frontends.presentation import model_status
+    first = response(tools=[tool("todo_write", todos=[])], stop="tool_use")
+    first.usage.input_tokens = 2100
+    final = response("回答")
+    final.usage.input_tokens = 3200
+    runtime, _ = runtime_factory([first, final])
+    submission = runtime.submit("你好")
+    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
+    assert finished.payload["summary"]["lead_usage"]["input_tokens"] == 5300
+    assert runtime.turns.last_input_tokens() == 3200
+    session_id = runtime.session.session_id
+    runtime.close()
+    until(runtime, "runtime_closed")
+    runtime._thread.join(3)
+    restored, _ = runtime_factory([response("继续")])
+    submission = restored.submit(f"/resume {session_id}")
+    _, events = until(restored, "command_result", submission_id=submission.submission_id)
+    snapshot = [event for event in events if event.type == "state_snapshot"][-1]
+    assert snapshot.payload["context_input_tokens"] == 3200
+    assert "3.20k/" in model_status(snapshot.payload)
+    submission = restored.submit("继续")
+    until(restored, "turn_finished", submission_id=submission.submission_id)
+    assert restored.turns.last_input_tokens() == 10
+    submission = restored.submit("/new")
+    until(restored, "command_result", submission_id=submission.submission_id)
+    assert restored.turns.last_input_tokens() == 0
+    submission = restored.submit(f"/resume {session_id}")
+    until(restored, "command_result", submission_id=submission.submission_id)
+    assert restored.turns.last_input_tokens() == 10
+
+
 @pytest.mark.parametrize("decision,expected", [("approve", "hello"), ("deny", "Permission denied")])
 def test_approval_routes_to_matching_tool(runtime_factory, decision, expected):
     runtime, host = runtime_factory([response("Before", tools=[tool("bash", command="printf hello")], stop="tool_use"), response("After")])
