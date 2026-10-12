@@ -186,9 +186,9 @@ def test_tui_failed_command_finishes_status_and_accepts_next_input(runtime_facto
         async with app.run_test(size=(100, 30)) as pilot:
             app._submit("/resume invalid")
             await wait_for(pilot, lambda: not app.busy)
-            # 命令失败只弹窗提示，状态行回到就绪，不把错误留在状态行。
+            # 命令失败只弹窗提示，状态行保持空白，不把错误留在状态行。
             assert any(notification.severity == "error" for notification in app._notifications)
-            assert str(app.query_one("#input-status", Static).content) == "就绪"
+            assert str(app.query_one("#input-status", Static).content) == ""
             app._submit("next")
             await wait_for(pilot, lambda: len(app.query(Markdown)) == 1 and not app.busy)
             await pilot.press("ctrl+d")
@@ -679,7 +679,7 @@ def test_pure_conversation_shows_accepted_input_while_model_is_blocked(runtime_f
             assert app.query_one("#session-status")
             image = ElementTree.fromstring(app.export_screenshot())
             text = "".join(image.itertext())
-            assert "实时输入" in text and "正在处理请求" in text
+            assert "实时输入" in text and "处理中" in text
             release.set()
             await wait_for(pilot, lambda: not app.busy)
             await pilot.press("ctrl+d")

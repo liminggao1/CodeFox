@@ -256,17 +256,22 @@ def agent_loop(history: list, active_request: str, save_context=None, on_usage=N
             active_request = turn.inject_scheduled(active_request)
             # 将已完成的后台任务通知加入对话历史。
             turn.inject_background_notes()
+            # 先组装本次请求的 system/tools，供 token 计数覆盖模型实际看到的完整输入。
+            context = runtime_context.build_context(turn.history)
+            tools, handlers = assemble_tool_pool()
+            system = prompts.assemble_system_prompt(context.prompt_values())
             # 按上下文预算裁剪或压缩历史消息。
             compacted = compaction.prepare_history(
-                turn.history, active_request, enabled=automatic_compaction_enabled)
+                turn.history, active_request, enabled=automatic_compaction_enabled,
+                client=core.client, model=state.current_model, system=system, tools=tools)
             turn.after_compaction(compacted)
             if compacted.reason:
                 automatic_compaction_enabled = False
                 core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
-            # 根据最新消息刷新记忆、MCP 和子 agent上下文。
-            context = runtime_context.build_context(turn.history)
-            # 每轮重新读取工具池，包含运行中新增的 MCP 工具。
-            tools, handlers = assemble_tool_pool()
+            # 压缩后重新刷新上下文和工具池，确保请求使用最新历史。
+            if compacted.applied:
+                context = runtime_context.build_context(turn.history)
+                tools, handlers = assemble_tool_pool()
             if interaction.stopped():
                 return turn.finish("stopped")
 

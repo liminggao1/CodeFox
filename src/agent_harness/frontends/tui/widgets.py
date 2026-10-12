@@ -11,11 +11,12 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.message import Message
-from textual.widgets import Button, Collapsible, Label, ListItem, ListView, Markdown, OptionList, Static, Switch
+from textual.widgets import Button, Collapsible, Label, ListItem, ListView, Markdown, OptionList, Select, Static, Switch
 from textual.widgets.option_list import Option
 from ..presentation import (STATUS_LABELS, arguments_summary, arguments_text, format_elapsed,
                             format_session_state, full_text, lifecycle_summary, record_time, short_text,
                             todo_lines)
+from .themes import THEME_LABELS
 
 
 LOGO_PATH = Path(__file__).resolve().parents[4] / "assets" / "logo" / "1F98A.svg"
@@ -35,7 +36,7 @@ class GroupHead(Static):
         pass
 
     DEFAULT_CSS = """
-    GroupHead { height: 1; color: #999fa5; }
+    GroupHead { height: 1; color: $codefox-muted; }
     """
 
     def on_click(self):
@@ -48,14 +49,14 @@ class BrandBar(Vertical):
     固定 1 行：头像、会话标题和四个入口；``会话状态`` 切换右侧只读面板显隐。
     """
     DEFAULT_CSS = """
-    BrandBar { height: 1; padding: 0 1; background: #101214; }
+    BrandBar { height: 1; padding: 0 1; background: $background; }
     BrandBar #brand-row { height: 1; }
-    BrandBar .brand { width: 12; color: #80cbc4; text-style: bold; }
-    BrandBar .session-title { width: 1fr; color: #e1e3e5; }
+    BrandBar .brand { width: 12; color: $primary; text-style: bold; }
+    BrandBar .session-title { width: 1fr; color: $foreground; }
     BrandBar #top-actions { width: auto; height: 1; align-horizontal: right; }
     BrandBar #top-actions Button { min-width: 6; height: 1; min-height: 1; border: none;
         margin-left: 1; padding: 0 1; }
-    BrandBar #top-actions #new-session { color: #101214; background: #80cbc4; }
+    BrandBar #top-actions #new-session { color: $background; background: $primary; }
     """
 
     def compose(self) -> ComposeResult:
@@ -83,8 +84,8 @@ class ProcessGroup(Vertical):
     操作内容原样透传，不截断。
     """
     DEFAULT_CSS = """
-    ProcessGroup { height: auto; margin: 1 0; background: #141618; border: solid #2c3033; padding: 0 1; }
-    ProcessGroup GroupHead { height: 1; color: #999fa5; }
+    ProcessGroup { height: auto; margin: 1 0; background: $panel; border: solid $codefox-border; padding: 0 1; }
+    ProcessGroup GroupHead { height: 1; color: $codefox-muted; }
     ProcessGroup > VerticalScroll { height: auto; max-height: 14; }
     """
 
@@ -162,7 +163,12 @@ class OperationEntry(Vertical):
     OperationEntry { height: auto; }
     OperationEntry Static { height: auto; }
     OperationEntry Collapsible { height: auto; padding: 0; background: transparent; }
-    OperationEntry .operation-preview { color: #999fa5; padding-left: 2; }
+    OperationEntry .operation-preview { color: $codefox-muted; padding-left: 2; }
+    OperationEntry.tool-success .operation-summary { color: $success; }
+    OperationEntry.tool-failed .operation-summary { color: $error; }
+    OperationEntry.tool-failed .operation-preview { color: $error; }
+    OperationEntry.tool-warning .operation-summary { color: $warning; }
+    OperationEntry.tool-running .operation-summary { color: $primary; }
     """
 
     def __init__(self, entry):
@@ -178,6 +184,11 @@ class OperationEntry(Vertical):
     def render_entry(self, entry):
         """状态由共享投影提供，控件只更新文字并保留展开状态。"""
         self.entry = entry
+        state = entry["state"]
+        self.set_class(state in {"completed", "success", "returned"}, "tool-success")
+        self.set_class(state == "failed", "tool-failed")
+        self.set_class(state in {"denied", "stopped"}, "tool-warning")
+        self.set_class(state in ProcessGroup.RUNNING_STATES, "tool-running")
         record = entry["record"]
         data = dict(record["payload"], state=entry["state"])
         if record["type"] == "execution_status" and data["phase"] != "tool":
@@ -238,7 +249,7 @@ class OperationEntry(Vertical):
 
 
 class StreamingText(Vertical):
-    DEFAULT_CSS = "StreamingText { height: auto; } StreamingText Static { height: auto; color: #999fa5; }"
+    DEFAULT_CSS = "StreamingText { height: auto; } StreamingText Static { height: auto; color: $codefox-muted; }"
 
     def compose(self):
         yield Collapsible(Markdown(""), title="本次输出未采用", collapsed=False)
@@ -338,12 +349,12 @@ class MessageRow(Horizontal):
 class ConversationRecord(Vertical):
     DEFAULT_CSS = """
     ConversationRecord { height: auto; margin-bottom: 1; }
-    ConversationRecord.user-message { width: auto; max-width: 82%; background: #202326; padding: 0 1; }
+    ConversationRecord.user-message { width: auto; max-width: 82%; background: $surface; color: $foreground; padding: 0 1; }
     ConversationRecord.user-message Static { width: auto; max-width: 100%; }
-    ConversationRecord.model-message { width: 82%; background: #191b1d; padding: 0 1; }
-    ConversationRecord.event-record { width: 100%; background: #17191b; color: #999fa5; padding: 0 1; }
-    ConversationRecord.system-error { width: 100%; background: #321d1d; color: #ff9b9b; border-left: solid #ff6b6b; padding: 0 1; }
-    ConversationRecord .record-source { height: 1; color: #80cbc4; }
+    ConversationRecord.model-message { width: 82%; background: $panel; color: $foreground; padding: 0 1; }
+    ConversationRecord.event-record { width: 100%; background: $panel; color: $codefox-muted; padding: 0 1; }
+    ConversationRecord.system-error { width: 100%; background: $codefox-error-background; color: $error; border-left: solid $error; padding: 0 1; }
+    ConversationRecord .record-source { height: 1; color: $primary; }
     ConversationRecord Static { height: auto; }
     ConversationRecord Collapsible { height: auto; padding: 0; background: transparent; }
     """
@@ -395,16 +406,6 @@ class ConversationRecord(Vertical):
         elif kind == "command_result":
             result = data.get("data", {})
             yield Static(str(result.get("text") or result.get("error") or data.get("command", "")), markup=False)
-        elif kind == "turn_finished":
-            outcome, summary = data.get("outcome", {}), data.get("summary", {})
-            labels = {"completed": "完成", "failed": "失败", "stopped": "已停止", "truncated": "输出截断"}
-            status = outcome.get("status", data.get("status", "completed"))
-            text = labels.get(status, status)
-            if summary:
-                text += f" · {summary.get('elapsed_seconds', 0):.1f}s · 工具 {summary.get('tool_calls', 0)} · 审批 {summary.get('approvals', 0)}"
-                usage = summary.get("lead_usage", {})
-                text += f"\nLead 主模型 · 请求 {usage.get('model_calls', 0)} · 输入 {usage.get('input_tokens', 0)} · 输出 {usage.get('output_tokens', 0)}"
-            yield Static(text, markup=False)
 
 
 class SettingsScreen(ModalScreen[None]):
@@ -416,19 +417,25 @@ class SettingsScreen(ModalScreen[None]):
     SettingsScreen > Vertical { width: 64; max-width: 95%; height: auto;
         border: solid $primary; padding: 1 2; background: $surface; }
     SettingsScreen #settings-head { height: 1; }
-    SettingsScreen #settings-head Label { width: 1fr; color: #80cbc4; text-style: bold; }
+    SettingsScreen #settings-head Label { width: 1fr; color: $primary; text-style: bold; }
     SettingsScreen #settings-back { width: auto; min-width: 0; height: 1; min-height: 1;
         border: none; padding: 0 1; }
-    SettingsScreen .settings-section { height: 1; margin-top: 1; color: #999fa5; }
+    SettingsScreen .settings-section { height: 1; margin-top: 1; color: $codefox-muted; }
     SettingsScreen .settings-row { height: 3; align: left middle; }
     SettingsScreen .settings-row Label { width: 1fr; height: 1; }
-    SettingsScreen .settings-note { height: auto; color: #999fa5; }
+    SettingsScreen .settings-note { height: auto; color: $codefox-muted; }
+    SettingsScreen #theme-select { width: 24; }
     """
 
     class DiagnosticsChanged(Message):
         def __init__(self, visible):
             super().__init__()
             self.visible = visible
+
+    class ThemeChanged(Message):
+        def __init__(self, theme):
+            super().__init__()
+            self.theme = theme
 
     def __init__(self, diagnostics_visible):
         super().__init__()
@@ -445,6 +452,14 @@ class SettingsScreen(ModalScreen[None]):
                 yield Switch(self.diagnostics_visible, id="diagnostics-toggle", animate=False)
             yield Static("关闭时隐藏日志，重新开启可查看当前会话的日志。",
                          classes="settings-note", markup=False)
+            with Horizontal(classes="settings-row"):
+                yield Label("配色主题")
+                yield Select(THEME_LABELS, value=self.app.theme,
+                             allow_blank=False, id="theme-select")
+
+    def on_select_changed(self, event: Select.Changed):
+        if event.select.id == "theme-select" and event.value != Select.NULL:
+            self.post_message(self.ThemeChanged(event.value))
 
     def on_switch_changed(self, event: Switch.Changed):
         if event.switch.id == "diagnostics-toggle":
@@ -469,8 +484,8 @@ class SessionScreen(ModalScreen[str | None]):
     SessionScreen ListItem { padding: 1; height: auto; }
     SessionScreen Horizontal { height: 1; align-horizontal: left; }
     SessionScreen #sessions-head { height: 1; align-horizontal: right; }
-    SessionScreen #sessions-head Label { width: 1fr; color: #80cbc4; text-style: bold; }
-    SessionScreen .session-note { height: 1; color: #999fa5; }
+    SessionScreen #sessions-head Label { width: 1fr; color: $primary; text-style: bold; }
+    SessionScreen .session-note { height: 1; color: $codefox-muted; }
     SessionScreen #sessions-head Button, SessionScreen #sessions-actions Button {
         height: 1; min-height: 1; margin-left: 1; padding: 0 1; }
     """
@@ -542,11 +557,11 @@ class SessionScreen(ModalScreen[str | None]):
 class SessionStatePanel(VerticalScroll):
     """Read-only projection of the active session state."""
     DEFAULT_CSS = """
-    SessionStatePanel { width: 32; min-width: 26; padding: 0 1; background: #191b1d; border-left: solid #35393d; }
+    SessionStatePanel { width: 32; min-width: 26; padding: 0 1; background: $panel; border-left: solid $codefox-border; }
     SessionStatePanel #state-head { height: 1; }
-    SessionStatePanel .state-title { width: 1fr; color: #80cbc4; text-style: bold; height: 1; }
+    SessionStatePanel .state-title { width: 1fr; color: $primary; text-style: bold; height: 1; }
     SessionStatePanel #state-collapse { min-width: 6; height: 1; min-height: 1; border: none; padding: 0 1; }
-    SessionStatePanel .state-body { color: #b8bdc2; height: auto; }
+    SessionStatePanel .state-body { color: $foreground; height: auto; }
     """
 
     def compose(self) -> ComposeResult:

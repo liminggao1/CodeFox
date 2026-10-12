@@ -12,7 +12,7 @@ from .widgets import (ApprovalCard, BrandBar, ConversationRecord, DetailScroll, 
                       StreamingText)
 
 # 只有进行中的状态才占用对话区一行；终态一律清掉，避免残留。
-ACTIVE_STATUSES = frozenset({"正在处理请求", "正在关闭"})
+ACTIVE_STATUSES = frozenset({"处理中"})
 
 
 def operation_text(entry):
@@ -143,6 +143,9 @@ class ConversationView:
         data, kind = record["payload"], record["type"]
         # 审批结果已由审批卡就地展示，不再单独占一行。
         if kind == "approval_decided":
+            return
+        # 回合收尾统计只进入诊断日志，不在对话区重复显示 Lead 行。
+        if kind == "turn_finished":
             return
         # 模型生命周期由诊断日志和终态统计承担；对话区只展示模型正文。
         if kind == "execution_status" and data.get("phase") == "model":

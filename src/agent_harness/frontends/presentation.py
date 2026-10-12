@@ -24,10 +24,17 @@ def permission_summary(label):
 
 
 def model_status(snapshot=None, count=0, context_limit=0):
-    """Right footer summary: model, message count and static character budget."""
+    """Right footer summary: model and latest API context usage."""
     snapshot = snapshot or {}
-    return (f"模型：{snapshot.get('model') or '未开始'} · 消息：{count}"
-            f" · 字符预算：{context_limit}")
+    used = snapshot.get("context_input_tokens")
+    limit = snapshot.get("context_limit_tokens") or context_limit
+    model = snapshot.get("model") or "未开始"
+    if not isinstance(used, int) or used < 0 or not isinstance(limit, int) or limit <= 0:
+        return f"模型：{model} · 已使用上下文窗口：暂无"
+    shown = min(used, limit)
+    percent = min(100.0, shown * 100 / limit)
+    return (f"模型：{model} · 已使用上下文窗口：{compact_count(shown)}/"
+            f"{compact_count(limit)}（{percent:.0f}%）")
 
 
 def message_count(snapshot=None, records=()):
@@ -109,9 +116,11 @@ def compact_count(value):
         number = int(value)
     except (TypeError, ValueError):
         return str(value)
-    if number >= 10000:
-        return f"{number / 1000:.1f}k"
     if number >= 1000:
+        if number % 1000 == 0:
+            return f"{number // 1000}k"
+        if number >= 10000:
+            return f"{number / 1000:.1f}k"
         return f"{number / 1000:.2f}k"
     return str(number)
 

@@ -10,13 +10,13 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Static, TextArea
 
-from ... import core
 from ...runtime.interactive_runtime import InteractiveRuntime
 from ...runtime.local_commands import LOCAL_COMMANDS, find_command
 from .widgets import (ApprovalCard, BrandBar, CommandCandidates, SessionScreen, SessionStatePanel, SettingsScreen)
-from ..presentation import (PERMISSION_DEFAULT, PERMISSION_WAITING, message_count, model_status,
+from ..presentation import (PERMISSION_DEFAULT, PERMISSION_WAITING, model_status,
                             permission_summary, session_title)
 from .conversation_view import ConversationView
+from .themes import DEFAULT_THEME, THEMES
 
 class HarnessApp(App):
     TITLE = "Agent Harness"
@@ -34,27 +34,34 @@ class HarnessApp(App):
         Binding("ctrl+d", "close_runtime", "退出", priority=True),
     ]
     CSS = """
-    Screen { background: #151719; color: #e1e3e5; }
+    Screen { background: $background; color: $foreground; }
     #workspace { height: 1fr; }
     #conversation { width: 1fr; height: 1fr; padding: 0 1; }
     #conversation-top { height: 1; }
     #conversation-top #earlier { width: auto; min-width: 0; height: 1; min-height: 1; border: none; padding: 0 1; }
     #chat { height: 1fr; }
     #earlier { display: none; }
-    Markdown { padding: 0 1; margin: 0; background: transparent; }
-    .activity { height: auto; color: #999fa5; margin: 1 0; }
-    .diagnostic { height: auto; padding: 0; }
-    #command-hint { display: none; height: 1; color: #80cbc4; }
+    Markdown { padding: 0 1; margin: 0; background: transparent; color: $foreground; }
+    .activity { height: auto; color: $codefox-muted; margin: 1 0; }
+    .diagnostic { height: auto; padding: 0; color: $codefox-muted; background: $surface; }
+    .diagnostic * { color: $codefox-muted; }
+    #command-hint { display: none; height: 1; color: $primary; }
     #input-area { height: auto; padding: 0 1; }
-    #input-status { height: 1; color: #999fa5; }
-    #input-box { height: 4; margin-top: 1; border: solid #55595d; background: #202326; }
+    #input-status { height: 1; color: $codefox-muted; }
+    #input-status.processing { color: $primary; }
+    #input-status.completed { color: $success; }
+    #input-status.failed { color: $error; }
+    #input-status.stopped { color: $warning; }
+    #input-box { height: 4; margin-top: 1; border: solid $codefox-border; background: $surface; }
     #input-row { height: 1; }
     #input { width: 1fr; height: 1; border: none; background: transparent; padding: 0 1; }
     #send { width: auto; min-width: 8; height: 1; min-height: 1; border: none; margin: 0 1; padding: 0 1; }
-    #input-hint { height: 1; color: #999fa5; padding: 0 1; }
-    #input-footer { height: 1; color: #999fa5; }
-    #permission { width: 1fr; color: #b3a35a; }
-    #bottom-status { width: auto; color: #999fa5; }
+    #input-hint { height: 1; color: $codefox-muted; padding: 0 1; }
+    #input-footer { height: 1; color: $codefox-muted; }
+    #permission { width: 1fr; color: $warning; }
+    #bottom-status { width: auto; color: $codefox-muted; }
+    #bottom-status.context-warning { color: $warning; }
+    #bottom-status.context-full { color: $error; }
     .short #input-box { height: 3; margin-top: 0; }
     .short #input-hint { display: none; }
     .short #input-footer { display: none; }
@@ -65,6 +72,9 @@ class HarnessApp(App):
 
     def __init__(self, runtime=None):
         super().__init__()
+        for theme in THEMES:
+            self.register_theme(theme)
+        self.theme = DEFAULT_THEME
         self.runtime = runtime or InteractiveRuntime()
         self.generation = 0
         self.sequence = 0
@@ -99,7 +109,7 @@ class HarnessApp(App):
             yield SessionStatePanel(id="session-status")
         # 输入区在主体之外：展开状态面板时对话列让位，输入框不被压缩。
         with Vertical(id="input-area"):
-            yield Static("就绪", id="input-status", markup=False)
+            yield Static("", id="input-status", markup=False)
             with Vertical(id="input-box"):
                 with Horizontal(id="input-row"):
                     yield TextArea(id="input", soft_wrap=True, placeholder="输入消息或 / 命令…")
@@ -142,9 +152,17 @@ class HarnessApp(App):
             button.disabled = self.turn_id is None
         else:
             button.label = "发送"
-            button.disabled = False
-        self.query_one("#bottom-status", Static).update(
-            model_status(self.snapshot, message_count(self.snapshot, self.records), core.CONTEXT_LIMIT))
+            button.disabled = self._context_full() and not self._draft_is_compact()
+        footer = self.query_one("#bottom-status", Static)
+        footer.update(model_status(self.snapshot))
+        footer.remove_class("context-warning", "context-full")
+        used = self.snapshot.get("context_input_tokens")
+        limit = self.snapshot.get("context_limit_tokens")
+        if isinstance(used, int) and isinstance(limit, int) and limit > 0:
+            if used >= limit:
+                footer.add_class("context-full")
+            elif used * 100 >= limit * 80:
+                footer.add_class("context-warning")
         self._input_status()
         self.query_one(SessionStatePanel).update_snapshot(self.snapshot, self.records)
         self.query_one(SessionStatePanel).display = self.state_expanded
@@ -202,6 +220,8 @@ class HarnessApp(App):
 
     def on_text_area_changed(self, event: TextArea.Changed):
         self._refresh_commands()
+        # 满载时仅允许 /compact；草稿变化后立即同步发送按钮状态。
+        self._controls()
 
     def on_text_area_selection_changed(self, event: TextArea.SelectionChanged):
         self._refresh_commands()
@@ -292,21 +312,33 @@ class HarnessApp(App):
             self._hidden_command_text = None
             self._refresh_commands()
 
-    def _status(self, label="就绪"):
+    def _context_full(self):
+        used = self.snapshot.get("context_input_tokens")
+        limit = self.snapshot.get("context_limit_tokens")
+        return (isinstance(used, int) and isinstance(limit, int)
+                and limit > 0 and used >= limit)
+
+    def _draft_is_compact(self):
+        text = self.query_one("#input", TextArea).text.strip()
+        return bool(text) and text.split(maxsplit=1)[0] == "/compact"
+
+    def _status(self, label=""):
         """底部状态行始终更新；对话区的活动行只在执行期间存在。"""
-        self._notice = None if label == "就绪" else label
+        self._notice = label if label in {"处理中", "完成", "失败", "已停止"} else None
         self._input_status()
         self.conversation.show_activity(label)
 
     def _input_status(self):
         """Input-area status line: runtime state first, then the last notice."""
-        if self.closing:
-            label = "关闭中"
-        elif self.busy:
+        if self.busy:
             label = "处理中"
         else:
-            label = self._notice or "就绪"
-        self.query_one("#input-status", Static).update(label)
+            label = self._notice or ""
+        status = self.query_one("#input-status", Static)
+        status.update(label)
+        for name, text in (("processing", "处理中"), ("completed", "完成"),
+                           ("failed", "失败"), ("stopped", "已停止")):
+            status.set_class(label == text, name)
 
     def action_send(self):
         if len(self.screen_stack) != 1:
@@ -326,6 +358,9 @@ class HarnessApp(App):
     def _submit(self, text):
         if not text or not text.strip():
             return False
+        if self._context_full() and text.strip().split(maxsplit=1)[0] != "/compact":
+            self.notify("上下文已满，请先执行 /compact", severity="warning", markup=False)
+            return False
         result = self.runtime.submit(text)
         if result.status != "accepted":
             self.notify(result.reason, severity="warning")
@@ -334,7 +369,7 @@ class HarnessApp(App):
         if result.kind == "turn":
             self.conversation.show_pending_input(result.submission_id, text)
         self._controls()
-        self._status("正在处理请求")
+        self._status("处理中")
         return True
 
     def action_clear_input(self):
@@ -364,7 +399,6 @@ class HarnessApp(App):
         self.runtime.close()
         self._dismiss_approval()
         self._controls()
-        self._status("正在关闭")
 
     async def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "send":
@@ -391,6 +425,9 @@ class HarnessApp(App):
 
     def on_settings_screen_diagnostics_changed(self, event: SettingsScreen.DiagnosticsChanged):
         self.conversation.set_diagnostics_visible(event.visible)
+
+    def on_settings_screen_theme_changed(self, event: SettingsScreen.ThemeChanged):
+        self.theme = event.theme
 
     def _focus_input(self):
         """顶部入口和状态切换不保留焦点，输入框始终可以继续编辑草稿。"""
@@ -479,7 +516,7 @@ class HarnessApp(App):
             self.busy = True
             self.stopping = False
             self._controls()
-            self._status("正在处理请求")
+            self._status("处理中")
         elif kind == "turn_finished":
             self.turn_id = None
             self.busy = False
@@ -487,15 +524,24 @@ class HarnessApp(App):
             self._dismiss_approval()
             self._controls()
             outcome = data["outcome"]
-            labels = {"completed": "完成", "failed": "失败", "stopped": "已停止", "truncated": "输出截断"}
-            self._status("正在关闭" if self.closing else labels[outcome["status"]])
+            labels = {"completed": "完成", "failed": "失败", "stopped": "已停止", "truncated": "失败"}
+            self._status(labels[outcome["status"]])
+            summary = data.get("summary") or {}
+            usage = summary.get("lead_usage") or {}
+            self.conversation.log(
+                f"[TURN] {labels[outcome['status']]} · {summary.get('elapsed_seconds', 0):.1f}s"
+                f" · 工具 {summary.get('tool_calls', 0)} · 审批 {summary.get('approvals', 0)}"
+                f" · 请求 {usage.get('model_calls', 0)}"
+                f" · 输入 {usage.get('input_tokens', 0)} · 输出 {usage.get('output_tokens', 0)}")
             if outcome["reason"]:
                 self.conversation.log(outcome["reason"])
         elif kind == "command_result":
             if not data.get("turn_id"):
                 self.busy = False
+                self._notice = None
                 self._controls()
-                self._status("正在关闭" if self.closing else "就绪")
+                self._input_status()
+                self.conversation.show_activity("")
             result = data["data"]
             # 命令结果一律弹窗提示：对话区不留命令行，避免开发者视角的噪音。
             if data["status"] == "failed":
@@ -511,8 +557,7 @@ class HarnessApp(App):
         elif kind == "log":
             self.conversation.log(data["text"])
         elif kind == "session_saved":
-            if not self.busy:
-                self._status("已保存")
+            pass
         elif kind == "runtime_error":
             self.conversation.log(data["error"])
             self.notify(data["error"], severity="error")

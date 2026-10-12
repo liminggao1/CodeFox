@@ -44,6 +44,7 @@ class TurnRunner:
         self._stop = None
         self._background_paused = False
         self._usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
+        self._last_input_tokens = 0
         self._turn_started_at = None
         self._turn_usage = dict(self._usage)
 
@@ -62,12 +63,20 @@ class TurnRunner:
         """当前 lead 累计用量；会话切换后由运行时重置。"""
         return dict(self._usage)
 
+    def last_input_tokens(self):
+        """Return the most recent model request input size for the UI summary."""
+        return self._last_input_tokens
+
     def reset_usage(self):
         """会话切换落地后清零累计用量。"""
         self._usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
+        self._last_input_tokens = 0
 
     def record_usage(self, usage):
         """累计一次模型响应的输入与输出用量。"""
+        value = usage.get("input_tokens", 0) or 0
+        if isinstance(value, int) and value >= 0:
+            self._last_input_tokens = value
         for key in ("input_tokens", "output_tokens"):
             self._usage[key] += usage.get(key, 0) or 0
 

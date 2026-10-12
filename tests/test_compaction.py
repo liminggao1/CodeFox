@@ -24,6 +24,11 @@ def tool_result(tool_id: str, text: str) -> dict:
         {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}
 
 
+def token_text(tokens: int) -> str:
+    """Use one CJK character per estimated token in threshold tests."""
+    return "中" * tokens
+
+
 def test_context_thresholds_follow_the_main_budget(host_factory) -> None:
     host_factory()
 
@@ -31,8 +36,8 @@ def test_context_thresholds_follow_the_main_budget(host_factory) -> None:
     assert core.COMPACT_TRIGGER == int(core.CONTEXT_LIMIT * 0.8)
     assert core.COMPACT_TARGET == int(core.CONTEXT_LIMIT * 0.7)
     assert core.TOOL_RESULT_BUDGET == int(core.CONTEXT_LIMIT * 0.16)
-    assert core.PERSIST_THRESHOLD == int(core.CONTEXT_LIMIT * 0.08)
-    assert core.TOOL_PREVIEW_CHARS == int(core.CONTEXT_LIMIT * 0.02)
+    assert core.PERSIST_THRESHOLD > 0
+    assert core.TOOL_PREVIEW_CHARS > 0
 
 
 def test_prepare_compacts_only_above_trigger(host_factory, monkeypatch) -> None:
@@ -44,8 +49,8 @@ def test_prepare_compacts_only_above_trigger(host_factory, monkeypatch) -> None:
         return [{"role": "user", "content": "summary"}]
 
     monkeypatch.setattr(compaction, "compact_history", compact_history)
-    below = [{"role": "user", "content": "x" * (core.COMPACT_TRIGGER - 100)}]
-    above = [{"role": "user", "content": "x" * core.COMPACT_TRIGGER}]
+    below = [{"role": "user", "content": token_text(core.COMPACT_TRIGGER - 100)}]
+    above = [{"role": "user", "content": token_text(core.COMPACT_TRIGGER)}]
 
     compaction.prepare_history(below, "below")
     compaction.prepare_history(above, "above")
@@ -59,9 +64,9 @@ def test_prepare_stops_below_trigger_without_forcing_target(
     host = host_factory()
     targets = []
 
-    def micro_compact(messages, target_chars):
-        targets.append(target_chars)
-        return [{"role": "user", "content": "x" * (core.COMPACT_TRIGGER - 100)}]
+    def micro_compact(messages, target_tokens):
+        targets.append(target_tokens)
+        return [{"role": "user", "content": token_text(core.COMPACT_TRIGGER - 100)}]
 
     def unexpected(*args):
         raise AssertionError("already below the compression trigger")
@@ -69,7 +74,7 @@ def test_prepare_stops_below_trigger_without_forcing_target(
     monkeypatch.setattr(compaction, "micro_compact", micro_compact)
     monkeypatch.setattr(compaction, "fit_tool_results", unexpected)
     monkeypatch.setattr(compaction, "compact_history", unexpected)
-    messages = [{"role": "user", "content": "x" * core.COMPACT_TRIGGER}]
+    messages = [{"role": "user", "content": token_text(core.COMPACT_TRIGGER)}]
 
     compaction.prepare_history(messages, "go")
 
@@ -94,9 +99,9 @@ def test_prepare_persists_oversized_result_before_trimming(host_factory) -> None
     messages = [
         {"role": "user", "content": "go"},
         tool_use("t1"),
-        tool_result("t1", "y" * (core.COMPACT_TRIGGER // 2 + 1000)),
+        tool_result("t1", token_text(core.COMPACT_TRIGGER // 2 + 1000)),
         tool_use("t2"),
-        tool_result("t2", "z" * (core.COMPACT_TRIGGER // 2 + 1000)),
+        tool_result("t2", token_text(core.COMPACT_TRIGGER // 2 + 1000)),
         {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
         {"role": "user", "content": "next"},
     ]
@@ -123,7 +128,7 @@ def test_tool_result_budget_persists_a_single_large_result(host_factory) -> None
 
 def test_tool_result_budget_reduces_batch_below_individual_limit(host_factory) -> None:
     host = host_factory()
-    output = "x" * (core.PERSIST_THRESHOLD - 1000)
+    output = "中" * (core.PERSIST_THRESHOLD - 1000)
     messages = [{"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": f"t{index}", "content": output}
         for index in range(3)
@@ -134,7 +139,7 @@ def test_tool_result_budget_reduces_batch_below_individual_limit(host_factory) -
     results = [block["content"] for block in messages[0]["content"]]
     assert results[0].startswith("<persisted-output>")
     assert results[1:] == [output, output]
-    assert sum(map(len, results)) <= core.TOOL_RESULT_BUDGET
+    assert sum(compaction.estimate_text_tokens(text) for text in results) <= core.TOOL_RESULT_BUDGET
 
 
 def test_micro_compact_keeps_unseen_tool_result_batch(host_factory) -> None:
@@ -154,7 +159,7 @@ def test_micro_compact_keeps_unseen_tool_result_batch(host_factory) -> None:
         tool_result("t5", "e" * 5000),
     ]
 
-    compaction.micro_compact(messages, target_chars=1)
+    compaction.micro_compact(messages, target_tokens=1)
 
     # 模型尚未处理的结果保持原文。
     assert messages[5]["content"][0]["content"] == "b" * 5000
@@ -177,7 +182,7 @@ def test_micro_compact_releases_batch_after_model_consumes_it(
             {"role": "assistant", "content": [{"type": "text", "text": "seen"}]}
         )
 
-    compaction.micro_compact(messages, target_chars=1)
+    compaction.micro_compact(messages, target_tokens=1)
 
     saved = {path.name for path in core.tool_results_dir().glob("*.txt")}
     assert {"t0.txt", "t1.txt", "t2.txt"} <= saved
@@ -358,10 +363,10 @@ def compaction_tools(*calls):
 def test_automatic_failure_allows_main_call_without_repeat(host_factory, monkeypatch, context_error):
     host = host_factory()
     summaries, main_calls = [], []
-    history = [{"role": "user", "content": "x" * core.COMPACT_TRIGGER}]
+    history = [{"role": "user", "content": token_text(core.COMPACT_TRIGGER)}]
     original = copy.deepcopy(history)
 
-    def fail_summary(messages):
+    def fail_summary(messages, **kwargs):
         summaries.append(True)
         raise RuntimeError("summary unavailable")
 
@@ -420,7 +425,7 @@ def test_manual_failure_preserves_other_results_and_never_reruns_tools(host_fact
         calls.append(copy.deepcopy(kwargs))
         return responses.pop(0)
 
-    def fail_summary(messages):
+    def fail_summary(messages, **kwargs):
         summaries.append(copy.deepcopy(messages))
         raise RuntimeError("summary unavailable")
 

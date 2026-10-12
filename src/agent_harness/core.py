@@ -88,14 +88,14 @@ PROCESS_REAP_TIMEOUT_SECONDS = 0.2  # 结束后回收 shell 进程的等待时�
 LARGE_OUTPUT_WARNING_CHARS = 100000 # 大工具输出的日志提醒阈值
 
 # ---------- 上下文压缩参数 ----------
-CONTEXT_LIMIT = 50000               # 对话历史字符预算，不含系统提示词和工具定义
-COMPACT_TRIGGER = int(CONTEXT_LIMIT * 0.8)       # 自动压缩触发线
-COMPACT_TARGET = int(CONTEXT_LIMIT * 0.7)        # 工具结果压缩的目标值
-TOOL_RESULT_BUDGET = int(CONTEXT_LIMIT * 0.16)  # 最新一批工具结果预算
-TOOL_PREVIEW_CHARS = int(CONTEXT_LIMIT * 0.02)  # 落盘结果的预览长度
+CONTEXT_LIMIT = int(os.getenv("MODEL_CONTEXT_TOKENS", "50000"))  # 当前模型上下文上限（token）
+COMPACT_TRIGGER = int(CONTEXT_LIMIT * 0.8)       # 自动压缩触发线（token）
+COMPACT_TARGET = int(CONTEXT_LIMIT * 0.7)        # 工具结果压缩的目标值（token）
+TOOL_RESULT_BUDGET = int(CONTEXT_LIMIT * 0.16)  # 最新一批工具结果预算（token）
+TOOL_PREVIEW_CHARS = int(os.getenv("TOOL_PREVIEW_CHARS", "1000"))  # 落盘结果的字符预览长度
 KEEP_RECENT_TOOL_RESULTS = 3        # 历史中保留最近几条工具结果
-PERSIST_THRESHOLD = int(CONTEXT_LIMIT * 0.08)  # 单条工具结果落盘阈值
-COMPACTION_INPUT_CHAR_LIMIT = 80000 # 发送给摘要模型的历史字符上限
+PERSIST_THRESHOLD = int(os.getenv("TOOL_PERSIST_THRESHOLD_CHARS", "4000"))  # 单条工具结果落盘阈值（字符）
+COMPACTION_INPUT_TOKEN_LIMIT = int(CONTEXT_LIMIT * 0.8) # 发送给摘要模型的历史 token 上限
 COMPACTION_HEAD_MESSAGES = 3        # 归档中间历史时保留的开头消息数
 COMPACTION_TAIL_MESSAGES = 5        # 被动压缩时保留的最近消息数
 MIN_COMPACT_RESULT_CHARS = 120      # 不值得压缩落盘的短工具结果阈值

@@ -824,7 +824,8 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
                 "history": [{"role": "user", "content": "hello"}],
                 "goal": None, "todos": [], "subagents": [], "model": "test-model",
                 "busy": True, "closing": False,
-                "lead_main_model_usage": {"model_calls": 1, "input_tokens": 2, "output_tokens": 3},
+                    "context_input_tokens": 2000, "context_limit_tokens": 50000,
+                    "lead_main_model_usage": {"model_calls": 1, "input_tokens": 2, "output_tokens": 3},
                 "workdir": "/tmp/project", "task_id": "task_1", "worktree": "feature",
             }))
             await pilot.pause()
@@ -849,7 +850,7 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
             send = app.query_one("#send", Button).region
             assert box.y <= send.y and send.bottom <= box.bottom
             footer = str(app.query_one("#bottom-status", Static).content)
-            assert "test-model" in footer and "消息：" in footer and "字符预算：" in footer
+            assert "test-model" in footer and "已使用上下文窗口：2k/50k（4%）" in footer
             assert str(app.query_one("#permission", Static).content) == "权限：按工具策略"
     import asyncio
     asyncio.run(exercise())
@@ -1228,7 +1229,7 @@ def test_tui_command_result_notifies_without_conversation_row():
 
     async def exercise():
         async with app.run_test(size=(112, 34)) as pilot:
-            app._status("正在处理请求")
+            app._status("处理中")
             await pilot.pause()
             assert app.query(".activity")
             await app._event(event("command_result", {
@@ -1295,6 +1296,55 @@ def test_tui_settings_dialog_toggles_diagnostics_and_returns_to_draft(size):
             await app._event(event("session_changed", {"records": []}))
             assert app.conversation.diagnostics_visible and not app.query(".diagnostic")
             assert editor.text == "保留草稿"
+    asyncio.run(exercise())
+
+
+def test_tui_theme_switch_updates_reply_and_logs_without_losing_draft():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import SettingsScreen
+    from agent_harness.frontends.tui.themes import DEFAULT_THEME, THEMES
+    from textual.widgets import Markdown, Select, TextArea
+
+    app = HarnessApp(DisplayRuntime())
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            main_screen = app.screen
+            editor = app.query_one("#input", TextArea)
+            editor.load_text("保留配色切换前的草稿")
+            await app._event(event("display_record", {"record": record(
+                1, "assistant_message", {"text": "模型回复正文"})}))
+            app.conversation.log("诊断日志正文")
+            await pilot.pause()
+            assert app.theme == DEFAULT_THEME
+            await pilot.click("#settings")
+            await pilot.pause()
+            selector = app.screen.query_one("#theme-select", Select)
+            # 真正打开下拉框，键盘切到第二项并确认。
+            await pilot.click("#theme-select")
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert app.theme == "codefox-midnight"
+            for theme in THEMES:
+                selector.value = theme.name
+                await pilot.pause()
+                assert app.theme == theme.name
+                reply = main_screen.query_one(Markdown)
+                log = app.conversation._diagnostic_detail
+                assert reply.styles.color.hex.lower() == theme.foreground
+                assert log.styles.color.hex.lower() == theme.variables["codefox-muted"]
+                assert reply.styles.color.brightness > log.styles.color.brightness
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.screen is main_screen and app.focused is editor
+            assert editor.text == "保留配色切换前的草稿"
+            assert app.conversation.diagnostics_visible
+            await app._event(event("session_changed", {"records": []}))
+            assert app.theme == "codefox-warm"
+            await pilot.click("#settings")
+            await pilot.pause()
+            assert isinstance(app.screen, SettingsScreen)
+            assert app.screen.query_one("#theme-select", Select).value == "codefox-warm"
     asyncio.run(exercise())
 
 
@@ -1372,7 +1422,7 @@ def test_tui_rebuild_preserves_pending_input_activity_error_and_confirms_once():
             row = app.query_one(MessageRow)
             assert "user" in row.classes
             assert row.query_one(ConversationRecord).record["payload"]["text"] == "待确认的消息"
-            assert str(app.query_one(".activity", Static).content) == "正在处理请求"
+            assert str(app.query_one(".activity", Static).content) == "处理中"
             assert "保存暂不可用" in "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
             assert not app.query_one(".diagnostic", Collapsible).collapsed
             assert app.records == [] and notified == ["保存暂不可用"]

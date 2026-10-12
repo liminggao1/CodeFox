@@ -124,6 +124,8 @@ class InteractiveRuntime:
                         goal=host.GOAL.snapshot(), todos=todos,
                         subagents=subagent_runtime.list_subagents(), model=core.MODEL,
                         busy=self.turns.busy, closing=self._closing,
+                        context_input_tokens=self.turns.last_input_tokens(),
+                        context_limit_tokens=core.CONTEXT_LIMIT,
                         lead_main_model_usage=self.turns.usage_snapshot(),
                         workdir=session_snapshot.get("workdir"),
                         task_id=session_snapshot.get("task_id"),

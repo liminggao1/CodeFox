@@ -18,6 +18,7 @@
 """
 
 import json
+import math
 import os
 import re
 import urllib.error
@@ -29,6 +30,49 @@ DEFAULT_TIMEOUT = 300.0
 ERROR_BODY_PREVIEW_CHARS = 500
 ERROR_DETAIL_PREVIEW_CHARS = 1000
 USER_AGENT = "learncc-llm-client/1.0"
+
+
+_CJK_TOKEN = re.compile(r"[\u3400-\u9fff]")
+_ASCII_WORD = re.compile(r"[A-Za-z0-9_]+")
+
+
+def estimate_input_tokens(system=None, messages=None, tools=None) -> int:
+    """Estimate request tokens when a compatible count endpoint is unavailable."""
+    payload = json.dumps({"system": system or "", "messages": messages or [],
+                          "tools": tools or []}, ensure_ascii=False, default=str)
+    tokens = 0
+    index = 0
+    while index < len(payload):
+        char = payload[index]
+        if _CJK_TOKEN.match(char):
+            tokens += 1
+            index += 1
+            continue
+        word = _ASCII_WORD.match(payload, index)
+        if word:
+            tokens += max(1, math.ceil(len(word.group()) / 4))
+            index = word.end()
+            continue
+        if not char.isspace():
+            tokens += 1
+        index += 1
+    return tokens
+
+
+def count_input_tokens(client, *, model, system=None, messages=None, tools=None) -> int:
+    """Estimate request tokens without adding a second network request."""
+    request = dict(model=model, messages=messages or [])
+    if system:
+        request["system"] = system
+    if tools:
+        request["tools"] = tools
+    counter = getattr(client, "count_input_tokens", None)
+    if callable(counter):
+        result = counter(**request)
+        value = result.get("input_tokens") if isinstance(result, dict) else result
+        if type(value) is int and value >= 0:
+            return value
+    return estimate_input_tokens(system, messages, tools)
 
 
 # ---------------------------------------------------------------------------

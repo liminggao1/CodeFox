@@ -148,7 +148,8 @@ class SubagentSession:
         context += f"\n{self.work_context()}"
         request = f"{request}\n\n[Current work]\n{context}"
         result = compaction.prepare_history(
-            messages, request, client=self.client, model=self.model, preserve_tail=True)
+            messages, request, client=self.client, model=self.model,
+            system=self.system, tools=self.tools, preserve_tail=True)
         if result.reason:
             core.terminal_print(f"[subagent compact] {result.reason}")
         try:
