@@ -1,7 +1,8 @@
 """基础文件与 shell 工具。
 
-所有工具都通过 safe_path 相对 cwd 解析路径，因此绑定任务的 worktree 会改变
-读写位置。run_agent_* 则用当前任务分配的 cwd 包装同一组工具。
+所有工具按 cwd 解析路径，因此绑定任务的 worktree 会改变读写位置。
+文件读写的路径授权由调用前的权限检查负责；glob 仍只搜索工作目录。
+run_agent_* 则用当前任务分配的 cwd 包装同一组工具。
 """
 
 from __future__ import annotations
@@ -24,17 +25,14 @@ from ..runtime.lead_context import current_lead_context
 # -- 基础工具 --
 
 
-def safe_path(path: str, cwd: Path | None = None) -> Path:
-    """解析文件路径，并确保真实路径位于指定工作目录内。
+def resolve_path(path: str, cwd: Path | None = None) -> Path:
+    """按任务目录解析文件路径；权限检查已在工具分发前完成。
 
-    输入：path 为相对或绝对路径；cwd 为允许的根目录，默认使用启动目录。
-    返回：解析符号链接后的绝对 Path；越界时抛出 ValueError，不创建文件。
+    输入：path 为相对或绝对路径；cwd 为解析基准目录，默认使用启动目录。
+    返回：解析符号链接后的绝对 Path，不创建文件，也不重复询问或拒绝已授权的路径。
     """
     base = (cwd or core.WORKDIR).resolve()
-    resolved = (base / path).resolve()
-    if not resolved.is_relative_to(base):
-        raise ValueError(f"Path escapes workspace: {path}")
-    return resolved
+    return (base / path).resolve()
 
 
 _shell_processes: set[subprocess.Popen] = set()
@@ -141,20 +139,15 @@ def run_bash(command: str, cwd: Path | None = None,
 
 def run_read(path: str, limit: int | None = None,
              offset: int = 0, cwd: Path | None = None) -> ToolResult:
-    """读取工作目录内文件，或按绝对路径读取运行时归档。
+    """读取已授权的文件，或按绝对路径读取运行时归档。
 
     输入：path 为文件路径；limit 为最多读取行数；offset 为跳过行数；cwd 为任务目录。
     返回：ToolResult，正文包含文件文本或错误，状态明确成功或失败；未展示完时附加剩余行数提示。
-        归档目录内绝对路径按启动目录校验，其他路径按 cwd 校验，默认使用启动目录。
+        绝对路径直接解析，其他路径按 cwd 解析，默认使用启动目录。
+        运行时归档路径是绝对路径，不受当前任务目录变化影响。
     """
     try:
-        absolute = Path(path)
-        if absolute.is_absolute() and any(
-                absolute.resolve().is_relative_to(directory.resolve())
-                for directory in (core.tool_results_dir(), core.transcript_dir())):
-            # Runtime archive paths remain readable when the task cwd changes.
-            cwd = core.WORKDIR
-        file_path = safe_path(path, cwd)
+        file_path = resolve_path(path, cwd)
         lines = file_path.read_text(encoding="utf-8").splitlines()
         offset = max(int(offset or 0), 0)
         limit = int(limit) if limit is not None else None
@@ -167,13 +160,13 @@ def run_read(path: str, limit: int | None = None,
 
 
 def run_write(path: str, content: str, cwd: Path | None = None) -> ToolResult:
-    """在允许的目录内创建或覆盖 UTF-8 文本文件。
+    """在已授权的路径创建或覆盖 UTF-8 文本文件。
 
-    输入：path 为路径；content 为正文；cwd 为允许根目录，默认使用启动目录。
+    输入：path 为路径；content 为正文；cwd 为解析基准目录，默认使用启动目录。
     返回：ToolResult，包含写入确认或错误及明确状态；成功时按需创建父目录并替换文件内容。
     """
     try:
-        fp = safe_path(path, cwd)
+        fp = resolve_path(path, cwd)
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content, encoding="utf-8")
         return ToolResult(f"Wrote {len(content)} bytes to {path}", "success")
@@ -185,11 +178,11 @@ def run_edit(path: str, old_text: str, new_text: str,
              cwd: Path | None = None) -> ToolResult:
     """替换文件中第一次出现的指定文本。
 
-    输入：path 为路径；old_text 为原文；new_text 为替换文本；cwd 为允许根目录。
+    输入：path 为路径；old_text 为原文；new_text 为替换文本；cwd 为解析基准目录。
     返回：ToolResult，包含编辑确认或错误及明确状态；原文未找到时不写文件。
     """
     try:
-        fp = safe_path(path, cwd)
+        fp = resolve_path(path, cwd)
         text = fp.read_text(encoding="utf-8")
         if old_text not in text:
             return ToolResult(f"Error: text not found in {path}", "failed")

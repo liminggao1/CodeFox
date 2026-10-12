@@ -14,10 +14,6 @@ STATUS_LABELS = {"returned": "已返回结果", "success": "成功", "failed": "
 TODO_LABELS = {"pending": "待办", "in_progress": "进行中", "completed": "完成"}
 
 
-PERMISSION_DEFAULT = "按工具策略"
-PERMISSION_WAITING = "等待审批"
-
-
 def permission_summary(label):
     """Left footer summary; the caller passes the factual runtime label."""
     return f"权限：{label}"

@@ -72,7 +72,7 @@ def test_truncated_tool_never_writes_or_appends(host_factory, mode):
 
 
 @pytest.mark.parametrize("mode", ["once", "persistent"])
-def test_unassigned_workspace_uses_startup_directory(host_factory, mode):
+def test_unassigned_workspace_uses_startup_directory(host_factory, mode, no_approval):
     host = host_factory()
     session = SubagentSession("child", None, "test", "", mode=mode)
     result = session.execute_tool(SimpleNamespace(

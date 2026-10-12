@@ -10,8 +10,7 @@ from dataclasses import dataclass
 from time import perf_counter
 
 from .. import core
-from ..tools import tool_registry
-from . import interaction
+from . import interaction, permissions
 
 # -- Hooks 与权限检查 --
 
@@ -48,7 +47,8 @@ def trigger_hooks(event: str, *args):
             core.terminal_print(f"{label}: 失败 · 耗时 {perf_counter() - started:.3f}s · "
                                 f"{type(exc).__name__}: {exc}")
             raise
-        state = "拒绝" if event == "PreToolUse" and result is not None else "完成"
+        state = ("失败" if isinstance(result, ToolCheck) and result.status == "failed" else
+                 "拒绝" if event == "PreToolUse" and result is not None else "完成")
         reason = f" · {result}" if result is not None else ""
         core.terminal_print(f"{label}: {state} · 耗时 {perf_counter() - started:.3f}s{reason}")
         if result is not None:
@@ -61,10 +61,13 @@ class ToolCheck:
     status: str
     text: str = ""
 
+    def __str__(self):
+        return self.text
 
-def check_tool_use(block, *, authorize=None, stopped=None):
-    """Return allowed/denied/stopped after authorization and the pre-use hooks."""
-    with interaction.operation_context(tool_call_id=getattr(block, "id", None)):
+
+def check_tool_use(block, *, authorize=None, stopped=None, cwd=None):
+    """Return allowed/failed/denied/stopped after authorization and the pre-use hooks."""
+    with permissions.working_directory(cwd), interaction.operation_context(tool_call_id=getattr(block, "id", None)):
         if authorize is not None:
             denied = authorize(block)
             if denied is not None:
@@ -72,12 +75,11 @@ def check_tool_use(block, *, authorize=None, stopped=None):
         denied = trigger_hooks("PreToolUse", block)
         if stopped is not None and stopped():
             return ToolCheck("stopped", "Interrupted before execution")
+        if isinstance(denied, ToolCheck):
+            return denied
         if denied is not None:
             return ToolCheck("denied", str(denied))
         return ToolCheck("allowed")
-
-
-DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
 
 
 def _confirm(block, kind):
@@ -90,32 +92,20 @@ def _confirm(block, kind):
 
 
 def permission_hook(block):
-    """在工具执行前检查命令、文件路径和 MCP 工具权限。
-
-    输入：block 为工具请求，包含 name 和 input。
-    返回：放行时为 None，拒绝时为原因字符串。
-        Shell and unknown MCP approvals require explicit frontend context.
-        File paths must remain within the startup workspace.
-        任务目录的进一步限制由文件工具执行器检查。
-    """
+    """执行统一权限决定；批准只针对当前调用，错误参数不请求审批。"""
     # 权限层在分发前检查原始 tool_use，可拒绝、询问用户或放行。
-    if block.name == "bash":
-        command = block.input.get("command", "")
-        if not isinstance(command, str):
-            return "Permission denied: shell command must be a string"
-        for pattern in DENY_LIST:
-            if pattern in command:
-                return f"Permission denied: '{pattern}' is on the deny list"
-        return _confirm(block, "shell")
-    if block.name in ("read_file", "write_file", "edit_file"):
-        path = block.input.get("path", "")
-        if not isinstance(path, str):
-            return "Permission denied: path must be a string"
-        if not (core.WORKDIR / path).resolve().is_relative_to(core.WORKDIR):
-            return "Permission denied: path is outside the workspace"
-    if (block.name.startswith("mcp__")
-            and tool_registry.REGISTRY.policy_for(block.name) != "allow"):
-        return _confirm(block, "MCP")
+    context = interaction.current_context()
+    mode = context.permission_mode if context is not None and context.permission_mode else permissions.SETTINGS.mode
+    decision = permissions.evaluate(block, mode=mode)
+    if decision.action == "invalid":
+        return ToolCheck("failed", decision.reason)
+    if decision.action == "deny":
+        return decision.reason
+    if decision.path is not None:
+        # 审批和处理器共用解析后的目标；任务目录变化不改变本次已批准的路径。
+        block.input["path"] = str(decision.path)
+    if decision.action == "ask":
+        return _confirm(block, decision.reason)
     return None
 
 

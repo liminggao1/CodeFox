@@ -12,8 +12,9 @@ from textual.widgets import Button, Static, TextArea
 
 from ...runtime.interactive_runtime import InteractiveRuntime
 from ...runtime.local_commands import LOCAL_COMMANDS, find_command
-from .widgets import (ApprovalCard, BrandBar, CommandCandidates, SessionScreen, SessionStatePanel, SettingsScreen)
-from ..presentation import (PERMISSION_DEFAULT, PERMISSION_WAITING, model_status,
+from ...runtime.permissions import MODE_LABELS
+from .widgets import (ApprovalCard, BrandBar, CommandCandidates, PermissionModeScreen, SessionScreen, SessionStatePanel, SettingsScreen)
+from ..presentation import (model_status,
                             permission_summary, session_title)
 from .conversation_view import ConversationView
 from .themes import DEFAULT_THEME, THEMES
@@ -58,7 +59,10 @@ class HarnessApp(App):
     #send { width: auto; min-width: 8; height: 1; min-height: 1; border: none; margin: 0 1; padding: 0 1; }
     #input-hint { height: 1; color: $codefox-muted; padding: 0 1; }
     #input-footer { height: 1; color: $codefox-muted; }
-    #permission { width: 1fr; color: $warning; }
+    #permission { width: auto; min-width: 0; height: 1; min-height: 1;
+        border: none; padding: 0 1; background: transparent; color: $foreground; }
+    #permission.no-approval { color: $warning; text-style: bold; }
+    #footer-spacer { width: 1fr; }
     #bottom-status { width: auto; color: $codefox-muted; }
     #bottom-status.context-warning { color: $warning; }
     #bottom-status.context-full { color: $error; }
@@ -116,7 +120,8 @@ class HarnessApp(App):
                     yield Button("发送", id="send", variant="primary")
                 yield Static("Enter 发送 · Shift+Enter 换行", id="input-hint", markup=False)
             with Horizontal(id="input-footer"):
-                yield Static(permission_summary(PERMISSION_DEFAULT), id="permission", markup=False)
+                yield Button("权限：默认 ▾", id="permission", compact=True)
+                yield Static(id="footer-spacer")
                 yield Static(id="bottom-status", markup=False)
 
     def on_mount(self):
@@ -164,13 +169,27 @@ class HarnessApp(App):
             elif used * 100 >= limit * 80:
                 footer.add_class("context-warning")
         self._input_status()
+        self._set_permission()
         self.query_one(SessionStatePanel).update_snapshot(self.snapshot, self.records)
         self.query_one(SessionStatePanel).display = self.state_expanded
         self.query_one(BrandBar).update_title(session_title(self.snapshot, self.records))
         self._refresh_commands()
 
-    def _set_permission(self, text):
-        self.query_one("#permission", Static).update(permission_summary(text))
+    def _set_permission(self):
+        mode = self.runtime.permission_mode
+        button = self.query_one("#permission", Button)
+        button.label = permission_summary(MODE_LABELS[mode]) + " ▾"
+        button.set_class(mode == "no_approval", "no-approval")
+        button.disabled = self.busy or self.approval is not None or self.closing or self.runtime_closed
+
+    def _permission_selected(self, mode):
+        if mode is not None:
+            try:
+                self.runtime.set_permission_mode(mode)
+            except (OSError, ValueError) as exc:
+                self.notify(f"权限设置保存失败：{exc}", severity="error")
+            self._controls()
+        self._focus_input()
 
     # Command input decisions are local; the runtime remains the execution authority.
     def _command_context(self):
@@ -421,6 +440,8 @@ class HarnessApp(App):
         elif event.button.id == "settings":
             self.push_screen(SettingsScreen(self.conversation.diagnostics_visible),
                              lambda _: self._focus_input())
+        elif event.button.id == "permission" and not self.busy and self.approval is None:
+            self.push_screen(PermissionModeScreen(self.runtime.permission_mode), self._permission_selected)
         self._focus_input()
 
     def on_settings_screen_diagnostics_changed(self, event: SettingsScreen.DiagnosticsChanged):
@@ -439,7 +460,7 @@ class HarnessApp(App):
             self.conversation.disable_approval(self.approval.request_id)
             self.approval = None
         if self.is_running:
-            self._set_permission(PERMISSION_DEFAULT)
+            self._set_permission()
 
     def on_approval_card_choice(self, event: ApprovalCard.Choice):
         request = self.approval
@@ -448,7 +469,7 @@ class HarnessApp(App):
         if self.runtime.channel.respond(request.request_id, request.generation, event.decision):
             self.conversation.finish_approval(request.request_id, event.decision)
             self.approval = None
-            self._set_permission(PERMISSION_DEFAULT)
+            self._set_permission()
             self.query_one("#input", TextArea).focus()
 
     async def consume(self):
@@ -482,7 +503,7 @@ class HarnessApp(App):
             request = self.runtime.channel.next_approval()
             if request is not None:
                 self.approval = request
-                self._set_permission(PERMISSION_WAITING)
+                self._set_permission()
                 await self.conversation.enable_approval(request)
         self._refresh_commands()
 

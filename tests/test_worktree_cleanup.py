@@ -49,7 +49,7 @@ def assert_lease_preserved(host, task, checkout, version):
     assert tasks.load_task(task.id).worktree == "feature"
 
 
-def test_lead_completes_and_removes_in_one_model_round(worktree_runtime, monkeypatch):
+def test_lead_completes_and_removes_in_one_model_round(worktree_runtime, monkeypatch, no_approval):
     host, task, checkout, git = worktree_runtime()
     (checkout / "tracked.txt").write_text("committed result\n", encoding="utf-8")
     git("add", "tracked.txt", cwd=checkout)

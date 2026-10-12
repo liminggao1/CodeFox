@@ -36,14 +36,12 @@ def test_deny_list_blocks_dangerous_commands(host_factory, command) -> None:
     assert "deny list" in hooks.permission_hook(block("bash", command=command))
 
 
-def test_permission_matches_substrings_not_whitespace(
+def test_permission_checks_commands_not_printed_words(
     host_factory, approval_hook
 ) -> None:
     host = host_factory()
     assert approval_hook(hooks.permission_hook, block("bash", command="echo hello"), "approve") is None
-    assert "deny list" in hooks.permission_hook(
-        block("bash", command="echo sudo")
-    )
+    assert approval_hook(hooks.permission_hook, block("bash", command="echo sudo"), "approve") is None
 
 
 def test_only_approval_releases_the_shell_gate(host_factory, approval_hook) -> None:
@@ -58,21 +56,20 @@ def test_only_approval_releases_the_shell_gate(host_factory, approval_hook) -> N
 def test_non_string_shell_command_is_rejected(host_factory) -> None:
     host = host_factory()
 
-    assert hooks.permission_hook(block("bash", command=["echo", "hi"])) == (
-        "Permission denied: shell command must be a string"
-    )
+    result = hooks.permission_hook(block("bash", command=["echo", "hi"]))
+    assert result.status == "failed"
+    assert result.text == "Error: Invalid arguments: shell command must be a string"
 
 
-def test_file_paths_must_stay_inside_the_workspace(host_factory) -> None:
+def test_file_paths_outside_workspace_require_approval(host_factory, approval_hook) -> None:
     host = host_factory()
 
     assert hooks.permission_hook(block("read_file", path="notes/todo.md")) is None
-    assert "outside the workspace" in hooks.permission_hook(
-        block("write_file", path="../escape.md", content="x")
-    )
+    assert approval_hook(hooks.permission_hook,
+        block("write_file", path="../escape.md", content="x"), "deny") == "Permission denied by user"
     assert "path must be a string" in hooks.permission_hook(
         block("edit_file", path=123, old_text="a", new_text="b")
-    )
+    ).text
 
 
 def test_scheduled_turns_cannot_ask_for_approval(host_factory) -> None:
@@ -150,7 +147,7 @@ def test_subagent_uses_restricted_tools_and_permission_hook(
     assert {tool["name"] for tool in calls[0]["tools"]} == {
         "bash", "read_file", "write_file", "edit_file", "glob",
     }
-    assert "outside the workspace" in calls[1]["messages"][-1]["content"][0][
+    assert "approval is unavailable" in calls[1]["messages"][-1]["content"][0][
         "content"]
     assert not (tmp_path.parent / "escape.md").exists()
 

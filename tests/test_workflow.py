@@ -1021,7 +1021,7 @@ def install(host, monkeypatch, create):
     return wf
 
 
-def test_actual_workflow_tool_executes_child_tools_and_replays(host_factory, monkeypatch):
+def test_actual_workflow_tool_executes_child_tools_and_replays(host_factory, monkeypatch, no_approval):
     host = host_factory()
     globals_before = (core.client, core.MODEL, core.DEFAULT_MAX_TOKENS)
     calls = []
@@ -1070,7 +1070,7 @@ def test_workflow_tool_restriction_blocks_unavailable_writes(host_factory, monke
     assert "unavailable" in str(calls[1]["messages"])
 
 
-def test_format_repair_does_not_repeat_file_operations(host_factory, monkeypatch):
+def test_format_repair_does_not_repeat_file_operations(host_factory, monkeypatch, no_approval):
     host = host_factory()
     calls = []
     responses = iter([workflow_reply(tokens=3, block=S(type="tool_use", id="w", name="write_file",

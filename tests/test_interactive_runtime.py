@@ -892,7 +892,7 @@ def test_todo_input_and_snapshot_cannot_mutate_runtime_state(runtime_factory):
     assert stored(runtime)["todos"] == runtime.lead_context.todos
 
 
-def test_post_hook_failure_saves_real_result_and_pairs_unexecuted_calls(runtime_factory, monkeypatch):
+def test_post_hook_failure_saves_real_result_and_pairs_unexecuted_calls(runtime_factory, monkeypatch, no_approval):
     runtime, _ = runtime_factory([response(tools=[
         tool("write_file", "first", path="first.txt", content="written"),
         tool("write_file", "second", path="second.txt", content="never")], stop="tool_use")])
@@ -931,7 +931,7 @@ def test_tool_status_comes_from_execution_not_output(host_factory):
     assert result.status == "failed" and "cannot complete" in result.content
 
 
-def test_failed_tool_does_not_skip_other_calls_in_batch(host_factory, monkeypatch):
+def test_failed_tool_does_not_skip_other_calls_in_batch(host_factory, monkeypatch, no_approval):
     from agent_harness import core
     import copy
     from types import SimpleNamespace

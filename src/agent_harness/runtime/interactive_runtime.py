@@ -11,7 +11,7 @@ from ..workspace import tasks
 from ..agents import subagent as subagent_runtime
 from ..tools import file_tools
 from . import scheduler
-from . import interaction
+from . import interaction, permissions
 from .commands import CommandRouter
 from .lead_context import LeadContext
 from .session_switch import SessionSwitch
@@ -82,7 +82,19 @@ class InteractiveRuntime:
         return interaction.ExecutionContext(self.channel, self.session.session_id,
                                               self._generation, checkpoint=self._checkpoint,
                                               lead_context=self.lead_context,
+                                              permission_mode=permissions.SETTINGS.mode,
                                               **kwargs)
+
+    @property
+    def permission_mode(self):
+        return permissions.SETTINGS.mode
+
+    def set_permission_mode(self, mode):
+        """空闲时持久化并切换模式；提交与后台占用使用同一把锁。"""
+        with self._lifecycle:
+            if self._closing or self.turns.busy:
+                raise ValueError("当前正在执行，不能切换权限模式")
+            permissions.SETTINGS.save(mode)
 
     def start(self):
         with self._lifecycle:
@@ -124,6 +136,7 @@ class InteractiveRuntime:
                         goal=host.GOAL.snapshot(), todos=todos,
                         subagents=subagent_runtime.list_subagents(), model=core.MODEL,
                         busy=self.turns.busy, closing=self._closing,
+                        permission_mode=self.permission_mode,
                         context_input_tokens=self.turns.last_input_tokens(),
                         context_limit_tokens=core.CONTEXT_LIMIT,
                         lead_main_model_usage=self.turns.usage_snapshot(),

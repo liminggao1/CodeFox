@@ -85,7 +85,7 @@ def test_assignment_cwd_recovers_plain_and_bound_tasks(
 @pytest.mark.parametrize("owner", ["agent", "alice"])
 @pytest.mark.parametrize("archive", ["tool_output", "transcript"])
 def test_bound_file_tools_read_runtime_archives_without_changing_write_cwd(
-    host_factory, monkeypatch, owner, archive
+    host_factory, monkeypatch, owner, archive, no_approval
 ) -> None:
     host = host_factory()
     checkout = core.WORKDIR / ".worktrees" / "feature"
@@ -114,9 +114,9 @@ def test_bound_file_tools_read_runtime_archives_without_changing_write_cwd(
             name="write_file", input={"path": path, "content": content})).result.content
     assert read(str(path)) == expected
     assert read("relative.txt") == "task file"
-    assert "Path escapes workspace" in read(str(outside))
-    assert "Path escapes workspace" in write(str(path), "replacement")
-    assert path.read_text(encoding="utf-8").rstrip("\n") == expected
+    assert read(str(outside)) == "other root file"
+    assert "Wrote" in write(str(path), "replacement")
+    assert path.read_text(encoding="utf-8") == "replacement"
 
 
 def test_cross_process_claim_waits_for_worktree_binding(
@@ -314,7 +314,7 @@ def test_public_task_tools_return_errors_for_bad_ids(host_factory) -> None:
         assert "Error:" in registrations.run_update_task(task_id, []).content
 
 
-def test_plan_gate_blocks_mutating_subagent_tools(host_factory, monkeypatch, tmp_path) -> None:
+def test_plan_gate_blocks_mutating_subagent_tools(host_factory, monkeypatch, tmp_path, no_approval) -> None:
     host = host_factory()
     session = spawn_paused(host, monkeypatch)
     (tmp_path / "config.py").write_text("VALUE = 0")
@@ -471,7 +471,7 @@ def test_shutdown_request_must_match_active_protocol(host_factory, monkeypatch) 
 
 
 @pytest.mark.parametrize("gate", ["required", "pending", "approved", "rejected", "not_required"])
-def test_requesting_new_plan_invalidates_previous_decisions(host_factory, monkeypatch, gate):
+def test_requesting_new_plan_invalidates_previous_decisions(host_factory, monkeypatch, gate, no_approval):
     host = host_factory()
     session = spawn_paused(host, monkeypatch, require_plan=gate == "required")
     old_reply = None
@@ -692,7 +692,7 @@ def test_invalid_tools_do_not_claim_or_request(host_factory, tools):
     assert tasks.load_task(task.id).status == "pending"
 
 
-def test_injected_client_tools_and_usage_cover_multiple_rounds(host_factory):
+def test_injected_client_tools_and_usage_cover_multiple_rounds(host_factory, no_approval):
     host = host_factory()
     requests = []
     responses = iter([optioned_reply(block=S(type="tool_use", name="write_file", id="write",

@@ -289,6 +289,41 @@ class CommandCandidates(OptionList):
         self.display = bool(names)
 
 
+class PermissionModeScreen(ModalScreen[str | None]):
+    """左下角权限选择；只选择模式，保存由运行时负责。"""
+
+    BINDINGS = [("escape", "cancel", "返回")]
+    DEFAULT_CSS = """
+    PermissionModeScreen { align: center middle; background: $background 70%; }
+    PermissionModeScreen > Vertical { width: 52; max-width: 95%; height: auto;
+        padding: 1 2; border: solid $primary; background: $surface; }
+    PermissionModeScreen Button { width: 1fr; margin-top: 1; }
+    PermissionModeScreen Static { height: auto; color: $codefox-muted; }
+    """
+
+    def __init__(self, mode):
+        super().__init__()
+        self.mode = mode
+
+    def compose(self):
+        with Vertical():
+            yield Static("权限模式", markup=False)
+            yield Button("默认", name="default", id="permission-default",
+                         variant="primary" if self.mode == "default" else "default")
+            yield Static("只读直接执行，修改和目录外文件访问询问。", markup=False)
+            yield Button("免审批", name="no_approval", id="permission-no-approval",
+                         variant="primary" if self.mode == "no_approval" else "default")
+            yield Static("需要审批的操作直接执行，禁止命令仍拒绝。", markup=False)
+            yield Button("返回", id="permission-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed):
+        event.stop()
+        self.dismiss(event.button.name)
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class ApprovalCard(Vertical):
     DEFAULT_CSS = """
     ApprovalCard { height: auto; border-left: solid $warning; padding: 0 1; }
@@ -311,6 +346,10 @@ class ApprovalCard(Vertical):
     def compose(self) -> ComposeResult:
         yield Static("上次中断，未继续执行" if self.payload.get("interrupted") else
                      "历史审批" if self.historical else "等待审批", classes="approval-state", markup=False)
+        arguments = self.payload.get("arguments", {})
+        operation = {"read_file": "读取", "write_file": "创建或覆盖", "edit_file": "编辑"}.get(self.payload["tool_name"])
+        if operation and "path" in arguments:
+            yield Static(f"{operation}：{arguments['path']}", markup=False)
         yield Collapsible(Static(json.dumps(self.payload.get("arguments", {}), ensure_ascii=False, indent=2), markup=False),
                           title=self.payload["tool_name"], collapsed=True)
         if not self.historical:

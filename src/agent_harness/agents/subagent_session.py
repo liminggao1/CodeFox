@@ -124,7 +124,8 @@ class SubagentSession:
         """
         if block.name not in self.handlers:
             return ToolExecution(ToolResult(f"Error: Tool '{block.name}' is unavailable for this child", "failed"))
-        check = hooks.check_tool_use(block, authorize=self.authorize_tool)
+        check = hooks.check_tool_use(block, authorize=self.authorize_tool,
+                                     cwd=lambda: tasks.assignment_cwd(self.name))
         if check.status != "allowed":
             return ToolExecution(ToolResult(check.text, check.status))
         return execute_tool(block, self.handlers[block.name])

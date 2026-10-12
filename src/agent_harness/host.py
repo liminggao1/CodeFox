@@ -41,7 +41,7 @@ from .agents import goal as goal_module
 from .agents.goal_evaluator import PromptGoalEvaluator
 from .workflows import workflow_runtime
 from .workflows import workflow_demo
-from .runtime import interaction
+from .runtime import interaction, permissions
 
 def assemble_tool_pool() -> tuple[list[dict], dict]:
     """从同一个注册器快照取得模型工具描述和处理器映射。
@@ -85,6 +85,7 @@ def initialize_runtime() -> None:
     with _initialization_lock:
         if _initialized:
             return
+        permissions.SETTINGS.load()
         goal = GOAL if GOAL is not None else _create_goal()
         workflow_demo.register_workflows()
         tool_registry.REGISTRY.configure(

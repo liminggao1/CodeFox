@@ -414,7 +414,7 @@ def test_failed_candidate_preserves_nested_blocks_and_list_identity(host_factory
     assert compaction.prepare_history(history, "go", enabled=False).reason is None
 
 
-def test_manual_failure_preserves_other_results_and_never_reruns_tools(host_factory, monkeypatch):
+def test_manual_failure_preserves_other_results_and_never_reruns_tools(host_factory, monkeypatch, no_approval):
     host = host_factory()
     calls, summaries = [], []
     responses = [compaction_tools(

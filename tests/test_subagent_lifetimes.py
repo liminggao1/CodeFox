@@ -26,7 +26,7 @@ def runtime_threads():
 
 
 @pytest.fixture
-def runtime(host_factory, monkeypatch, runtime_threads):
+def runtime(host_factory, monkeypatch, runtime_threads, no_approval):
     host = host_factory()
     original_thread = threading.Thread
     threads = runtime_threads

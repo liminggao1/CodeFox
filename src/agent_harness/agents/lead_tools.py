@@ -6,6 +6,7 @@
 
 from ..runtime import hooks, interaction, scheduler, tool_execution
 from ..tools.tool_result import ToolResult
+from ..workspace import tasks
 
 
 def execute_tool_batch(blocks, handlers, manual_compaction, turn):
@@ -58,7 +59,8 @@ def _execute_tool(block, handlers, manual_compaction, model_call_id):
         return compact_result, status, None
 
     with interaction.operation_context(model_call_id=model_call_id):
-        check = hooks.check_tool_use(block, stopped=interaction.stopped)
+        check = hooks.check_tool_use(block, stopped=interaction.stopped,
+                                     cwd=lambda: tasks.assignment_cwd("agent"))
     if check.status != "allowed":
         return ToolResult(check.text, check.status).model_result(block.id), check.status, None
 

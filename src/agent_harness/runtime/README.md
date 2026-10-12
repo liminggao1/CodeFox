@@ -14,6 +14,7 @@
 | [session_store.py](session_store.py) | `SessionStore` 和 `InteractiveSession`：会话格式校验、原子保存、读取/列出/删除及上下文保存与恢复准备 |
 | [scheduler.py](scheduler.py) | 后台任务结果、cron 校验/持久化/调度、私有待消费队列和服务启动/停止；提供待交付查询、会话激活与目录操作的互斥作用域 |
 | [hooks.py](hooks.py) | 用户输入、工具执行和停止边界的 hooks；权限检查、审批请求、日志及大结果处理 |
+| [permissions.py](permissions.py) | 统一默认权限规则、有限 Bash 分类、文件目标解析和用户权限模式的原子保存；行为见仓库事实第 9 节 |
 | [tool_execution.py](tool_execution.py) | Lead/child/后台共用的 handler 执行、异常转明确失败、生命周期与 PostHook 结算；真实结果和 Hook 错误分别返回 |
 
 前端调用 `InteractiveRuntime`，后者调用根目录 [host.agent_loop](../host.py)。

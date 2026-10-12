@@ -755,6 +755,8 @@ def test_cli_record_replay_details_status_and_dedup():
 
 
 class DisplayRuntime:
+    permission_mode = "default"
+
     def __init__(self):
         self.channel = InteractionChannel()
         self.started = False
@@ -851,7 +853,7 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
             assert box.y <= send.y and send.bottom <= box.bottom
             footer = str(app.query_one("#bottom-status", Static).content)
             assert "test-model" in footer and "已使用上下文窗口：2k/50k（4%）" in footer
-            assert str(app.query_one("#permission", Static).content) == "权限：按工具策略"
+            assert str(app.query_one("#permission", Button).label) == "权限：默认 ▾"
     import asyncio
     asyncio.run(exercise())
 

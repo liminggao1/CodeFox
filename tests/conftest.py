@@ -45,11 +45,20 @@ def _reload_host() -> None:
 
 @pytest.fixture(autouse=True)
 def isolated_session_directory(tmp_path, monkeypatch):
-    from agent_harness.runtime import session_store
+    from agent_harness.runtime import session_store, permissions
 
     directory = tmp_path / "session-store"
     monkeypatch.setattr(session_store, "sessions_dir", lambda: directory)
+    monkeypatch.setattr(permissions, "settings_path", lambda: tmp_path / "settings.json")
+    monkeypatch.setattr(permissions, "SETTINGS", permissions.PermissionSettings())
     return directory
+
+
+@pytest.fixture
+def no_approval():
+    """工具执行类用例显式选择免审批，仍保留禁止命令和参数校验。"""
+    from agent_harness.runtime import permissions
+    permissions.SETTINGS.save("no_approval")
 
 
 @pytest.fixture

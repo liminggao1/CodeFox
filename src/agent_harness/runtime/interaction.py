@@ -86,6 +86,7 @@ class ExecutionContext:
     model_call_id: str | None = None
     tool_call_id: str | None = None
     lead_context: object = None
+    permission_mode: str | None = None
 
     def stopped(self) -> bool:
         return self.stop_event is not None and self.stop_event.is_set()

@@ -65,6 +65,61 @@ def test_tui_dialogue_approval_sessions_and_shutdown(runtime_factory):
     assert saved["messages"][-1]["content"][0]["text"] == "**你好**"
 
 
+def test_tui_permission_switch_persists_and_stays_visible_during_approval(runtime_factory):
+    from agent_harness.runtime import permissions
+    from agent_harness.frontends.tui.widgets import PermissionModeScreen
+    runtime, _ = runtime_factory([response(tools=[tool("write_file", path="mode.txt", content="done")], stop="tool_use"), response()])
+    app = HarnessApp(runtime)
+    async def exercise():
+        async with app.run_test(size=(110, 35)) as pilot:
+            await pilot.click("#permission")
+            await wait_for(pilot, lambda: isinstance(app.screen, PermissionModeScreen))
+            await pilot.click("#permission-no-approval")
+            await wait_for(pilot, lambda: len(app.screen_stack) == 1)
+            assert str(app.query_one("#permission", Button).label) == "权限：免审批 ▾"
+            loaded = permissions.PermissionSettings()
+            loaded.load()
+            assert loaded.mode == "no_approval"
+            await pilot.click("#permission")
+            await pilot.click("#permission-default")
+            app.query_one("#input", TextArea).load_text("write")
+            await pilot.click("#send")
+            await wait_for(pilot, lambda: app.approval is not None)
+            button = app.query_one("#permission", Button)
+            assert str(button.label) == "权限：默认 ▾" and button.disabled
+            await pilot.click(approval_button(app, "approve"))
+            await wait_for(pilot, lambda: not app.busy)
+            assert not button.disabled and str(button.label) == "权限：默认 ▾"
+            app._submit("/new")
+            await wait_for(pilot, lambda: not app.busy)
+            assert runtime.permission_mode == "default"
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    asyncio.run(exercise())
+
+
+def test_tui_permission_save_failure_keeps_original_mode(runtime_factory, monkeypatch):
+    from agent_harness.runtime import permissions
+    runtime, _ = runtime_factory()
+    app = HarnessApp(runtime)
+    notices = []
+    monkeypatch.setattr(app, "notify", lambda text, **kwargs: notices.append(text))
+    def fail(mode):
+        raise OSError("disk unavailable")
+    monkeypatch.setattr(permissions.SETTINGS, "save", fail)
+    async def exercise():
+        async with app.run_test(size=(110, 35)) as pilot:
+            await pilot.click("#permission")
+            await pilot.click("#permission-no-approval")
+            await wait_for(pilot, lambda: len(app.screen_stack) == 1)
+            assert runtime.permission_mode == "default"
+            assert str(app.query_one("#permission", Button).label) == "权限：默认 ▾"
+            assert any("disk unavailable" in notice for notice in notices)
+            await pilot.press("ctrl+d")
+            await wait_for(pilot, lambda: app.runtime_closed)
+    asyncio.run(exercise())
+
+
 def test_tui_stop_releases_approval_and_preserves_draft(runtime_factory):
     runtime, host = runtime_factory([response(tools=[tool("bash", command="touch unwanted")], stop="tool_use")])
     app = HarnessApp(runtime)

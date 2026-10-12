@@ -87,7 +87,7 @@ def run_git(*args: str, cwd: Path):
 def worktree_child() -> int:
     """在独立进程中执行 worktree 流程，此时 cwd 是 Git 仓库。"""
     import agent_harness.host as host
-    from agent_harness.runtime import tool_execution
+    from agent_harness.runtime import tool_execution, permissions
 
 
     import agent_harness.workspace.tasks as tasks
@@ -97,8 +97,9 @@ def worktree_child() -> int:
     import agent_harness.tools.file_tools as file_tools
     import agent_harness.workflows.workflow_runtime as workflow_runtime
     import agent_harness.agents.subagent as subagent_runtime
-    host.initialize_runtime()
     repo = Path.cwd()
+    permissions.settings_path = lambda: repo / ".runtime" / "debug-settings.json"
+    host.initialize_runtime()
     task = tasks.create_task("worktree debug")
     assert task_worktrees.create_worktree("dbg", task.id).startswith("Worktree"), "create failed"
     assert "Claimed" in tasks.claim_task(task.id, owner="agent")
@@ -147,7 +148,10 @@ def _main() -> int:
     from agent_harness.agents import goal as goal_module
 
     core.WORKDIR = workdir
+    from agent_harness.runtime import permissions, hooks
+    permissions.settings_path = lambda: workdir / "debug-settings.json"
     host.initialize_runtime()
+    permissions.SETTINGS.mode = "no_approval"  # 离线执行用例显式免审批，不读写真实用户设置。
     host.remember_after_turn = lambda messages: None  # 保持记忆功能离线
 
     def t_tool_pool():
@@ -193,12 +197,15 @@ def _main() -> int:
         return "mismatch refused, then applied"
 
     def t_escape():
-        _, handlers = host.assemble_tool_pool()
-        out = tool_execution.call_tool_handler(
-            handlers["read_file"], {"path": "../../../etc/passwd"}, "read_file"
-        ).content
-        assert "Error" in str(out), out
-        return "path outside workdir blocked"
+        block = SimpleNamespace(name="read_file", input={"path": "../outside.txt"})
+        previous = permissions.SETTINGS.mode
+        try:
+            permissions.SETTINGS.mode = "default"
+            out = hooks.permission_hook(block)
+            assert "approval is unavailable" in out, out
+        finally:
+            permissions.SETTINGS.mode = previous
+        return "outside path needs approval; unavailable approval does not execute"
 
     def t_goal_boundary():
         class Evaluator:
@@ -351,7 +358,7 @@ def _main() -> int:
     check("tool pool assembled", t_tool_pool)
     check("agent loop: tool call round-trip", t_loop_toolcall)
     check("edit_file: mismatch guarded", t_edit_guard)
-    check("read_file: path escape blocked", t_escape)
+    check("read_file: outside path requires approval", t_escape)
     check("goal: stop boundary blocks once", t_goal_boundary)
     check("task lifecycle", t_tasks)
     check("unified subagent lifetimes", t_subagents)
