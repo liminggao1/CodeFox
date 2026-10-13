@@ -15,10 +15,10 @@
 [host.initialize_runtime](../host.py) 显式配置注册表，再由主循环向模型开放工具并调度调用；导入 host 不配置应用。
 工具权限由 [runtime/permissions.py](../runtime/permissions.py) 判断，经 [runtime/hooks.py](../runtime/hooks.py) 接入审批；文件读写执行器不重复拒绝已授权的目录外路径。
 
-工具选择由系统提示词和各工具描述共同引导：读取文件优先 `read_file`，定点修改已有文件优先
-`edit_file`，创建或完整覆盖文件优先 `write_file`；`bash` 用于测试、构建、Git、管道及需要
-shell 语义的操作。这个顺序是可解释性和可审查性的偏好，不是禁止 Bash；确实需要 shell 时直接
-使用 `bash`，也不要求专用工具失败后必须重试。
+工具选择由系统提示词和各工具描述共同引导：有对应专用工具时，不用 `bash` 代替。读取文件使用
+`read_file`，文件发现使用 `glob`，定点修改已有文件使用 `edit_file`，创建或完整覆盖文件使用
+`write_file`；`bash` 用于内容搜索、测试、构建、Git、管道及需要 shell 语义的操作。这个规则是
+工具选择偏好，不是权限判断或硬禁止；专用工具无法表达时直接使用 `bash`，也不要求专用工具失败后必须重试。
 
 `todo_write` 把已解析的列表交给运行时的 LeadContext 检查并整份替换，发布 `todo_updated`。结果正文返回本次清单统计；运行时在工具结算检查点保存。
 Todo 内容和状态由模型明确提交；普通工具不自动改变 Todo，主循环不注入提醒。当前结果契约与状态职责见 [仓库事实](../../../docs/architecture/facts.md) 第 8 节。

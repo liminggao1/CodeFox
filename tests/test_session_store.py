@@ -61,6 +61,22 @@ def test_invalid_target_is_listed_as_deletable_and_rejected_by_load(tmp_path):
         store.load("20261009-000000-deadbeef")
 
 
+def test_delete_removes_session_artifacts_with_session_files(tmp_path):
+    store = SessionStore(tmp_path)
+    snapshot = store.create()
+    store.save(snapshot)
+    store.diagnostics_path(snapshot["id"]).write_text("diagnostic\n", encoding="utf-8")
+    artifact = store.artifacts_path(snapshot["id"]) / "transcripts" / "transcript.jsonl"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("{}\n", encoding="utf-8")
+
+    store.delete(snapshot["id"])
+
+    assert not store.path(snapshot["id"]).exists()
+    assert not store.diagnostics_path(snapshot["id"]).exists()
+    assert not store.artifacts_path(snapshot["id"]).exists()
+
+
 def test_goal_snapshot_restores_iterations_and_last_status():
     controller = GoalController(evaluator=None, block_cap=3)
     controller.set_goal("ship it")

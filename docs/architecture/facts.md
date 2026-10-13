@@ -14,8 +14,9 @@
 
 - 布局为 `src/agent_harness/`，console 入口 `agent-harness` 与 `python -m agent_harness`；包内用相对导入。
 - 资产随包分发：`skills/` 位于包内，`SKILLS_DIR = PACKAGE_DIR / "skills"`，editable 与 wheel 安装都能解析。
-- 运行时状态跟随**当前会话的启动目录**：`.tasks`、`.memory`、`.mailboxes`、`.worktrees`、`.runtime`、
-  `.scheduled_tasks.json`、`.transcripts`、`.task_outputs`；会话上下文在 `~/.agent-harness/sessions/`。
+- 任务、记忆、工作流、后台任务等运行时状态跟随**当前会话的启动目录**：`.tasks`、`.memory`、
+  `.mailboxes`、`.worktrees`、`.runtime`、`.scheduled_tasks.json` 与 `.task_outputs`；交互会话上下文、
+  会话诊断、压缩归档及长工具输出存放在 `~/.agent-harness/sessions/` 下并随会话删除。
 - `.env` 由 `load_dotenv()` 从包文件位置逐级向上查找，与启动目录无关。
 - memory 以正常导入接入并共享 client / model / workspace，不再按路径 `importlib` 加载。
 - workflow 直接进入工具池；`run_workflow_sync` 用 `asyncio.run` 桥接同步宿主与异步运行时。

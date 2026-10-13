@@ -228,9 +228,12 @@ def test_system_prompt_explains_dedicated_file_tool_preference(host_factory) -> 
     host_factory()
     prompt = prompts.assemble_system_prompt()
 
-    assert "prefer it so the change is easier to review" in prompt
-    assert "This is a preference, not a prohibition" in prompt
-    assert "use bash directly when the operation genuinely requires shell semantics" in prompt
+    assert "use read_file instead of cat, head, tail, or sed" in prompt
+    assert "use glob instead of find or ls" in prompt
+    assert "use edit_file instead of sed or awk" in prompt
+    assert "use write_file instead of shell redirection, echo, or heredoc" in prompt
+    assert "Use bash for content search with rg or grep" in prompt
+    assert "not a permission rule or a hard prohibition" in prompt
 
 
 def test_mcp_permission_uses_host_policy(host_factory, approval_hook) -> None:

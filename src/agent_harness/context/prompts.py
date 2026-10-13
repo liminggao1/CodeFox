@@ -20,16 +20,17 @@ ENVIRONMENT_PROMPT = (
     else "Unix-like: the bash tool runs the system shell"
 )
 TOOL_USAGE_PROMPT = (
-    "Tool selection rules: use read_file to read files, edit_file to make targeted "
-    "changes to existing files, and write_file to create a new file or replace a "
-    "file completely. Reserve bash for system commands and terminal operations "
-    "that require shell execution, such as tests, builds, git, pipelines, or "
-    "operations that the dedicated tools cannot represent. When a dedicated tool "
-    "clearly matches the operation, prefer it so the change is easier to review. "
-    "This is a preference, not a prohibition: use bash directly when the operation "
-    "genuinely requires shell semantics, and do not force a shell operation through "
-    "a dedicated file tool. A failed dedicated tool does not by itself require a "
-    "retry if bash is the appropriate way to complete the requested operation."
+    "Using your tools: do not use bash when a relevant dedicated tool is provided. "
+    "To read files, use read_file instead of cat, head, tail, or sed. "
+    "To find files, use glob instead of find or ls. "
+    "To edit files, use edit_file instead of sed or awk. "
+    "To create files or replace complete contents, use write_file instead of shell "
+    "redirection, echo, or heredoc. Use bash for content search with rg or grep, "
+    "filtering or combining results, tests, builds, git, pipelines, and terminal "
+    "operations that require shell execution. If a dedicated tool can express the "
+    "operation, default to it and use bash only when necessary. This is a tool-choice "
+    "preference, not a permission rule or a hard prohibition. Independent tool calls "
+    "may be made in parallel when they have no dependencies."
 )
 PROMPT_SECTIONS = {
     "identity": f"You are a coding agent. Act, don't explain. Environment: {ENVIRONMENT_PROMPT}.",

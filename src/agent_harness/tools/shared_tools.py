@@ -16,15 +16,18 @@ TASK_TOOL_NAMES = ("list_tasks", "claim_task", "complete_task")
 
 _SCHEMAS = [
     {"name": "bash", "description":
-     "Run a shell command. Use for system commands, tests, builds, git, pipelines, "
-     "and operations that require shell semantics. For ordinary file reads and "
-     "writes, prefer the dedicated file tools when they can express the operation; "
-     "this preference does not prohibit Bash when Bash is genuinely required.",
+     "Run shell commands for content search with rg/grep, filtering or combining "
+     "results, tests, builds, git, pipelines, and operations requiring shell semantics. "
+     "When a dedicated tool is relevant, prefer it: use read_file for known files, "
+     "glob for file discovery, edit_file for targeted edits, and write_file for "
+     "creating or replacing complete files. Use bash when the dedicated tools cannot "
+     "express the operation.",
      "input_schema": {"type": "object",
                       "properties": {"command": {"type": "string"}},
                       "required": ["command"]}},
     {"name": "read_file", "description":
-     "Read file contents. Prefer this over shell commands such as cat, head, or tail.",
+     "Read a known file or a specific line range. Prefer this over bash cat, head, "
+     "tail, or sed for ordinary file reading.",
      "input_schema": {"type": "object",
                       "properties": {"path": {"type": "string"},
                                      "limit": {"type": "integer"},
@@ -62,10 +65,10 @@ _SCHEMAS = [
 ]
 
 _CHILD_DESCRIPTIONS = {
-    "read_file": "Read file; prefer this over cat, head, or tail.",
-    "write_file": "Create or completely replace a file; prefer this over shell redirection.",
-    "edit_file": "Replace text in an existing file; prefer this over sed or awk.",
-    "glob": "Find files by glob pattern; ** matches recursively.",
+    "read_file": "Read a known file or line range; prefer over bash cat, head, tail, or sed.",
+    "write_file": "Create or completely replace a file; prefer over shell redirection, echo, or heredoc.",
+    "edit_file": "Replace text in an existing file; prefer over sed or awk for targeted edits.",
+    "glob": "Find files by glob pattern; prefer over find or ls for file discovery. ** matches recursively.",
     "list_tasks": "List all tasks on the board.",
     "complete_task": "Mark an in-progress task as completed.",
 }

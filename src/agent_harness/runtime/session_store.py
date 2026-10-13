@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -86,6 +87,9 @@ class SessionStore:
 
     def diagnostics_path(self, session_id: str) -> Path:
         return self.path(session_id).with_suffix(".diagnostics.jsonl")
+
+    def artifacts_path(self, session_id: str) -> Path:
+        return self.directory / f"{self.path(session_id).stem}.artifacts"
 
     def load(self, session_id: str) -> dict:
         path = self.path(session_id)
@@ -250,7 +254,13 @@ class SessionStore:
     def delete(self, session_id: str) -> None:
         try:
             self.diagnostics_path(session_id).unlink(missing_ok=True)
+            shutil.rmtree(self.artifacts_path(session_id), ignore_errors=False)
             self.path(session_id).unlink()
+        except FileNotFoundError as exc:
+            if exc.filename and Path(exc.filename) == self.artifacts_path(session_id):
+                self.path(session_id).unlink()
+            else:
+                raise SessionError(f"Cannot delete session {session_id}: {exc}") from exc
         except OSError as exc:
             raise SessionError(f"Cannot delete session {session_id}: {exc}") from exc
 

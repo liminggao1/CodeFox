@@ -10,6 +10,8 @@ import pytest
 
 import agent_harness.context.compaction as compaction
 import agent_harness.core as core
+from agent_harness.runtime.interaction import (ExecutionContext, InteractionChannel,
+                                                execution_context)
 import agent_harness.runtime.scheduler as scheduler
 
 
@@ -38,6 +40,22 @@ def test_context_thresholds_follow_the_main_budget(host_factory) -> None:
     assert core.TOOL_RESULT_BUDGET == int(core.CONTEXT_LIMIT * 0.16)
     assert core.PERSIST_THRESHOLD > 0
     assert core.TOOL_PREVIEW_CHARS > 0
+
+
+def test_session_bound_compaction_artifacts_use_session_directory(host_factory, tmp_path) -> None:
+    host_factory()
+    session_id = "20261013-000000-deadbeef"
+    context = ExecutionContext(InteractionChannel(), session_id, 0)
+    with execution_context(context):
+        output = compaction.save_output("call-1", "large output")
+        transcript = compaction.write_transcript([{"role": "user", "content": "hello"}])
+
+    root = core.session_artifacts_dir(session_id)
+    assert output == root / "tool-results" / "call-1.txt"
+    assert transcript == root / "transcripts" / transcript.name
+    assert output.read_text(encoding="utf-8") == "large output"
+    assert transcript.exists()
+    assert not (tmp_path / ".task_outputs" / "tool-results" / "call-1.txt").exists()
 
 
 def test_prepare_compacts_only_above_trigger(host_factory, monkeypatch) -> None:

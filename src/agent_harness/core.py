@@ -7,6 +7,7 @@ from __future__ import annotations   # 让类型注解按"字符串"延迟解析
                                      # 避免前向引用报错（如 list[str] 写法）
 
 import os                            # 环境变量、路径操作
+import re                             # 会话 ID 校验
 import threading                     # 控制台锁、线程判断
 from pathlib import Path             # 面向对象的路径操作
 from .providers.llm_client import Anthropic    # 从同包 llm_client 导入 Anthropic 客户端类
@@ -46,18 +47,46 @@ SKILLS_DIR = PACKAGE_DIR / "skills" # 技能目录（静态资源，随包走）
 
 
 def transcript_dir() -> Path:
-    """转录记录目录：启动目录下的 .transcripts。"""
+    """当前会话有上下文时返回会话归档目录，否则返回启动目录回退目录。"""
+    from .runtime import interaction
+    context = interaction.current_context()
+    session_id = context.session_id if context is not None else None
+    if session_id and re.fullmatch(r"\d{8}-\d{6}-[a-f0-9]{8}", session_id):
+        return session_artifacts_dir(session_id) / "transcripts"
     return WORKDIR / ".transcripts"
 
 
+def sessions_dir() -> Path:
+    """会话持久化目录。"""
+    from .runtime.session_store import sessions_dir as session_directory
+    return session_directory()
+
+
+def session_artifacts_dir(session_id: str) -> Path:
+    """返回指定会话的独立产物目录。"""
+    if not re.fullmatch(r"\d{8}-\d{6}-[a-f0-9]{8}", session_id):
+        raise ValueError("Invalid session ID")
+    return sessions_dir() / f"{session_id}.artifacts"
+
+
 def tool_results_dir() -> Path:
-    """工具结果目录：启动目录下按任务隔离存放。"""
+    """当前会话有上下文时返回会话工具结果目录，否则返回启动目录目录。"""
+    from .runtime import interaction
+    context = interaction.current_context()
+    session_id = context.session_id if context is not None else None
+    if session_id and re.fullmatch(r"\d{8}-\d{6}-[a-f0-9]{8}", session_id):
+        return session_artifacts_dir(session_id) / "tool-results"
+    return workspace_tool_results_dir()
+
+
+def workspace_tool_results_dir() -> Path:
+    """启动目录下不属于某个会话的工具与后台任务结果目录。"""
     return WORKDIR / ".task_outputs" / "tool-results"
 
 
 # ---------- 运行参数常量 ----------
-DEFAULT_MAX_TOKENS = 8000           # 默认最大生成 token 数
-ESCALATED_MAX_TOKENS = 16000        # 升级/长任务时的上限
+DEFAULT_MAX_TOKENS = 16000           # 默认最大生成 token 数
+ESCALATED_MAX_TOKENS = 32000        # 升级/长任务时的上限
 WORKFLOW_AGENT_MAX_TOKENS = 2000    # 工作流步骤输出上限
 COMPACTION_MAX_TOKENS = 2000        # 历史压缩摘要输出上限
 MEMORY_SELECTION_MAX_TOKENS = 200  # 记忆筛选结果输出上限

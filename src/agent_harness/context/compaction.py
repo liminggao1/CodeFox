@@ -256,7 +256,8 @@ def persisted_output_path(output: str) -> str | None:
     # 把字符串路径转成 Path 对象，便于做存在性/范围校验
     path = Path(candidate)
     # 只接受工具结果目录中真实存在的文件
-    if (not path.resolve().is_relative_to(core.tool_results_dir().resolve())
+    allowed_roots = (core.tool_results_dir(), core.workspace_tool_results_dir())
+    if (not any(path.resolve().is_relative_to(root.resolve()) for root in allowed_roots)
             or not path.is_file()):
         # 路径越界或文件不存在时不复用该路径
         return None
@@ -276,7 +277,8 @@ def save_output(tool_use_id: str, output: str, *, subdirectory: str | None = Non
     Returns:
         已写入文件的路径。
     """
-    directory = core.tool_results_dir()
+    directory = (core.workspace_tool_results_dir()
+                 if subdirectory == "background" else core.tool_results_dir())
     if subdirectory is not None:
         directory = directory / subdirectory
     directory.mkdir(parents=True, exist_ok=True)

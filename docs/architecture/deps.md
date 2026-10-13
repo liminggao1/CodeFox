@@ -28,7 +28,7 @@ python scripts/arch_views.py
 
 ## Python 文件静态导入环
 
-- 无
+- agent_harness.context.compaction ↔ agent_harness.context.prompt_state ↔ agent_harness.core ↔ agent_harness.runtime.session_store ↔ agent_harness.workspace.tasks ↔ agent_harness.workspace.worktrees
 
 此检查包含函数内的延迟导入，不执行代码，也不覆盖动态导入。
 
