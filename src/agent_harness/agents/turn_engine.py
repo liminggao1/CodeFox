@@ -77,12 +77,50 @@ class TurnCallbacks:
 class TurnEngine:
     """在小而可测试的接口后执行一轮 Lead 回合。"""
 
+    _ALLOWED_PHASES = {
+        TurnPhase.CREATED: {TurnPhase.PREPARING, TurnPhase.STOPPED, TurnPhase.FAILED},
+        TurnPhase.PREPARING: {TurnPhase.WAITING_MODEL, TurnPhase.STOPPED, TurnPhase.FAILED},
+        TurnPhase.WAITING_MODEL: {
+            TurnPhase.PREPARING, TurnPhase.PROCESSING_RESPONSE,
+            TurnPhase.STOPPED, TurnPhase.FAILED,
+        },
+        TurnPhase.PROCESSING_RESPONSE: {
+            TurnPhase.PREPARING, TurnPhase.EXECUTING_TOOLS,
+            TurnPhase.COMPLETED, TurnPhase.STOPPED, TurnPhase.FAILED,
+        },
+        TurnPhase.EXECUTING_TOOLS: {
+            TurnPhase.PREPARING, TurnPhase.WAITING_APPROVAL,
+            TurnPhase.COMPLETED, TurnPhase.STOPPED, TurnPhase.FAILED,
+        },
+        TurnPhase.WAITING_APPROVAL: {
+            TurnPhase.EXECUTING_TOOLS, TurnPhase.STOPPED, TurnPhase.FAILED,
+        },
+        TurnPhase.COMPLETED: set(),
+        TurnPhase.STOPPED: set(),
+        TurnPhase.FAILED: set(),
+    }
+
     def __init__(self, callbacks: TurnCallbacks):
         self.callbacks = callbacks
         self.phase = TurnPhase.CREATED
+        self._phase_history = (TurnPhase.CREATED,)
+
+    @property
+    def phase_history(self) -> tuple[TurnPhase, ...]:
+        """返回本轮已经经过的阶段，不暴露可变内部列表。"""
+        return self._phase_history
 
     def _set_phase(self, phase: TurnPhase) -> None:
+        if phase == self.phase:
+            return
+        if phase not in self._ALLOWED_PHASES[self.phase]:
+            raise RuntimeError(f"非法 TurnPhase 转换: {self.phase.value} -> {phase.value}")
         self.phase = phase
+        self._phase_history = (*self._phase_history, phase)
+
+    def _observe_phase(self, value: str) -> None:
+        """接收运行时嵌套操作发出的阶段变化。"""
+        self._set_phase(TurnPhase(value))
 
     def _finish(self, turn: LeadTurn, status: str, reason: str = ""):
         if status == "stopped":
@@ -95,7 +133,12 @@ class TurnEngine:
 
     def run(self, request: TurnRequest):
         """执行一轮回合，直到模型完成、失败或收到停止请求。"""
-        self._set_phase(TurnPhase.CREATED)
+        with interaction.operation_context(phase_observer=self._observe_phase):
+            return self._run(request)
+
+    def _run(self, request: TurnRequest):
+        self.phase = TurnPhase.CREATED
+        self._phase_history = (TurnPhase.CREATED,)
         # 创建本轮回合对象 LeadTurn：管理本轮所有记录、状态、会话保存、token用量回调
         prompt_state = request.prompt_state if request.prompt_state is not None else PromptState()
         turn = LeadTurn(request.history, request.save_context, request.on_usage, prompt_state)

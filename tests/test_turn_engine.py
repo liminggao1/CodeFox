@@ -3,6 +3,9 @@
 import copy
 import threading
 from types import SimpleNamespace
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 from agent_harness import host
 from agent_harness.agents import recovery, turn_engine
@@ -13,6 +16,7 @@ from agent_harness.providers.llm_client import model_messages
 from agent_harness.runtime.interaction import (
     ExecutionContext, InteractionChannel, execution_context,
 )
+from agent_harness.runtime import interaction
 
 
 class _PromptState:
@@ -68,6 +72,13 @@ def test_prepared_request_matches_counted_payload_and_strips_internal_marker():
     assert isinstance(observed[0], PreparedRequest)
     assert (observed[0].system, observed[0].messages, observed[0].tools) == prompt_state.prepared[0]
     assert "_runtime_context" not in observed[0].messages[0]
+    assert engine.phase_history == (
+        TurnPhase.CREATED,
+        TurnPhase.PREPARING,
+        TurnPhase.WAITING_MODEL,
+        TurnPhase.PROCESSING_RESPONSE,
+        TurnPhase.COMPLETED,
+    )
     assert history[-1]["role"] == "assistant"
 
 
@@ -176,6 +187,95 @@ def test_model_failure_sets_failed_terminal_phase():
     assert outcome.status == "failed"
     assert "model failed" in outcome.reason
     assert engine.phase is TurnPhase.FAILED
+def test_tool_round_trip_records_tool_execution_phase(monkeypatch):
+    block = SimpleNamespace(type="tool_use", id="call-1", name="read_file", input={})
+    responses = iter([
+        SimpleNamespace(stop_reason="tool_use", content=[block], usage=None),
+        SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="done")], usage=None),
+    ])
+    monkeypatch.setattr(turn_engine, "execute_tool_batch", lambda *args: [])
+    engine = TurnEngine(TurnCallbacks(
+        assemble_tool_pool=lambda: ([], {}),
+        build_context=lambda history: SimpleNamespace(prompt_values=lambda: {}),
+        call_llm=lambda *args: (next(responses), None, None),
+        build_user_content=lambda results: results,
+        evaluate_goal=lambda history: None,
+        remember_after_turn=lambda history: None,
+        goal_condition=lambda: "",
+    ))
+
+    outcome = engine.run(TurnRequest([], "read", prompt_state=_PromptState()))
+
+    assert outcome.status == "completed"
+    assert engine.phase_history == (
+        TurnPhase.CREATED,
+        TurnPhase.PREPARING,
+        TurnPhase.WAITING_MODEL,
+        TurnPhase.PROCESSING_RESPONSE,
+        TurnPhase.EXECUTING_TOOLS,
+        TurnPhase.PREPARING,
+        TurnPhase.WAITING_MODEL,
+        TurnPhase.PROCESSING_RESPONSE,
+        TurnPhase.COMPLETED,
+    )
+
+
+def test_tool_approval_is_recorded_in_turn_phase_history(monkeypatch):
+    channel = InteractionChannel()
+    block = SimpleNamespace(type="tool_use", id="call-1", name="bash", input={})
+    responses = iter([
+        SimpleNamespace(stop_reason="tool_use", content=[block], usage=None),
+        SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="done")], usage=None),
+    ])
+
+    def execute(*args):
+        context = interaction.current_context()
+
+        def approve():
+            event = channel.next_event(timeout=2)
+            if event is not None:
+                assert channel.acknowledge_event(event.sequence)
+            request = channel.next_approval(timeout=2)
+            assert request is not None
+            assert channel.respond(request.request_id, request.generation, "approve")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            waiting = pool.submit(approve)
+            assert context.channel.request_approval(context, "bash", block.id, block.input) == "approve"
+            waiting.result(timeout=2)
+        return []
+
+    monkeypatch.setattr(turn_engine, "execute_tool_batch", execute)
+    engine = TurnEngine(TurnCallbacks(
+        assemble_tool_pool=lambda: ([], {}),
+        build_context=lambda history: SimpleNamespace(prompt_values=lambda: {}),
+        call_llm=lambda *args: (next(responses), None, None),
+        build_user_content=lambda results: results,
+        evaluate_goal=lambda history: None,
+        remember_after_turn=lambda history: None,
+        goal_condition=lambda: "",
+    ))
+    context = ExecutionContext(channel, "session", 1, "turn", origin="frontend")
+
+    with execution_context(context):
+        outcome = engine.run(TurnRequest([], "run", prompt_state=_PromptState()))
+
+    assert outcome.status == "completed"
+    assert engine.phase_history.count(TurnPhase.WAITING_APPROVAL) == 1
+    assert engine.phase_history[4:7] == (
+        TurnPhase.EXECUTING_TOOLS,
+        TurnPhase.WAITING_APPROVAL,
+        TurnPhase.EXECUTING_TOOLS,
+    )
+
+
+def test_phase_history_ignores_duplicates_and_rejects_invalid_transitions():
+    engine = TurnEngine(_callbacks(lambda *args: None))
+
+    engine._set_phase(TurnPhase.CREATED)
+    assert engine.phase_history == (TurnPhase.CREATED,)
+    with pytest.raises(RuntimeError, match="非法 TurnPhase 转换"):
+        engine._set_phase(TurnPhase.WAITING_MODEL)
 
 
 def test_run_stops_before_model_when_context_is_cancelled():

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import threading
-from typing import Literal
+from typing import Callable, Literal
 import uuid
 
 
@@ -87,6 +87,7 @@ class ExecutionContext:
     tool_call_id: str | None = None
     lead_context: object = None
     permission_mode: str | None = None
+    phase_observer: Callable[[str], None] | None = None
 
     def stopped(self) -> bool:
         return self.stop_event is not None and self.stop_event.is_set()
@@ -287,9 +288,12 @@ class InteractionChannel:
                     or context.turn_id in self._cancelled_turns):
                 return "deny"
             self._pending[request.request_id] = request
+        phase_observer = context.phase_observer
         # The execution thread checkpoints outside the delivery lock, before
         # making a request actionable and while waiting for an adapter decision.
         try:
+            if phase_observer is not None:
+                phase_observer("waiting_approval")
             if context.checkpoint is not None:
                 context.publish("approval_requested", request_id=request.request_id,
                                 tool_name=tool_name, tool_call_id=tool_call_id,
@@ -321,6 +325,8 @@ class InteractionChannel:
             with self._changed:
                 self._pending.pop(request.request_id, None)
                 self._decisions.pop(request.request_id, None)
+            if phase_observer is not None:
+                phase_observer("executing_tools")
 
     def _approval_ready(self) -> bool:
         while self._requests:

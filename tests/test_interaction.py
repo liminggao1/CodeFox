@@ -131,6 +131,20 @@ def test_offline_adapter_responds_to_exact_request_once():
         assert not channel.respond(request.request_id, 1, "approve")
 
 
+def test_approval_notifies_turn_phase_observer():
+    channel = InteractionChannel()
+    phases = []
+    context = replace(frontend(channel), phase_observer=phases.append)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(channel.request_approval, context, "bash", "tool-1", {})
+        request = channel.next_approval(timeout=2)
+        assert request is not None
+        assert phases == ["waiting_approval"]
+        assert channel.respond(request.request_id, request.generation, "approve")
+        assert waiting.result(timeout=2) == "approve"
+    assert phases == ["waiting_approval", "executing_tools"]
+
+
 def test_approval_waits_for_display_not_dequeue_or_later_notifications():
     channel = InteractionChannel()
     context = frontend(channel)
