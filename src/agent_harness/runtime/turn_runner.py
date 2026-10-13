@@ -217,7 +217,8 @@ class TurnRunner:
                     self._snapshot(context)
                     try:
                         outcome = self._host.agent_loop(self._session.history, text, self._checkpoint,
-                                                        self.record_usage)
+                                                        self.record_usage,
+                                                        prompt_state=self._session.prompt_state)
                     except Exception as exc:
                         outcome = interaction.TurnOutcome("failed", f"{type(exc).__name__}: {exc}")
                     with self._lifecycle:

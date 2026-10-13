@@ -75,7 +75,9 @@ def test_background_permission_is_checked_before_dispatch(
     host.agent_loop(history, "delete")
 
     assert not scheduler._background_tasks
-    result = history[2]["content"][0]
+    result = next(message["content"][0] for message in history
+                  if message["role"] == "user" and isinstance(message["content"], list)
+                  and message["content"][0].get("type") == "tool_result")
     assert result["type"] == "tool_result"
     assert "Permission denied" in result["content"]
 

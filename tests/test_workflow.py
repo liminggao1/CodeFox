@@ -985,7 +985,7 @@ def test_host_tool_pool_ships_the_workflow_tool(host_factory) -> None:
     tools, handlers = host.assemble_tool_pool()
     names = [tool["name"] for tool in tools]
 
-    assert names == [tool["name"] for tool in registrations.BUILTIN_TOOLS] + ["Workflow"]
+    assert names == sorted([tool["name"] for tool in registrations.BUILTIN_TOOLS] + ["Workflow"])
     assert handlers["Workflow"] is workflow_runtime.run_workflow_sync
     assert handlers["Workflow"](name="missing").content == (
         "Error: unknown workflow 'missing'"

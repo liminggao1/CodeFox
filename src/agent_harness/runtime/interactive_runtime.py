@@ -82,7 +82,10 @@ class InteractiveRuntime:
 
     def _compact_history(self, active_request):
         """用户主动压缩当前会话历史；成功后由终态结算统一保存。"""
-        return compaction.manual_compact(self.session.history, active_request)
+        result = compaction.manual_compact(self.session.history, active_request)
+        if result.applied:
+            self.session.prompt_state.reset()
+        return result
 
     def _dispatch_command(self, text):
         """CommandRouter 晚绑定回调：它依赖 SessionSwitch，直接注入会形成构造环。"""

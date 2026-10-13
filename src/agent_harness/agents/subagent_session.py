@@ -7,8 +7,10 @@ from ..runtime.tool_execution import ToolExecution, execute_tool
 from ..runtime import hooks
 from ..workspace import tasks
 from ..context import compaction
+from ..context.prompt_state import PromptState
 from . import recovery
 from ..providers import message_content
+from ..providers.llm_client import model_messages
 from ..runtime import interaction
 import uuid
 
@@ -73,6 +75,7 @@ class SubagentSession:
         self.work_context = work_context or (lambda: "")
         self.active_request = ""
         self._reactive_claimed = False
+        self.prompt_state = PromptState()
         shared = shared_tools.shared_tool_definitions(name, profile="child")
 
         self.tools = [
@@ -109,6 +112,9 @@ class SubagentSession:
         self.handlers = {key: value for key, value in self.handlers.items() if key in selected}
         self.system += (f"\nAvailable child tools: {', '.join(selected)}."
                         if selected else "\nNo tools are available; use only the supplied text.")
+        self.system += ("\nFollow the latest Current delegation in runtime context; "
+                        "earlier delegations in history are reference only.")
+        self.tools.sort(key=lambda tool: tool["name"])
 
     def begin_work(self, prompt: str):
         """Set the current delegation and reset its single context recovery."""
@@ -147,14 +153,15 @@ class SubagentSession:
             context = (f"Current Task: {task.id} [{task.status}] {task.subject}\n"
                        f"Task description: {task.description}\nWork directory: {cwd}")
         context += f"\n{self.work_context()}"
+        values = {"current_delegation": request, "current_work": context}
         request = f"{request}\n\n[Current work]\n{context}"
-        result = compaction.prepare_history(
-            messages, request, client=self.client, model=self.model,
-            system=self.system, tools=self.tools, preserve_tail=True)
+        system, result = self.prompt_state.prepare(
+            messages, values, lambda: self.system, request, client=self.client,
+            model=self.model, tools=self.tools, preserve_tail=True)
         if result.reason:
             core.terminal_print(f"[subagent compact] {result.reason}")
         try:
-            response = self._request(messages, request)
+            response = self._request(messages, system)
         except Exception as exc:
             if not recovery.is_prompt_too_long_error(exc) or self._reactive_claimed:
                 raise
@@ -164,7 +171,11 @@ class SubagentSession:
                 strict_summary=True)
             if result.reason or not result.applied:
                 raise RuntimeError(f"Subagent context recovery failed: {result.reason}") from exc
-            response = self._request(messages, request)
+            self.prompt_state.reset()
+            system, _ = self.prompt_state.prepare(
+                messages, values, lambda: self.system, request, client=self.client,
+                model=self.model, tools=self.tools, enabled=False, preserve_tail=True)
+            response = self._request(messages, system)
         if getattr(response, "stop_reason", None) == "max_tokens":
             raise RuntimeError("Subagent response was truncated (max_tokens)")
         messages.append({"role": "assistant", "content": response.content})
@@ -196,15 +207,14 @@ class SubagentSession:
             messages.append({"role": "user", "content": results})
         return response
 
-    def _request(self, messages, request):
+    def _request(self, messages, system):
         self._model_call_id = uuid.uuid4().hex
         with interaction.operation_context(model_call_id=self._model_call_id):
             operation = interaction.operation_status("model", "请求模型", "running")
             try:
                 response = self.client.messages.create(
-                    model=self.model, system=(f"{self.system}\n\n[Current delegation]\n{request}\n\n"
-                                             "Earlier delegations in history are reference only; follow the current delegation."),
-                    messages=messages,
+                    model=self.model, system=system,
+                    messages=model_messages(messages),
                     **({"tools": self.tools} if self.tools else {}), max_tokens=self.max_tokens)
             except Exception as exc:
                 interaction.operation_status("model", "请求模型", "failed", operation_id=operation,

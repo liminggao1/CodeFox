@@ -206,7 +206,7 @@ def test_runtime_state_moves_with_workdir(host_factory, tmp_path, monkeypatch) -
     memory_runtime.write_memory_file("note", "project", "Test", "body")
     scheduler.schedule_job("* * * * *", "reminder")
     asyncio.run(workflow_runtime.run_workflow("review-changes", {"budget": None}))
-    assert f"Working directory: {next_dir}" in prompts.assemble_system_prompt({})
+    assert f"Working directory: {next_dir}" in prompts.assemble_system_prompt()
 
     for name in (".tasks", ".task_outputs", ".transcripts", ".memory", ".runtime"):
         assert (next_dir / name).exists(), name
@@ -214,21 +214,19 @@ def test_runtime_state_moves_with_workdir(host_factory, tmp_path, monkeypatch) -
     assert (next_dir / ".scheduled_tasks.json").exists()
 
 
-def test_system_prompt_uses_refreshed_runtime_context(host_factory) -> None:
+def test_system_prompt_contains_only_fixed_context(host_factory) -> None:
     host = host_factory()
 
-    prompt = prompts.assemble_system_prompt({
-        "connected_mcp": ["deploy"],
-        "active_subagents": ["alice"],
-    })
+    prompt = prompts.assemble_system_prompt()
 
-    assert "Connected MCP servers: deploy" in prompt
-    assert "Active subagents: alice" in prompt
+    assert "Connected MCP servers:" not in prompt
+    assert "Active subagents:" not in prompt
+    assert "Current time:" not in prompt
 
 
 def test_system_prompt_explains_dedicated_file_tool_preference(host_factory) -> None:
     host_factory()
-    prompt = prompts.assemble_system_prompt({})
+    prompt = prompts.assemble_system_prompt()
 
     assert "prefer it so the change is easier to review" in prompt
     assert "This is a preference, not a prohibition" in prompt

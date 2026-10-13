@@ -22,9 +22,10 @@ from .workspace import worktrees
 from .workspace import task_worktrees
 from .context import skills
 from .context import prompts
+from .context.prompt_state import PromptState
 from .tools import file_tools
 from .runtime import hooks
-from .providers.llm_client import StreamStopped, stream_message
+from .providers.llm_client import StreamStopped, stream_message, model_messages
 from .agents import subagent
 from .providers import message_content
 from .context import compaction
@@ -143,20 +144,19 @@ def build_user_content(results: list[dict]) -> list[dict]:
     return content
 
 
-def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: list,
+def call_llm(messages: list, system: str, tools: list,
              state: recovery.RecoveryState):
     """调用模型并返回响应。
 
     Args:
         messages: 当前对话历史。
-        context: 用于生成系统提示词的运行时上下文。
+        system: 已完成快照与计量的固定系统提示词，不在发送前重新组装。
         tools: 本轮可用的工具描述列表。
         state: 本轮模型重试和恢复状态。
 
     Returns:
         完整响应、调用 ID 和生命周期 ID；无交互上下文时后两个为 None。
     """
-    system = prompts.assemble_system_prompt(context.prompt_values())
     def request():
         if interaction.stopped():
             raise StreamStopped("Stopped before requesting model")
@@ -173,7 +173,7 @@ def call_llm(messages: list, context: runtime_context.RuntimeContext, tools: lis
         kwargs = dict(
             model=state.current_model,
             system=system,
-            messages=messages,
+            messages=model_messages(messages),
             tools=tools,
             max_tokens=state.max_tokens)
         try:
@@ -222,13 +222,14 @@ def evaluate_goal(messages: list):
 
 
 # Agent 主循环：准备上下文、调用模型、执行工具并回填结果，直到本轮结束。
-def agent_loop(history: list, active_request: str, save_context=None, on_usage=None):
+def agent_loop(history: list, active_request: str, save_context=None, on_usage=None, *, prompt_state=None):
     """执行 Agent 主循环，直到模型完成回答或本轮无法继续。
     Args:
         history: 本回合的对话历史，由回合 module 持有并原地追加。
         active_request: 当前用户请求，供历史压缩和任务续做使用。
         save_context: 运行时提供的检查点回调，负责保存会话。
         on_usage: 接收 Lead 主模型用量的回调。
+        prompt_state: 当前会话的固定提示词与最近运行状态；直接调用时仅本轮有效。
     Returns:
         TurnOutcome；历史和工具副作用保留在各自所属模块。
     LeadTurn 是本回合历史、展示发布、检查点、模型调用关联与定时任务交付的唯一
@@ -236,13 +237,15 @@ def agent_loop(history: list, active_request: str, save_context=None, on_usage=N
     续写、goal 判定和工具迭代的显式顺序。
     """
     # 创建本轮回合对象 LeadTurn：管理本轮所有记录、状态、会话保存、token用量回调
-    turn = LeadTurn(history, save_context, on_usage)
+    prompt_state = prompt_state if prompt_state is not None else PromptState()
+    turn = LeadTurn(history, save_context, on_usage, prompt_state)
     # 实例化恢复状态对象：保存本轮API重试、模型降级、上下文回滚恢复相关状态
     state = recovery.RecoveryState()
     # 手动压缩管理器，管控手动触发的工具返回内容压缩以及压缩执行时机
     manual_compaction = compaction.ManualCompaction()
     # 开启自动上下文压缩开关，当上下文过长时自动压缩对话历史
     automatic_compaction_enabled = True
+    retry_request = None
 
     # -- 准备上下文并请求完整模型响应 --
     # 每次循环迭代：调用一次模型，处理模型返回的文本回答 或者 工具调用请求
@@ -254,32 +257,36 @@ def agent_loop(history: list, active_request: str, save_context=None, on_usage=N
         model_call_started = False
         # 准备阶段与模型调用失败共用同一套 cron 收尾。
         try:
-            active_request = turn.inject_scheduled(active_request)
-            # 将已完成的后台任务通知加入对话历史。
-            turn.inject_background_notes()
-            # 先组装本次请求的 system/tools，供 token 计数覆盖模型实际看到的完整输入。
-            context = runtime_context.build_context(turn.history)
-            tools, handlers = assemble_tool_pool()
-            system = prompts.assemble_system_prompt(context.prompt_values())
-            # 按上下文预算裁剪或压缩历史消息。
-            compacted = compaction.prepare_history(
-                turn.history, active_request, enabled=automatic_compaction_enabled,
-                client=core.client, model=state.current_model, system=system, tools=tools)
-            turn.after_compaction(compacted)
-            if compacted.reason:
-                automatic_compaction_enabled = False
-                core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
-            # 压缩后重新刷新上下文和工具池，确保请求使用最新历史。
-            if compacted.applied:
+            if retry_request is None:
+                active_request = turn.inject_scheduled(active_request)
+                # 将已完成的后台任务通知加入对话历史。
+                turn.inject_background_notes()
+                # 一次准备固定 system、动态通知与工具快照，计量和发送复用实际请求。
                 context = runtime_context.build_context(turn.history)
                 tools, handlers = assemble_tool_pool()
+                previous_prompt = prompt_state.snapshot()
+                # 按上下文预算裁剪或压缩历史消息，包含将要追加的运行上下文。
+                system, compacted = prompt_state.prepare(
+                    turn.history, context.prompt_values(), prompts.assemble_system_prompt,
+                    active_request, enabled=automatic_compaction_enabled,
+                    client=core.client, model=state.current_model, tools=tools)
+                # 快照、通知和压缩后的历史在同一检查点保存，重试不重复追加。
+                if compacted.applied or prompt_state.snapshot() != previous_prompt:
+                    turn.checkpoint()
+                if compacted.reason:
+                    automatic_compaction_enabled = False
+                    core.terminal_print(f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}")
+                # 当前状态已由 prepare 在压缩后补齐，不再二次装配提示词和工具池。
+            else:
+                # 输出截断升级与网络重试都复用同一请求，不重新检索记忆或追加状态。
+                system, tools, handlers = retry_request
             if interaction.stopped():
                 return turn.finish("stopped")
 
             model_call_started = True
             # 重试策略和模型降级由 call_llm 内部处理。
             turn.begin_model_call()
-            response, call_id, operation_id = call_llm(turn.history, context, tools, state)
+            response, call_id, operation_id = call_llm(turn.history, system, tools, state)
         # 准备阶段或模型调用失败时，归还尚未确认的定时任务。
         except Exception as exc:
             if isinstance(exc, StreamStopped):
@@ -293,6 +300,7 @@ def agent_loop(history: list, active_request: str, save_context=None, on_usage=N
                 compacted = compaction.reactive_compact(turn.history, active_request)
                 turn.after_compaction(compacted)
                 if compacted.reason is None:
+                    retry_request = None
                     continue
                 exc = RuntimeError(f"Reactive compaction failed: {compacted.reason}")
             # 结束本轮交互，不继续执行工具。
@@ -311,7 +319,9 @@ def agent_loop(history: list, active_request: str, save_context=None, on_usage=N
             return turn.finish("stopped")
         if action == "retry":
             core.terminal_print(f"  \033[33m[max_tokens] retry with {state.max_tokens}\033[0m")
+            retry_request = system, tools, handlers
             continue
+        retry_request = None
         if action in {"continue", "stop"}:
             # 输出额度升级的请求返回后，才保留可续写的部分文本。
             turn.append({"role": "assistant", "content": response.content})

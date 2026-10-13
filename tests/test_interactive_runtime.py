@@ -428,7 +428,7 @@ def test_close_waits_for_owned_persistent_thread(runtime_factory):
     def create(**kwargs):
         if "You are 'helper'" in str(kwargs.get("system")):
             return response("child done")
-        if len(kwargs["messages"]) == 1:
+        if len(kwargs["messages"]) == 2:
             return response(tools=[child_call], stop="tool_use")
         return response("lead done")
     runtime, host = runtime_factory(client=create)

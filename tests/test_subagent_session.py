@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_harness.agents.subagent_session import SubagentSession
+from agent_harness.context.prompt_state import is_context_message
 from support.fakes import blocks, text_block
 import agent_harness.agents.subagent as subagent_runtime
 import agent_harness.context.compaction as compaction
@@ -52,7 +53,8 @@ def test_subagent_completion_and_failure_release_assignment(host_factory, monkey
     assert any(msg["type"] == ("error" if fail else "result") for msg in inbox)
     if fail:
         assert not any(msg["type"] == "result" for msg in inbox)
-        assert len(calls[0]["messages"]) == 1
+        assert len(calls[0]["messages"]) == 2
+        assert "Runtime context update" in calls[0]["messages"][1]["content"]
     assert "[Assigned task" in calls[0]["messages"][0]["content"]
 
 
@@ -67,7 +69,7 @@ def test_truncated_tool_never_writes_or_appends(host_factory, mode):
     messages = [{"role": "user", "content": "Write"}]
     with pytest.raises(RuntimeError, match="truncated"):
         session.run(messages)
-    assert len(messages) == 1
+    assert [m for m in messages if not is_context_message(m)] == [{"role": "user", "content": "Write"}]
     assert not (core.WORKDIR / "partial.txt").exists()
 
 
@@ -147,7 +149,8 @@ def test_failed_reactive_summary_keeps_history(host_factory):
     before = list(messages)
     with pytest.raises(RuntimeError, match="recovery failed"):
         session.run(messages)
-    assert messages == before
+    assert [m for m in messages if not is_context_message(m)] == before
+    assert session.prompt_state.snapshot() is not None
     assert len(calls) == 2
 
 
@@ -172,8 +175,8 @@ def test_current_delegation_survives_middle_history_archive(host_factory, mode):
 
     assert len(calls) == 1  # Archiving short messages does not request a summary.
     assert "archived at" in str(calls[0]["messages"])
-    assert "Current delegation B" not in str(calls[0]["messages"])
-    assert "Current delegation B" in calls[0]["system"]
+    assert "Current delegation B" in str(calls[0]["messages"])
+    assert "Current delegation B" not in calls[0]["system"]
     assert "Old delegation A" not in calls[0]["system"]
-    assert "No assigned Task" in calls[0]["system"]
+    assert "No assigned Task" in str(calls[0]["messages"])
     assert list((core.WORKDIR / ".transcripts").glob("*.jsonl"))

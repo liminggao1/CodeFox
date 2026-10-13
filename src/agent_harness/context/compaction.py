@@ -45,13 +45,15 @@ def _history_transaction(messages: list, transform) -> CompactionResult:
 
 def prepare_history(messages: list, active_request: str, *, enabled=True,
                     client=None, model=None, system=None, tools=None,
-                    preserve_tail=False) -> CompactionResult:
+                    preserve_tail=False, refresh_context=None) -> CompactionResult:
     """在每次模型调用前按分层 token 预算处理历史。
 
     输入：messages 为可原地替换的历史；active_request 为需保留的当前请求；
         enabled 为本回合是否允许自动处理。
     返回：CompactionResult；禁用或无需变化时 applied 为 False，失败时附带 reason。
         先限制工具输出、归档旧消息，再缩减工具结果，仍超限时请求模型摘要。
+        refresh_context 在历史变更后补充当前运行上下文，返回 (历史, system)，
+        后续阈值判断覆盖同一份完整请求；失败仍保持输入列表不变。
     """
     if not enabled:
         return CompactionResult(False)
@@ -66,15 +68,21 @@ def prepare_history(messages: list, active_request: str, *, enabled=True,
         return count_input_tokens(client or core.client, model=model or core.MODEL,
                                   system=system, messages=candidate, tools=tools)
 
+    def refresh(candidate):
+        nonlocal system
+        if refresh_context is not None and candidate != messages:
+            candidate, system = refresh_context(candidate)
+        return candidate
+
     def prepare(candidate):
         candidate = tool_result_budget(candidate)
-        candidate = snip_compact(candidate)
+        candidate = refresh(snip_compact(candidate))
         if request_tokens(candidate) > core.COMPACT_TRIGGER:
-            candidate = micro_compact(candidate, core.COMPACT_TARGET)
+            candidate = refresh(micro_compact(candidate, core.COMPACT_TARGET))
             if request_tokens(candidate) > core.COMPACT_TRIGGER:
-                candidate = fit_tool_results(candidate, core.COMPACT_TARGET)
+                candidate = refresh(fit_tool_results(candidate, core.COMPACT_TARGET))
         if request_tokens(candidate) > core.COMPACT_TRIGGER:
-            candidate = compact_history(candidate, active_request, **options)
+            candidate = refresh(compact_history(candidate, active_request, **options))
         return candidate
 
     return _history_transaction(messages, prepare)
@@ -337,13 +345,13 @@ def persist_large_output(tool_use_id: str, output: str) -> str:
 
 
 
-# 限制最新一条用户消息中工具结果的 token 总量；单条落盘阈值仍按字符数执行。
+# 限制最新一批工具结果的 token 总量；单条落盘阈值仍按字符数执行。
 # 单条超过阈值或整批超预算时，从最长的结果开始落盘并保留预览。
 def tool_result_budget(messages: list) -> list:
     """限制最新一批工具结果的总 token 数，并按字符阈值缩减单条大结果。
 
     Args:
-        messages: 对话历史；仅检查最后一条用户消息中的工具结果。
+        messages: 对话历史；跳过尾部内部通知，检查最新业务消息中的工具结果。
     Returns:
         原消息列表；按需就地将大结果替换为落盘预览。
         结果过短、无法通过预览缩减时，整批仍可能超过预算。
@@ -351,8 +359,9 @@ def tool_result_budget(messages: list) -> list:
     # 消息为空时无需处理
     if not messages:
         return messages
-    # 取最后一条消息
-    last = messages[-1]
+    # 运行上下文可能在结果后追加，不能让通知遮住最新工具结果。
+    last = next((message for message in reversed(messages)
+                 if message.get("_runtime_context") is not True), {})
     # 取出该消息的内容（可能是字符串，也可能是块列表）
     content = last.get("content")
     # 只处理内容为列表的 user 消息

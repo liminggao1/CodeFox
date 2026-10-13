@@ -36,9 +36,15 @@ _CJK_TOKEN = re.compile(r"[\u3400-\u9fff]")
 _ASCII_WORD = re.compile(r"[A-Za-z0-9_]+")
 
 
+def model_messages(messages):
+    """保留通知正文，去掉仅供本地归属判断的内部消息标记。"""
+    return [{key: value for key, value in message.items() if key != "_runtime_context"}
+            for message in messages or []]
+
+
 def estimate_input_tokens(system=None, messages=None, tools=None) -> int:
     """Estimate request tokens when a compatible count endpoint is unavailable."""
-    payload = json.dumps({"system": system or "", "messages": messages or [],
+    payload = json.dumps({"system": system or "", "messages": model_messages(messages),
                           "tools": tools or []}, ensure_ascii=False, default=str)
     tokens = 0
     index = 0
@@ -61,7 +67,7 @@ def estimate_input_tokens(system=None, messages=None, tools=None) -> int:
 
 def count_input_tokens(client, *, model, system=None, messages=None, tools=None) -> int:
     """Estimate request tokens without adding a second network request."""
-    request = dict(model=model, messages=messages or [])
+    request = dict(model=model, messages=model_messages(messages))
     if system:
         request["system"] = system
     if tools:

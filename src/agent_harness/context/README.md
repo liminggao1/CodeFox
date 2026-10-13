@@ -4,13 +4,14 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| [prompts.py](prompts.py) | 提示词分段与 `assemble_system_prompt`，拼装身份、环境、工具、技能、memory 和 MCP 内容 |
+| [prompts.py](prompts.py) | 固定提示词分段与 `assemble_system_prompt`，拼装身份、启动环境、工具规则和技能目录 |
+| [prompt_state.py](prompt_state.py) | 固定 system 快照、追加式运行通知、状态校验与压缩后的完整状态刷新；行为见仓库事实第 10 节 |
 | [compaction.py](compaction.py) | 工具结果瘦身、历史裁剪、摘要、手动/自动压缩及超限后的被动恢复 |
 | [memory_runtime.py](memory_runtime.py) | 记忆文件读写、索引、相关记忆选取、抽取、去重与整理 |
 | [skills.py](skills.py) | 扫描 `SKILL.md`、维护技能索引，提供 `list_skills` 和 `load_skill` |
 
 根目录 [runtime_context.py](../runtime_context.py) 从记忆等状态构造每次请求的上下文快照，
-[host.py](../host.py) 将其用于提示词，并在回合结束时处理记忆。
+[host.py](../host.py) 将其交给 `PromptState`，并在回合结束时处理记忆。
 主循环和 [SubagentSession](../agents/subagent_session.py) 使用这里的历史压缩能力。
 
 `skills.py` 是加载代码，资源目录是包根目录的 [skills/](../skills/)。

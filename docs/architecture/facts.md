@@ -32,8 +32,8 @@
   `workspace/worktrees.py` 只负责 Git 与目录；`workspace/task_worktrees.py` 负责两者的绑定与移除
   （含占用检查、跨进程任务锁、部分成功后的报错）。
 - 依赖方向为 `agents` / `tools` → `workspace.tasks` → `workspace.worktrees`；`worktrees` 不反向导入任务。
-- 启动目录、配置、client 与 CLI 状态由 `core.py` 持有；任务、memory、workflow、transcript、工具结果
-  与提示词在调用时读取当前目录，`host` 不再维护 client 副本。
+- 启动目录、配置、client 与 CLI 状态由 `core.py` 持有；任务、memory、workflow、transcript 与工具结果
+  在调用时读取当前目录，`host` 不再维护 client 副本。提示词快照与动态状态见第 10 节。
 - workflow journal 记录每次新调用及累计 token 用量；相同 `prompt/label/schema` 的并发调用只执行一次；
   缺 `tokens` 的旧格式记录在 resume 时明确报错（旧文件保留，重跑生成新格式）。
 - cron：循环 cron 仅在本进程内按分钟去重，重启后同一分钟可再次触发；持久化的一次性任务采用至少一次交付
@@ -48,7 +48,7 @@
 
 - `context/memory_runtime.py` 只保留记忆能力（存储、索引、检索、抽取、整理）；旧 Agent runtime 已删除。
 - `runtime_context.py` 以 frozen dataclass 和 tuple 持有上下文值，`build_context(messages)` 是唯一构造入口；
-  Lead 在每次模型调用前刷新，CLI 与后台循环不持有共享 context。
+  Lead 在准备新请求时刷新，重试复用已准备的请求；CLI 与后台循环不持有共享 context。
 - `tools/tool_registry.py` 统一装配工具 schema、handler 与 policy 快照，来源由宿主显式接线；
   `ToolDefinition` 是内置工具的权威目录；MCP 只提供动态定义。
 - `agents/subagent_session.py` 的 `SubagentSession` 拥有工具 schema、cwd 绑定、hooks 和一轮模型执行；
@@ -268,3 +268,22 @@
 - CLI、TUI、子 agent 和自动任务共用规则；交互回合的执行上下文固定其开始时的模式，子 agent 继承该模式。
   默认模式下需要审批但无交互入口时不执行，返回审批不可用原因；免审批模式下直接执行。
   拒绝、停止和参数错误均沿用工具结果通道，用户和模型接收同一正文；CLI 不增加模式切换命令。
+
+## 10. 提示词稳定化（2026-10-12）
+
+- `context/prompt_state.py` 由 Lead 与子 agent 共用，首次请求生成固定 system 快照；身份、规则、
+  启动目录和技能目录在同一周期复用。运行日期只精确到本地日，跨天追加通知，不改旧消息。
+- Lead 的记忆目录、召回记忆、MCP 名称和活跃子 agent 名称，以及子 agent 的当前委派、任务、
+  工作目录和计划状态，通过带 `_runtime_context` 标记的 `user` 文本追加到历史末尾。
+  首次提供完整状态，之后仅通知变化；移除明确清空一次，名称排序，字段顺序固定。
+- 通知声明其为运行状态或参考记忆，不是用户请求或授权；子 agent 以最新委派为准。
+  通知只在工具结果补齐后追加，不生成页面消息或展示记录，不计入展示消息数量，记忆检索跳过它。
+  发送与 token 计量都移除本地标记、保留正文；动态通知属于模型上下文。
+- 会话 JSON 的可选 `prompt_state` 保存固定 system 和最新完整状态，与历史在同一检查点保存。
+  缺少状态时在下一次请求初始化；已有状态结构错误则报错并保留文件。恢复复用快照，只通知当前变化；
+  新会话独立初始化。子 agent 状态只跟随实例，不增加磁盘恢复能力。
+- 自动、手动和被动压缩成功后重建快照并补充一次完整当前状态；失败保留原周期。
+  自动压缩的阈值判断包含刷新后的 system 和完整通知。最新工具输出预算跳过末尾通知，字符存储限制不变。
+- 每次新请求只装配一份 system、历史和工具快照，计量和发送共用；网络及输出额度重试不重复检索或追加通知。
+  工具集合按名称排序，并反映实际能力增减。本实现只减少程序造成的前缀变化，不保证 API 平台缓存命中，
+  不增加缓存统计、专用缓存参数或额外真实 API 请求。

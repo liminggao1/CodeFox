@@ -1,4 +1,4 @@
-"""Tool snapshots preserve source ordering, closures and policy ownership."""
+"""Tool snapshots preserve deterministic ordering, closures and policy ownership."""
 
 from agent_harness.runtime import tool_execution
 
@@ -25,9 +25,10 @@ def test_mcp_snapshot_binds_each_handler_and_policy(host_factory):
     mcp_tools.connect_mcp("deploy")
     after = tool_registry.REGISTRY.snapshot()
 
-    assert [tool["name"] for tool in before.tools] == [
+    assert [tool["name"] for tool in before.tools] == sorted([
         entry.schema["name"] for entry in registrations.BUILTIN_DEFINITIONS
-    ] + ["Workflow"]
+    ] + ["Workflow"])
+    assert [tool["name"] for tool in after.tools] == sorted(tool["name"] for tool in after.tools)
     assert "mcp__docs__search" not in before.handlers
     assert after.handlers["mcp__docs__get_version"]().content == "[docs] API v2.1.0"
     assert after.handlers["mcp__deploy__status"](service="web").content == "[deploy] web: running (v1.4.2)"

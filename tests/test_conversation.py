@@ -155,21 +155,21 @@ def _save_trace(monkeypatch, runtime):
 
 
 def test_turn_boundary_saves_terminal_fact_before_delivery(runtime_factory, monkeypatch):
-    """简单回合保存 3 次，且终态先落盘再交付。
+    """首次简单回合保存 4 次，且终态先落盘再交付。
 
-    Hook 日志不落盘；保存点依次落在用户输入、助手消息接受与回合终态；最后一次
+    Hook 日志独立保存；检查点依次落在用户输入、提示词初始化、助手消息与终态；最后一次
     保存已包含 turn_finished，前端读到的终态与文件一致。
     """
     runtime, host = runtime_factory([response("Done")])
     trace = _save_trace(monkeypatch, runtime)
     finished, _ = complete(runtime, "run")
-    assert trace == ["user_message", "assistant_message", "turn_finished"]
+    assert trace == ["user_message", "user_message", "assistant_message", "turn_finished"]
     assert finished.payload["saved"] is True
     assert stored(runtime)["events"][-1]["type"] == "turn_finished"
 
 
 def test_tool_turn_boundary_saves_each_settled_step(runtime_factory, monkeypatch):
-    """带一次工具往返的回合保存 8 次，逐项结算步骤各落盘一次。"""
+    """首次带工具往返的回合保存 9 次，提示词只在初始化时额外保存。"""
     runtime, host = runtime_factory([
         response("Before", tools=[tool("bash", command="printf hi")], stop="tool_use"),
         response("After"),
@@ -179,7 +179,7 @@ def test_tool_turn_boundary_saves_each_settled_step(runtime_factory, monkeypatch
     request, _ = displayed_approval(runtime)
     assert runtime.channel.respond(request.request_id, request.generation, "approve")
     finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
-    assert trace == ["user_message", "tool_call", "approval_requested", "approval_decided",
+    assert trace == ["user_message", "user_message", "tool_call", "approval_requested", "approval_decided",
                      "tool_result", "tool_result", "assistant_message", "turn_finished"]
     assert finished.payload["saved"] is True
 
@@ -521,8 +521,8 @@ def test_model_owns_todo_updates_without_cross_round_reminders(runtime_factory):
     assert observed == [[], *[todos for _ in range(7)], completed, []]
     expected_ids = ["plan", *[f"read-{index}" for index in range(6)], "finish-plan", "clear-plan"]
     for index, call_id in enumerate(expected_ids, start=1):
-        # 每轮只追加助手响应和配对结果，模型历史里没有额外提醒消息。
-        assert len(requests[index]) == 1 + index * 2
+        # 初始运行通知之后，每轮只追加助手响应和配对结果，没有 TODO 提醒。
+        assert len(requests[index]) == 2 + index * 2
         results = requests[index][-1]["content"]
         assert len(results) == 1
         assert results[0]["type"] == "tool_result"

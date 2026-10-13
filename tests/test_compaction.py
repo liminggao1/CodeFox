@@ -373,7 +373,8 @@ def test_automatic_failure_allows_main_call_without_repeat(host_factory, monkeyp
     def create(**kwargs):
         main_calls.append(copy.deepcopy(kwargs["messages"]))
         if len(main_calls) == 1:
-            assert kwargs["messages"] == original
+            assert kwargs["messages"][:len(original)] == original
+            assert "Runtime context update" in kwargs["messages"][-1]["content"]
             if context_error:
                 raise RuntimeError("context_length_exceeded")
             return compaction_tools(("read", "read_file", {"path": "missing.txt"}))

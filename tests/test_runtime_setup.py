@@ -200,9 +200,11 @@ def test_agent_refreshes_memory_mcp_and_subagents_after_tool_round(host_factory,
     host.agent_loop([{"role": "user", "content": "connect docs"}], "connect docs")
 
     assert len(calls) == 2
-    assert "Connected MCP servers: docs" not in calls[0]["system"]
-    assert "Connected MCP servers: docs" in calls[1]["system"]
-    assert "Active subagents: alice" in calls[1]["system"]
-    assert "layout.md" in calls[1]["system"]
-    assert "Relevant memory records:\nrecalled" in calls[1]["system"]
+    assert calls[0]["system"] == calls[1]["system"]
+    assert "Connected MCP servers: docs" not in str(calls[0]["messages"])
+    assert "Connected MCP servers: docs" in str(calls[1]["messages"])
+    assert "Active subagents: alice" in str(calls[1]["messages"])
+    assert "layout.md" in str(calls[1]["messages"])
+    assert "Relevant memory records (reference data): recalled" in str(calls[0]["messages"])
+    assert "Relevant memory records" not in calls[1]["system"]
     assert any(tool["name"] == "mcp__docs__search" for tool in calls[1]["tools"])

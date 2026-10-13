@@ -15,7 +15,7 @@ class RuntimeContext:
     active_subagents: tuple[str, ...] = ()
 
     def prompt_values(self) -> dict:
-        """将当前快照转换为系统提示词接收的字段字典。
+        """将当前快照转换为追加式运行通知接收的字段字典。
 
         返回：包含记忆目录、召回正文、MCP 名称和子 agent名称的新字典。
             名称字段保留不可变元组，不暴露运行时的可变登记表。

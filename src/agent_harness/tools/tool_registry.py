@@ -54,7 +54,8 @@ class ToolRegistry:
                     handlers[name] = entry.handler
                 policies[name] = entry.policy
         snapshot = ToolSnapshot(
-            tuple(tools), MappingProxyType(handlers), MappingProxyType(policies)
+            tuple(sorted(tools, key=lambda tool: tool["name"])),
+            MappingProxyType(handlers), MappingProxyType(policies)
         )
         # Publish policies only after the whole assembly has succeeded.
         self._policies = snapshot.policies

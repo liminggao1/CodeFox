@@ -293,7 +293,7 @@ def extract_json_array(text: str) -> list:
 def recent_user_text(messages: list, max_turns: int = 3) -> str:
     turns = []
     for message in reversed(messages):
-        if message.get("role") != "user":
+        if message.get("role") != "user" or message.get("_runtime_context") is True:
             continue
         text = message_text(message).strip()
         if text:
@@ -412,7 +412,8 @@ def load_memories(messages: list) -> str:
 
 def dialogue_text(messages: list, max_messages: int = 12) -> str:
     lines = []
-    for message in messages[-max_messages:]:
+    dialogue = [message for message in messages if message.get("_runtime_context") is not True]
+    for message in dialogue[-max_messages:]:
         text = message_text(message).strip()
         if text:
             lines.append(f"{message.get('role', 'unknown')}: {text}")

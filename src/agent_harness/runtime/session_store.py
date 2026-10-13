@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..agents.goal import GoalController, GoalError
+from ..context.prompt_state import PromptState, is_context_message, validate_snapshot
 from . import interaction
 
 
@@ -96,6 +97,7 @@ class SessionStore:
                 raise SessionError("Session ID does not match its filename")
             for key in ("created_at", "updated_at"):
                 datetime.fromisoformat(snapshot[key])
+            validate_snapshot(snapshot.get("prompt_state"))
             if not isinstance(snapshot["active_user_request"], str):
                 raise SessionError("Invalid active user request")
             if not isinstance(snapshot["workdir"], str) or not Path(snapshot["workdir"]).is_absolute():
@@ -234,7 +236,8 @@ class SessionStore:
                 sessions.append({"id": snapshot["id"],
                                  "updated_at": snapshot["updated_at"],
                                  "summary": str(first).replace("\n", " ")[:80],
-                                 "message_count": len(snapshot["messages"])})
+                                 "message_count": sum(not is_context_message(message)
+                                                      for message in snapshot["messages"])})
             except SessionError as exc:
                 # 读不出来的文件也列进会话列表，让用户能直接删除它。
                 # 字段只是展示占位，不代表文件内容有效。
@@ -269,6 +272,7 @@ class InteractiveSession:
         self.snapshot: dict | None = None
         self.dirty = False
         self.active_request = "(no active user request)"
+        self.prompt_state = PromptState()
 
     @property
     def session_id(self) -> str | None:
@@ -283,7 +287,8 @@ class InteractiveSession:
         self.snapshot["events"].append({"id": uuid.uuid4().hex, "at": utc_now(),
                                         "kind": "summary", "type": kind, "text": text[:200],
                                         "result": result,
-                                        "message_count": len(self.history)})
+                                        "message_count": sum(not is_context_message(message)
+                                                             for message in self.history)})
         self.dirty = True
         return self.save() if save else True
 
@@ -363,7 +368,8 @@ class InteractiveSession:
         try:
             self.snapshot.update(messages=self.history,
                                  goal=self.goal_getter().snapshot(), updated_at=utc_now(),
-                                 active_user_request=self.active_request)
+                                 active_user_request=self.active_request,
+                                 prompt_state=self.prompt_state.snapshot())
             if self.context_getter is not None:
                 self.snapshot.update(self.context_getter())
             self.store.save(self.snapshot)
@@ -384,6 +390,7 @@ class InteractiveSession:
         self.snapshot = snapshot
         self.dirty = False
         self.active_request = snapshot["active_user_request"]
+        self.prompt_state = PromptState(snapshot.get("prompt_state"))
 
     def finish_pending_tools(self) -> None:
         """Supply interrupted tool results without rerunning side effects."""

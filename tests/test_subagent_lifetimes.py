@@ -163,7 +163,8 @@ def test_persistent_without_task_keeps_history_and_never_auto_claims(runtime, mo
         return original_wait(name, timeout)
     monkeypatch.setattr(subagent_runtime._BUS, "wait_for_messages", wait)
     def create(**kwargs):
-        calls.append((id(kwargs["messages"]), list(kwargs["messages"])))
+        calls.append((id(subagent_runtime._active_subagents["worker"].messages),
+                      list(kwargs["messages"])))
         return blocks(text_block(f"Result {len(calls)}"))
     client(host, create)
     assert spawn(host, mode="persistent")["status"] == "started"
@@ -212,7 +213,7 @@ def test_persistent_switches_tasks_only_after_final_answer(runtime, monkeypatch)
     ])
     histories = []
     def create(**kwargs):
-        histories.append(id(kwargs["messages"]))
+        histories.append(id(subagent_runtime._active_subagents["worker"].messages))
         return next(responses)
     client(host, create)
     spawn(host, mode="persistent", task_id=a.id)

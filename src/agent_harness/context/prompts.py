@@ -1,13 +1,12 @@
 """系统提示词组装。
 
-每轮都根据实时上下文重新组装提示词：身份、工具目录、工作区、skills、
-memory 和已连接的 MCP 服务器。
+身份、工具规则、工作区和 skills 组成固定快照；实时状态由 prompt_state
+追加到模型历史，不在每次调用时重写 system。
 """
 
 from __future__ import annotations
 
 import os
-from datetime import datetime
 
 from .. import core
 from . import skills
@@ -83,14 +82,14 @@ PROMPT_SECTIONS = {
 }
 
 
-def assemble_system_prompt(context: dict) -> str:
-    """将固定规则、环境信息和当前上下文拼成系统提示词。
+def assemble_system_prompt() -> str:
+    """将固定规则和启动环境拼成系统提示词快照。
 
-    输入：context 含 memory_catalog、memories、connected_mcp 和 active_subagents。
-    返回：完整 system 字符串，包含启动目录、当前时间和 skill 目录；
-        空的记忆、MCP 和子 agent段落不添加。这里只组装文本，不请求模型。
+    返回：完整 system 字符串，包含启动目录和 skill 目录。
+        日期、记忆、MCP 和子 agent 状态通过内部上下文消息提供。
+        这里只组装文本，不请求模型。
     """
-    # 每轮根据实时上下文重建系统提示词，让 memory、skills、MCP 状态和子 agent可见。
+    # 同一提示词周期复用此快照；首次请求和成功压缩后才重新生成。
     sections = [PROMPT_SECTIONS["identity"],
                 PROMPT_SECTIONS["tools"],
                 PROMPT_SECTIONS["tasks"],
@@ -99,17 +98,6 @@ def assemble_system_prompt(context: dict) -> str:
                 f"Working directory: {core.WORKDIR}",
                 PROMPT_SECTIONS["memory"],
                 PROMPT_SECTIONS["compaction"]]
-    sections.append(f"Current time: {datetime.now().isoformat(timespec='seconds')}")
     sections.append("Skills catalog:\n" + skills.list_skills() +
                     "\nUse load_skill(name) when a skill is relevant.")
-    if context.get("memory_catalog"):
-        sections.append(f"Memory catalog:\n{context['memory_catalog']}")
-    if context.get("memories"):
-        sections.append(f"Relevant memory records:\n{context['memories']}")
-    mcp_names = context.get("connected_mcp") or []
-    if mcp_names:
-        sections.append(f"Connected MCP servers: {', '.join(mcp_names)}")
-    subagent_names = context.get("active_subagents") or []
-    if subagent_names:
-        sections.append(f"Active subagents: {', '.join(subagent_names)}")
     return "\n\n".join(sections)

@@ -4,7 +4,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| [llm_client.py](llm_client.py) | 客户端工厂；两种协议的请求转换、完整/流式读取、正文片段和最终响应校验 |
+| [llm_client.py](llm_client.py) | 客户端工厂；本地消息标记剥离与 token 计量、两种协议的请求转换、完整/流式读取、正文片段和最终响应校验 |
 | [message_content.py](message_content.py) | `extract_text` 与 `has_tool_use`，统一读取消息块中的文本和工具请求 |
 
 根目录 [core.py](../core.py) 创建配置好的客户端，Lead、子 agent、目标评估和记忆请求使用它。

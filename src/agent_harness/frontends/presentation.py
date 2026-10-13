@@ -37,7 +37,7 @@ def message_count(snapshot=None, records=()):
     """One message count for the footer and the state panel."""
     history = (snapshot or {}).get("history")
     if history is not None:
-        return len(history)
+        return sum(1 for message in history if message.get("_runtime_context") is not True)
     return sum(1 for record in records if record.get("type") in {"user_message", "assistant_message"})
 
 

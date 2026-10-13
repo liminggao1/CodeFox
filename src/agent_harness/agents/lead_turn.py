@@ -12,11 +12,12 @@ from ..workspace import tasks
 
 
 class LeadTurn:
-    def __init__(self, history, checkpoint=None, on_usage=None):
+    def __init__(self, history, checkpoint=None, on_usage=None, prompt_state=None):
         # 本回合唯一的历史句柄：调用方不再持有同一列表的第二个名字。
         self.history = history
         self._checkpoint = checkpoint
         self._on_usage = on_usage
+        self.prompt_state = prompt_state
         self._model_call_id = None
         self._text_indices = {}
         # 暂存已取出、尚未确认交付的定时任务。
@@ -57,13 +58,17 @@ class LeadTurn:
                 {"type": "text", "text": note} for note in notes]})
 
     def after_compaction(self, compacted):
-        """自动压缩真正改写了历史才落盘；未应用的结果不产生额外保存。"""
+        """被动恢复真正改写了历史才重置快照并落盘；失败不改变提示词状态。"""
         if compacted.applied:
+            if self.prompt_state is not None:
+                self.prompt_state.reset()
             self.checkpoint()
 
     def after_manual_compaction(self, result):
         """手动压缩执行完成就落盘；本轮未触发手动压缩（None）时不动。"""
         if result is not None:
+            if result.applied and self.prompt_state is not None:
+                self.prompt_state.reset()
             self.checkpoint()
 
     def after_goal_evaluation(self, decision):

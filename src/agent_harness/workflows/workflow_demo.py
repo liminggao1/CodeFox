@@ -28,7 +28,10 @@ class DemoModelClient:
 
     def create(self, **kwargs):
         """Return a complete fake response; never make a network request."""
-        prompt = str(kwargs["messages"][-1]["content"])
+        # 运行通知可能追加在任务后；示例模型只解析实际的 Workflow 步骤请求。
+        prompt = next(message["content"] for message in reversed(kwargs["messages"])
+                      if message["role"] == "user" and isinstance(message["content"], str)
+                      and message["content"].startswith("Step label: "))
         marker = "Return only one JSON object matching this schema:\n"
         schema = json.loads(prompt.rsplit(marker, 1)[1]) if marker in prompt else None
         label = prompt.splitlines()[0].removeprefix("Step label: ")

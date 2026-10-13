@@ -23,7 +23,9 @@ class ChatMessages(FakeMessages):
     def create(self, **kwargs):
         """根据本轮输入生成脚本响应，并保留请求快照供断点查看。"""
         # 工具结果也是 user 消息；遇到结果时回答完成，不再重复请求工具。
-        content = kwargs["messages"][-1]["content"]
+        content = next(message["content"] for message in reversed(kwargs["messages"])
+                       if not (isinstance(message["content"], str) and message["content"].startswith(
+                           "<system-reminder>\nRuntime context update;")))
         if isinstance(content, list) and any(block.get("type") == "tool_result" for block in content):
             response = text_response("工具结果已收到，请查看上面的 write_file 返回内容。")
         elif content == "写文件":
