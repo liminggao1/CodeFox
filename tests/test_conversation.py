@@ -840,7 +840,8 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
             app.action_stop_turn()
             assert app.stopping and app.query_one("#send", Button).label == "停止"
             assert app.query_one("#send", Button).disabled
-            assert str(app.query_one("#input-status", Static).content) == "处理中"
+            assert str(app.query_one("#input-status", Static).content) == ""
+            assert not app.query_one("#input-status").display
             app.state_expanded = True
             app._controls()
             await pilot.pause()
@@ -848,8 +849,7 @@ def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
             assert str(app.query_one("#state-collapse", Button).label) == "收起"
             state = str(app.query_one(SessionStatePanel).query_one(".state-body", Static).content)
             assert "test-model" in state and "/tmp/project" in state and "feature" in state
-            # 输入区：状态行在输入框上方，主按钮在同一输入框内，底部是权限与模型摘要。
-            assert app.query_one("#input-status").region.y < app.query_one("#input").region.y
+            # 输入区：活动期间状态行隐藏，主按钮在同一输入框内，底部是权限与模型摘要。
             box = app.query_one("#input-box").region
             send = app.query_one("#send", Button).region
             assert box.y <= send.y and send.bottom <= box.bottom
@@ -1250,6 +1250,29 @@ def test_tui_command_result_notifies_without_conversation_row():
                 "data": {"text": "已删除会话 20261011-072015-6526e2ec"}}))
             await pilot.pause()
             assert not app.query(ConversationRecord)
+    asyncio.run(exercise())
+
+
+def test_tui_hides_active_input_status_but_keeps_terminal_notice():
+    from agent_harness.frontends.tui.app import HarnessApp
+    from textual.widgets import Static
+
+    app = HarnessApp(DisplayRuntime())
+
+    async def exercise():
+        async with app.run_test(size=(112, 34)) as pilot:
+            app.busy = True
+            app._status("处理中")
+            await pilot.pause()
+            assert not app.query_one("#input-status").display
+            assert app.query_one(".activity", Static)
+
+            await app._event(event("turn_finished", {"outcome": {"status": "completed"}}))
+            await pilot.pause()
+            status = app.query_one("#input-status", Static)
+            assert status.display and str(status.content) == "完成"
+            assert not app.query(".activity")
+
     asyncio.run(exercise())
 
 

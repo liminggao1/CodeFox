@@ -348,13 +348,11 @@ class HarnessApp(App):
         self.conversation.show_activity(label)
 
     def _input_status(self):
-        """Input-area status line: runtime state first, then the last notice."""
-        if self.busy:
-            label = "处理中"
-        else:
-            label = self._notice or ""
+        """Input-area status line keeps terminal outcomes; active work stays in chat."""
+        label = "" if self.busy else (self._notice or "")
         status = self.query_one("#input-status", Static)
         status.update(label)
+        status.display = bool(label)
         for name, text in (("processing", "处理中"), ("completed", "完成"),
                            ("failed", "失败"), ("stopped", "已停止")):
             status.set_class(label == text, name)
