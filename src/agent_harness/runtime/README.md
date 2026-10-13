@@ -18,7 +18,8 @@
 | [permissions.py](permissions.py) | 统一默认权限规则、有限 Bash 分类、文件目标解析和用户权限模式的原子保存；行为见仓库事实第 9 节 |
 | [tool_execution.py](tool_execution.py) | Lead/child/后台共用的 handler 执行、异常转明确失败、生命周期与 PostHook 结算；真实结果和 Hook 错误分别返回 |
 
-前端调用 `InteractiveRuntime`，后者调用根目录 [host.agent_loop](../host.py)。
+前端调用 `InteractiveRuntime`，后者经 `TurnRunner` 调用根目录 [host.agent_loop](../host.py)；该兼容入口装配
+`agents/turn_engine.py` 的 `TurnEngine`，不再在 `host.py` 内保存主循环实现。
 `start()` 在线程启动前调用 `host.initialize_runtime()`。配置失败可重试，不启动执行线程；重复配置保留已有 goal、runner 与注册器配置。导入模块和构造驱动不执行应用装配。
 执行代码通过 `interaction` 发布事件和请求审批，前端通过同一通道消费和确认。
 驱动提供只读事实的纯展示转换，通道在接受事实时按顺序交付展示记录，并将同 ID 的副本加入保存队列。

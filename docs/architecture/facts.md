@@ -238,7 +238,8 @@
   嵌套点统一经它进入；提供 `has_pending_inbox()` 与 `active_names()` 只读 interface。
 - 回合由 `agents/lead_turn.py` 的 `LeadTurn` 唯一拥有：会话历史、展示发布、checkpoint、`model_call_id`、
   cron 待交付；interface 含 `history` 与 `inject_background_notes` / `after_compaction` /
-  `after_manual_compaction` / `after_goal_evaluation`。`host.agent_loop(history, ...)` 退化为顺序调用与循环控制。
+  `after_manual_compaction` / `after_goal_evaluation`。`agents/turn_engine.py` 的 `TurnEngine` 拥有一轮
+  模型-工具循环的顺序、`TurnPhase` 生命周期和终态；`host.agent_loop(history, ...)` 仅装配回调并保持兼容入口。
 - 工具结果契约在 `tools/tool_result.py`：`ToolResult` 携带不可变正文与状态
   （`returned`/`success`/`failed`/`denied`/`stopped`/`started`），状态不靠正文猜测。
 - `frontends/conversation.py` 的 `ConversationProjection` 是共用展示投影：记录去重、工具关联、正文确认与作废；
