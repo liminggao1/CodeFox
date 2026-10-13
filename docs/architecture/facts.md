@@ -239,7 +239,7 @@
 - 回合由 `agents/lead_turn.py` 的 `LeadTurn` 唯一拥有：会话历史、展示发布、checkpoint、`model_call_id`、
   cron 待交付；interface 含 `history` 与 `inject_background_notes` / `after_compaction` /
   `after_manual_compaction` / `after_goal_evaluation`。`agents/turn_engine.py` 的 `TurnEngine` 拥有一轮
-  模型-工具循环的顺序、`TurnPhase` 生命周期和终态；`host.agent_loop(history, ...)` 仅装配回调并保持兼容入口。
+  模型-工具循环的顺序、`TurnPhase` 生命周期和终态；每次上下文准备生成脱离可变会话历史的 API 请求快照，重试复用该快照，压缩或工具结果更新历史后重新准备；`host.agent_loop(history, ...)` 仅装配回调并保持兼容入口。
 - 工具结果契约在 `tools/tool_result.py`：`ToolResult` 携带不可变正文与状态
   （`returned`/`success`/`failed`/`denied`/`stopped`/`started`），状态不靠正文猜测。
 - `frontends/conversation.py` 的 `ConversationProjection` 是共用展示投影：记录去重、工具关联、正文确认与作废；

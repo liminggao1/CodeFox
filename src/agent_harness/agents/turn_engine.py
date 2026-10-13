@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
@@ -15,7 +16,7 @@ from .. import core
 from ..context import compaction, prompts
 from ..context.prompt_state import PromptState
 from ..providers import message_content
-from ..providers.llm_client import StreamStopped
+from ..providers.llm_client import StreamStopped, model_messages
 from ..runtime import hooks, interaction
 from . import recovery
 from .lead_tools import execute_tool_batch
@@ -48,12 +49,25 @@ class TurnRequest:
 
 
 @dataclass(frozen=True)
+class PreparedRequest:
+    """API request content detached from the mutable session history."""
+
+    system: str
+    messages: list[dict]
+    tools: list[dict]
+
+    @classmethod
+    def create(cls, system: str, history: list, tools: list[dict]):
+        return cls(system, copy.deepcopy(model_messages(history)), copy.deepcopy(tools))
+
+
+@dataclass(frozen=True)
 class TurnCallbacks:
     """由 host 持有的适配回调，执行机不直接导入 ``host``。"""
 
     assemble_tool_pool: Callable[[], tuple[list[dict], dict]]
     build_context: Callable[[list], object]
-    call_llm: Callable[[list, str, list, recovery.RecoveryState], tuple]
+    call_llm: Callable[[PreparedRequest, recovery.RecoveryState], tuple]
     build_user_content: Callable[[list[dict]], list[dict]]
     evaluate_goal: Callable[[list], object | None]
     remember_after_turn: Callable[[list], None]
@@ -91,7 +105,8 @@ class TurnEngine:
         manual_compaction = compaction.ManualCompaction()
         # 开启自动上下文压缩开关，当上下文过长时自动压缩对话历史
         automatic_compaction_enabled = True
-        retry_request = None
+        prepared_request: PreparedRequest | None = None
+        handlers = {}
         active_request = request.active_request
 
         # -- 准备上下文并请求完整模型响应 --
@@ -105,7 +120,7 @@ class TurnEngine:
             # 标记模型调用已经开始，用于异常捕获、重试逻辑判断
             model_call_started = False
             try:
-                if retry_request is None:
+                if prepared_request is None:
                     active_request = turn.inject_scheduled(active_request)
                     # 将已完成的后台任务通知加入对话历史。
                     turn.inject_background_notes()
@@ -124,6 +139,7 @@ class TurnEngine:
                         model=state.current_model,
                         tools=tools,
                     )
+                    prepared_request = PreparedRequest.create(system, turn.history, tools)
                     # 快照、通知和压缩后的历史在同一检查点保存，重试不重复追加。
                     if compacted.applied or prompt_state.snapshot() != previous_prompt:
                         turn.checkpoint()
@@ -132,9 +148,7 @@ class TurnEngine:
                         core.terminal_print(
                             f"[compact error] Automatic compaction disabled for this turn: {compacted.reason}"
                         )
-                else:
-                    # 输出截断升级与网络重试都复用同一请求，不重新检索记忆或追加状态。
-                    system, tools, handlers = retry_request
+                # 重试复用同一份 API 请求内容，不重新读取可变历史。
 
                 if interaction.stopped():
                     return self._finish(turn, "stopped")
@@ -143,9 +157,7 @@ class TurnEngine:
                 model_call_started = True
                 # 重试策略和模型降级由 call_llm 内部处理。
                 turn.begin_model_call()
-                response, call_id, operation_id = self.callbacks.call_llm(
-                    turn.history, system, tools, state
-                )
+                response, call_id, operation_id = self.callbacks.call_llm(prepared_request, state)
             # 准备阶段或模型调用失败时，归还尚未确认的定时任务。
             except Exception as exc:
                 if isinstance(exc, StreamStopped):
@@ -162,7 +174,7 @@ class TurnEngine:
                     compacted = compaction.reactive_compact(turn.history, active_request)
                     turn.after_compaction(compacted)
                     if compacted.reason is None:
-                        retry_request = None
+                        prepared_request = None
                         continue
                     exc = RuntimeError(f"Reactive compaction failed: {compacted.reason}")
                 # 结束本轮交互，不继续执行工具。
@@ -183,10 +195,9 @@ class TurnEngine:
 
             if action == "retry":
                 core.terminal_print(f"  \033[33m[max_tokens] retry with {state.max_tokens}\033[0m")
-                retry_request = system, tools, handlers
                 continue
 
-            retry_request = None
+            prepared_request = None
             if action in {"continue", "stop"}:
                 # 输出额度升级的请求返回后，才保留可续写的部分文本。
                 turn.append({"role": "assistant", "content": response.content})

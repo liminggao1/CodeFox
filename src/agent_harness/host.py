@@ -22,7 +22,7 @@ from .workspace import worktrees
 from .workspace import task_worktrees
 from .context import skills
 from .tools import file_tools
-from .providers.llm_client import StreamStopped, stream_message, model_messages
+from .providers.llm_client import StreamStopped, stream_message
 from .agents import subagent
 from .agents import recovery
 from .runtime import scheduler
@@ -33,7 +33,7 @@ from .context import memory_runtime
 from . import runtime_context
 from .agents import goal as goal_module
 from .agents.goal_evaluator import PromptGoalEvaluator
-from .agents.turn_engine import TurnCallbacks, TurnEngine, TurnRequest
+from .agents.turn_engine import PreparedRequest, TurnCallbacks, TurnEngine, TurnRequest
 from .workflows import workflow_runtime
 from .workflows import workflow_demo
 from .runtime import interaction, permissions
@@ -138,14 +138,11 @@ def build_user_content(results: list[dict]) -> list[dict]:
     return content
 
 
-def call_llm(messages: list, system: str, tools: list,
-             state: recovery.RecoveryState):
+def call_llm(prepared_request: PreparedRequest, state: recovery.RecoveryState):
     """调用模型并返回响应。
 
     Args:
-        messages: 当前对话历史。
-        system: 已完成快照与计量的固定系统提示词，不在发送前重新组装。
-        tools: 本轮可用的工具描述列表。
+        prepared_request: 已完成上下文准备和计量的 API 请求快照。
         state: 本轮模型重试和恢复状态。
 
     Returns:
@@ -166,9 +163,9 @@ def call_llm(messages: list, system: str, tools: list,
                                     block_index=index, sequence=sequence, delta=text)
         kwargs = dict(
             model=state.current_model,
-            system=system,
-            messages=model_messages(messages),
-            tools=tools,
+            system=prepared_request.system,
+            messages=prepared_request.messages,
+            tools=prepared_request.tools,
             max_tokens=state.max_tokens)
         try:
             response = (stream_message(core.client, on_text=on_text, stopped=interaction.stopped, **kwargs)
