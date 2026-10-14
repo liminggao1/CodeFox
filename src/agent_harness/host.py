@@ -32,7 +32,7 @@ from .tools import tool_registry
 from .context import memory_runtime
 from . import runtime_context
 from .agents import goal as goal_module
-from .agents.goal_evaluator import PromptGoalEvaluator
+from .agents.goal_evaluator import JevGoalEvaluator, PromptGoalEvaluator
 from .agents.turn_engine import PreparedRequest, TurnCallbacks, TurnEngine, TurnRequest
 from .workflows import workflow_runtime
 from .workflows import workflow_demo
@@ -53,11 +53,27 @@ _initialization_lock = threading.Lock()
 def _create_goal(evaluator_model: str | None = None):
     """Prepare a controller without publishing application state or requesting a model."""
     import os
-    model = (evaluator_model
-             or os.getenv("GOAL_EVALUATOR_MODEL_ID")
-             or os.getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL")
-             or core.MODEL)
-    evaluator = PromptGoalEvaluator(client=core.client, model=model)
+    provider = os.getenv("GOAL_EVALUATOR_PROVIDER", "prompt").strip().lower()
+    if provider not in {"auto", "prompt", "jev"}:
+        raise ValueError(
+            "GOAL_EVALUATOR_PROVIDER must be one of: auto, prompt, jev"
+        )
+    jev_key = os.getenv("JEV_API_KEY", "").strip()
+    use_jev = provider == "jev" or (provider == "auto" and bool(jev_key))
+    if use_jev:
+        timeout = float(os.getenv("JEV_TIMEOUT_SECONDS", "30"))
+        evaluator = JevGoalEvaluator(
+            api_key=jev_key,
+            model=(evaluator_model or os.getenv("JEV_MODEL")),
+            endpoint=os.getenv("JEV_API_URL"),
+            timeout=timeout,
+        )
+    else:
+        model = (evaluator_model
+                 or os.getenv("GOAL_EVALUATOR_MODEL_ID")
+                 or os.getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                 or core.MODEL)
+        evaluator = PromptGoalEvaluator(client=core.client, model=model)
     block_cap = int(os.getenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",
                               str(goal_module.DEFAULT_STOP_HOOK_BLOCK_CAP)))
     return goal_module.GoalController(evaluator=evaluator, block_cap=block_cap)

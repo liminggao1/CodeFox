@@ -10,6 +10,7 @@ import agent_harness.core as core
 
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -215,6 +216,124 @@ def test_prompt_evaluator_uses_a_tool_free_json_response():
     assert "no tools" in calls[0]["system"].lower()
 
 
+@pytest.mark.parametrize(
+    ("choice", "ok", "impossible"),
+    [("complete", True, False), ("incomplete", False, False),
+     ("impossible", False, True)],
+)
+def test_jev_evaluator_maps_typed_choice_to_goal_evaluation(
+    choice, ok, impossible
+):
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "code": 0,
+                "message": "ok",
+                "data": {"result": {"answers": {
+                    "completion": {
+                        "type": "choice", "choice": choice,
+                        "probabilities": {
+                            "complete": 0.95 if choice == "complete" else 0.02,
+                            "incomplete": 0.03 if choice == "complete" else 0.95,
+                            "impossible": 0.02 if choice == "complete" else 0.03,
+                        },
+                        "confidence": 0.95
+                    }
+                }}},
+            }).encode("utf-8")
+
+    def opener(request, timeout):
+        calls.append((request, timeout))
+        return Response()
+
+    evaluator = evaluator_module.JevGoalEvaluator(
+        api_key="test-key",
+        model="typesafe/jev-1.13",
+        endpoint="https://jev.test/v1/systemone",
+        opener=opener,
+    )
+    result = asyncio.run(evaluator.evaluate("tests pass", [
+        {"role": "user", "content": "run pytest"},
+    ]))
+
+    assert (result.ok, result.impossible) == (ok, impossible)
+    assert result.confidence == 0.95
+    assert result.reason
+    request, timeout = calls[0]
+    assert timeout == 30
+    assert request.get_header("Authorization") == "Bearer test-key"
+    body = json.loads(request.data.decode("utf-8"))
+    assert body["model"] == "typesafe/jev-1.13"
+    assert body["state"]["completion_condition"] == "tests pass"
+    assert body["questions"]["completion"]["type"] == "choice"
+
+
+def test_jev_completion_below_confidence_threshold_is_not_accepted():
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "data": {"result": {"answers": {
+                    "completion": {
+                        "type": "choice", "choice": "complete",
+                        "probabilities": {
+                            "complete": 0.95,
+                            "incomplete": 0.04,
+                            "impossible": 0.01,
+                        },
+                        "confidence": 0.9
+                    }
+                }}},
+            }).encode("utf-8")
+
+    evaluator = evaluator_module.JevGoalEvaluator(
+        api_key="test-key",
+        completion_confidence_threshold=0.9,
+        opener=lambda request, timeout: Response(),
+    )
+    result = asyncio.run(evaluator.evaluate("tests pass", []))
+
+    assert result.ok is False
+    assert result.impossible is False
+    assert result.confidence == 0.9
+    assert "confidence" in result.reason
+
+
+def test_goal_event_records_evaluator_confidence():
+    gc = goal_module.GoalController(ScriptedEvaluator([
+        goal_module.GoalEvaluation(True, "verified", confidence=0.97),
+    ]))
+    gc.set_goal("tests pass")
+
+    decision = asyncio.run(gc.evaluate_after_turn([]))
+
+    assert decision.action == "achieved"
+    assert gc.last_status["confidence"] == 0.97
+
+
+def test_host_can_select_jev_goal_evaluator_from_configuration(host_factory, monkeypatch):
+    host = host_factory()
+    monkeypatch.setenv("GOAL_EVALUATOR_PROVIDER", "jev")
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    goal = host._create_goal()
+
+    assert isinstance(goal.evaluator, evaluator_module.JevGoalEvaluator)
+
+
 def test_transcript_keeps_recent_messages_whole():
     messages = [{"role": "user", "content": f"turn {i} " + "x" * 50}
                 for i in range(10)]
@@ -229,6 +348,15 @@ def test_transcript_trims_the_middle_of_one_oversized_message():
     assert "START" in text
     assert "END" in text
     assert "middle omitted" in text
+
+
+def test_transcript_uses_configured_default_limit(monkeypatch):
+    monkeypatch.setenv("GOAL_EVALUATOR_MAX_TRANSCRIPT_CHARACTERS", "120")
+    messages = [{"role": "user", "content": "x" * 500}]
+
+    text = evaluator_module.transcript_text(messages)
+
+    assert len(text) <= 120
 
 
 # -- Host 主循环集成测试 --

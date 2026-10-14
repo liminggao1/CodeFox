@@ -71,6 +71,12 @@ cp .env.example .env
 | `MODEL_ID` | 是 | 模型 ID |
 | `ANTHROPIC_BASE_URL` | 否 | 兼容端点时填写 |
 | `LLM_API` | 否 | 设 `responses` 走 OpenAI Responses 协议 |
+| `GOAL_EVALUATOR_PROVIDER` | 否 | 设 `jev` 使用 Jev；默认使用 Prompt evaluator |
+| `JEV_API_KEY` | 使用 Jev 时必填 | Jev API key |
+| `JEV_MODEL` | 否 | 默认 `typesafe/jev-1.13` |
+| `JEV_API_URL` | 否 | 默认 `https://thejevai.com/v1/systemone` |
+| `JEV_COMPLETION_CONFIDENCE_THRESHOLD` | 否 | 默认 `0.9`；只有 `choice=complete` 且整体 `confidence` 高于该值才结束目标 |
+| `GOAL_EVALUATOR_MAX_TRANSCRIPT_CHARACTERS` | 否 | 送入目标评估器的对话字符上限，默认 `24000`；这是字符数，不是 token 数 |
 
 `.env` 已在 `.gitignore` 中，不会入库。
 

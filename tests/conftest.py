@@ -36,6 +36,9 @@ def pytest_ignore_collect(collection_path, config):
 os.environ.setdefault("MODEL_ID", "test-model")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("LLM_API", "responses")
+# Offline tests must never consume a real Jev credit, even when the developer's
+# local .env selects Jev for interactive runs.
+os.environ["GOAL_EVALUATOR_PROVIDER"] = "prompt"
 
 
 def _reload_host() -> None:

@@ -40,6 +40,7 @@ class GoalEvaluation:
     ok: bool
     reason: str
     impossible: bool = False
+    confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +209,7 @@ class GoalController:
                 met=True,
                 failed=False,
                 reason=evaluation.reason,
+                confidence=evaluation.confidence,
             )
             # 清除活动目标，避免下一轮重复评估同一个目标。
             self.active = None
@@ -224,6 +226,7 @@ class GoalController:
                 met=False,
                 failed=True,
                 reason=evaluation.reason,
+                confidence=evaluation.confidence,
             )
             # 清除已经失败的活动目标。
             self.active = None
@@ -240,6 +243,7 @@ class GoalController:
             met=False,
             failed=False,
             reason=evaluation.reason,
+            confidence=evaluation.confidence,
         )
         # 连续阻止超过上限后，不再无限循环等待模型补充证据。
         if self.consecutive_blocks > self.block_cap:
@@ -261,6 +265,7 @@ class GoalController:
         met: bool,
         failed: bool,
         reason: str,
+        confidence: float | None = None,
     ) -> None:
         state = self.active
         event = {
@@ -275,6 +280,8 @@ class GoalController:
                 max(0, time.time() - state.set_at) if state else 0
             ),
         }
+        if confidence is not None:
+            event["confidence"] = confidence
         self.events.append(event)
         self.last_status = event
 
