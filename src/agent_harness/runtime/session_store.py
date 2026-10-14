@@ -342,7 +342,8 @@ class InteractiveSession:
                     terminal_operations.add((record["turn_id"], record["source"],
                                              payload.get("model_call_id"), payload.get("operation_id")))
                 elif record["type"] == "subagent_status" and payload.get("status") in {
-                        "completed", "failed", "stopped", "denied", "idle", "closed"}:
+                        "completed", "failed", "stopped", "denied", "idle", "closed",
+                        "budget_exhausted", "network_error"}:
                     terminal_tasks.add((record["turn_id"], record["source"],
                                         payload.get("name"), payload.get("task_id")))
                 elif record["type"] == "background_status" and payload.get("status") in {

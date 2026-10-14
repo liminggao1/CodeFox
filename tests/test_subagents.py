@@ -34,7 +34,8 @@ def spawn_paused(host, monkeypatch, name="alice", **kwargs):
     """Create through the production entry, holding the worker at startup."""
     monkeypatch.setattr(subagent_runtime.threading, "Thread",
                         lambda **kwargs: SimpleNamespace(start=lambda: None))
-    result = subagent_runtime.spawn_subagent(name, "Investigate", "persistent", **kwargs)
+    result = subagent_runtime.spawn_subagent(name, "Investigate", "persistent",
+                                             description="Investigate", **kwargs)
     assert result["status"] == "started", result
     return subagent_runtime.create_subagent_session(name)
 
@@ -295,7 +296,8 @@ def test_reserved_subagent_names_do_not_shadow_runtime_identities(
     host = host_factory()
 
     for name in ("lead", "agent", "Lead", "Agent"):
-        rejected = subagent_runtime.spawn_subagent(name, "Inspect auth.", "persistent", role="backend")["text"]
+        rejected = subagent_runtime.spawn_subagent(name, "Inspect auth.", "persistent",
+                                                   role="backend", description="Inspect auth")["text"]
         assert "reserved" in rejected.lower()
         assert name not in subagent_runtime._active_subagents
 
@@ -303,7 +305,8 @@ def test_reserved_subagent_names_do_not_shadow_runtime_identities(
     assert subagent_runtime._BUS.read_inbox("lead")[0]["content"] == "still routable"
 
     subagent_runtime._active_subagents["Alice"] = subagent_runtime.SubagentRecord("Alice", status="idle")
-    duplicate = subagent_runtime.spawn_subagent("alice", "Inspect auth.", "persistent", role="backend")["text"]
+    duplicate = subagent_runtime.spawn_subagent("alice", "Inspect auth.", "persistent",
+                                                role="backend", description="Inspect auth")["text"]
     assert "already exists" in duplicate
 
 
@@ -686,9 +689,10 @@ def test_invalid_tools_do_not_claim_or_request(host_factory, tools):
     task = tasks.create_task("Untouched task")
     client = S(messages=S(create=lambda **kw: pytest.fail("must not request")))
     result = subagent_runtime.spawn_subagent("child", "Inspect", "once",
-                                         tools=tools, client=client)
+                                         description="Inspect", tools=tools, client=client)
     assert result["status"] == "failed"
-    assert result["usage"] == {"tokens": 0, "model_calls": 0}
+    assert result["usage"] == {"tokens": 0, "model_calls": 0,
+                               "input_tokens": 0, "output_tokens": 0}
     assert not subagent_runtime._active_subagents and not tasks.assignments
     assert tasks.load_task(task.id).status == "pending"
 
@@ -705,12 +709,173 @@ def test_injected_client_tools_and_usage_cover_multiple_rounds(host_factory, no_
         return next(responses)
     client = S(messages=S(create=create))
     result = subagent_runtime.spawn_subagent("child", "Write", "once", tools=["write_file"],
-                                         client=client, model="injected", max_tokens=123)
+                                         description="Write", client=client, model="injected", max_tokens=123)
     assert result["status"] == "completed"
-    assert result["usage"] == {"tokens": 18, "model_calls": 2}
+    assert result["usage"] == {"tokens": 18, "model_calls": 2,
+                               "input_tokens": 14, "output_tokens": 4}
     assert all(r["model"] == "injected" and r["max_tokens"] == 123 for r in requests)
     assert [t["name"] for t in requests[0]["tools"]] == ["write_file"]
+    assert "Available child tools:" in requests[0]["system"]
+    assert "write_file" in requests[0]["system"]
+    assert "bash" not in requests[0]["system"]
+    assert result["agent_id"]
+    assert result["description"] == "Write"
     assert (core.WORKDIR / "result.txt").read_text() == "result"
+    assert not subagent_runtime._active_subagents
+
+
+def test_spawn_schema_requires_description_and_output_query_returns_result(host_factory):
+    host = host_factory()
+    tools = {tool["name"]: tool for tool in registrations.BUILTIN_TOOLS}
+    assert "description" in tools["spawn_subagent"]["input_schema"]["required"]
+    assert "get_subagent_output" in tools
+
+    client = S(messages=S(create=lambda **kwargs: optioned_reply("Done")))
+    result = subagent_runtime.spawn_subagent(
+        "query-child", "Inspect", "once", description="Inspect source", client=client)
+    queried = subagent_runtime.get_subagent_output(result["agent_id"], block=False)
+
+    assert queried["agent_id"] == result["agent_id"]
+    assert queried["name"] == "query-child"
+    assert queried["description"] == "Inspect source"
+    assert queried["status"] == "completed"
+    assert queried["text"] == "Done"
+    assert queried["rounds"] == 1
+    assert queried["tool_calls"] == 0
+    assert result == queried
+    assert queried["usage"]["input_tokens"] == 5
+    assert queried["usage"]["output_tokens"] == 2
+
+
+def test_missing_description_does_not_start_a_child(host_factory, monkeypatch):
+    from agent_harness.runtime import tool_execution
+    host_factory()
+    monkeypatch.setattr(core, "client", S(messages=S(
+        create=lambda **kwargs: pytest.fail("must not request a model"))))
+    result = tool_execution.call_tool_handler(
+        registrations.run_spawn_subagent,
+        {"name": "missing-label", "prompt": "Inspect", "mode": "once"},
+        "spawn_subagent",
+    )
+
+    assert result.status == "failed"
+    assert "description" in result.content
+    assert not subagent_runtime._active_subagents
+
+
+@pytest.mark.parametrize("mode", ["once", "persistent"])
+def test_read_only_prompt_matches_the_exact_whitelist(host_factory, mode):
+    host_factory()
+    session = subagent_runtime.create_subagent_session(
+        "reader", mode=mode, tools=["read_file"], task_tools=False)
+    assert {item["name"] for item in session.tools} == {"read_file"}
+    assert set(session.handlers) == {"read_file"}
+    assert "offset" in session.system and "limit" in session.system
+    for unavailable in ("bash", "glob", "rg", "claim_task", "complete_task",
+                        "send_message", "submit_plan"):
+        assert unavailable not in session.system
+
+
+@pytest.mark.parametrize("field,value", [
+    ("description", ""), ("description", None), ("description", 1),
+    ("max_rounds", 0), ("max_rounds", True), ("max_rounds", 1.5),
+    ("max_tool_calls", -1), ("max_tool_calls", False), ("max_tool_calls", "2"),
+])
+def test_creation_validates_labels_and_positive_budgets(host_factory, field, value):
+    host_factory()
+    arguments = dict(name="invalid", prompt="Inspect", mode="once", description="Inspect source",
+                     client=S(messages=S(create=lambda **kwargs: pytest.fail("must not request"))))
+    arguments[field] = value
+    result = subagent_runtime.spawn_subagent(**arguments)
+    assert result["status"] == "failed" and result["agent_id"] is None
+    assert not subagent_runtime._active_subagents and not tasks.assignments
+
+
+def test_child_progress_reports_live_counts_and_terminal_usage(host_factory, monkeypatch, no_approval):
+    host_factory()
+    events = []
+    monkeypatch.setattr(subagent_runtime.interaction, "publish",
+                        lambda kind, **payload: events.append((kind, payload)))
+    replies = iter([optioned_reply("Read findings", block=S(
+        type="tool_use", id="read", name="read_file", input={"path": "missing.txt"})),
+        optioned_reply("Audit complete")])
+    requests = []
+    def create(**kwargs):
+        requests.append(kwargs)
+        assert subagent_runtime.list_subagents()[0]["rounds"] == len(requests)
+        return next(replies)
+    result = subagent_runtime.spawn_subagent(
+        "progress-child", "Inspect", "once", description="Inspect source",
+        tools=["read_file"], client=S(messages=S(create=create)))
+    statuses = [payload for kind, payload in events if kind == "subagent_status"]
+    assert all(item["agent_id"] == result["agent_id"] and item["description"] == "Inspect source"
+               for item in statuses)
+    assert statuses[-1]["status"] == "completed"
+    assert statuses[-1]["rounds"] == 2 and statuses[-1]["tool_calls"] == 1
+    assert statuses[-1]["usage"] == result["usage"]
+    assert statuses[-1]["reason"] == "Completed"
+    assert "messages" not in result and "history" not in result
+    assert all("text" not in item for item in statuses)
+    for unavailable in ("bash", "glob", "rg", "claim_task", "complete_task",
+                        "send_message", "submit_plan"):
+        assert unavailable not in requests[0]["system"]
+
+
+def test_plan_and_shutdown_protocols_accept_stable_agent_ids(host_factory, monkeypatch):
+    host = host_factory()
+    spawn_paused(host, monkeypatch)
+    record = subagent_runtime._active_subagents["alice"]
+    assert subagent_runtime.run_request_plan(record.agent_id, "Read first").status == "success"
+    subagent_runtime._BUS.read_inbox("alice")
+    plan_id = request_id(subagent_runtime.submit_plan(record.agent_id, "Read and report"))
+    assert subagent_runtime.run_review_plan(plan_id, True).status == "success"
+    reply = subagent_runtime._BUS.read_inbox("alice")[-1]
+    assert subagent_runtime.apply_plan_response(record.agent_id, reply)[0]
+    assert subagent_runtime.run_request_shutdown(record.agent_id).status == "success"
+    request = subagent_runtime._BUS.read_inbox("alice")[-1]
+    assert subagent_runtime.apply_shutdown_request(record.agent_id, request)[0]
+
+
+@pytest.mark.parametrize("budget", ["model", "tools"])
+def test_once_default_budgets_preserve_partial_results_and_counts(
+    host_factory, no_approval, monkeypatch, budget,
+):
+    host_factory()
+    requests = []
+    histories = []
+    executed = []
+    (core.WORKDIR / "evidence.txt").write_text("evidence", encoding="utf-8")
+    monkeypatch.setitem(hooks.HOOKS, "PostToolUse", [
+        lambda block, output: executed.append(block.id)])
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        histories.append(subagent_runtime._active_subagents["bounded"].messages)
+        count = 43 if budget == "tools" else 1
+        return S(stop_reason="tool_use", usage=S(input_tokens=10, output_tokens=3),
+                 content=[S(type="text", text="Partial audit finding"), *[
+                     S(type="tool_use", id=f"read-{len(requests)}-{index}",
+                       name="read_file", input={"path": "evidence.txt"})
+                     for index in range(count)]])
+
+    result = subagent_runtime.spawn_subagent(
+        "bounded", "Inspect evidence", "once", description="Inspect source evidence",
+        tools=["read_file"], client=S(messages=S(create=create)))
+
+    assert result["status"] == "budget_exhausted"
+    assert result["text"] == "Partial audit finding"
+    assert result["rounds"] == (1 if budget == "tools" else 12)
+    assert result["tool_calls"] == (40 if budget == "tools" else 12)
+    assert len(requests) == result["rounds"]
+    assert len(executed) == result["tool_calls"]
+    assert result["usage"]["input_tokens"] == 10 * len(requests)
+    assert result["usage"]["output_tokens"] == 3 * len(requests)
+    assert subagent_runtime.get_subagent_output(result["agent_id"], block=False) == result
+    if budget == "tools":
+        paired = histories[-1][-1]["content"]
+        assert len(paired) == 43
+        assert all(item.get("is_error") for item in paired[40:])
+        assert all("Stopped" in item["content"] for item in paired[40:])
     assert not subagent_runtime._active_subagents
 
 
@@ -724,11 +889,13 @@ def test_empty_tools_never_execute_hallucinated_call(host_factory, stop):
         calls.append(kw)
         return optioned_reply(block=block, stop=stop) if len(calls) == 1 else optioned_reply()
     result = subagent_runtime.spawn_subagent("child", "Read text", "once", tools=[],
-                                         client=S(messages=S(create=create)))
+                                         description="Read text", client=S(messages=S(create=create)))
     assert not calls[0].get("tools")
     assert not (core.WORKDIR / "forbidden.txt").exists()
     assert result["usage"] == {"tokens": 7 if stop == "max_tokens" else 14,
-                               "model_calls": 1 if stop == "max_tokens" else 2}
+                               "model_calls": 1 if stop == "max_tokens" else 2,
+                               "input_tokens": 5 if stop == "max_tokens" else 10,
+                               "output_tokens": 2 if stop == "max_tokens" else 4}
     assert result["status"] == ("failed" if stop == "max_tokens" else "completed")
 
 
@@ -743,10 +910,12 @@ def test_usage_includes_summary_and_failed_request(host_factory, monkeypatch):
             return optioned_reply("summary", tokens=9)
         raise RuntimeError("execution unavailable")
     result = subagent_runtime.spawn_subagent("child", "Long instruction " * 20, "once",
+                                         description="Inspect long input",
                                          client=S(messages=S(create=create)), model="injected",
                                          max_tokens=123)
     assert result["status"] == "failed"
-    assert result["usage"] == {"tokens": 9, "model_calls": 2}
+    assert result["usage"] == {"tokens": 9, "model_calls": 2,
+                               "input_tokens": 7, "output_tokens": 2}
     assert requests[0]["max_tokens"] == core.COMPACTION_MAX_TOKENS
     assert all(r["model"] == "injected" for r in requests)
     assert not subagent_runtime._active_subagents

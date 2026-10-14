@@ -1142,6 +1142,38 @@ def test_tools_are_part_of_the_cache_identity(host_factory, monkeypatch):
     assert len(calls) == 2 and "tools" not in calls[1]
 
 
+def test_workflow_runner_reports_child_validation_failure(host_factory):
+    host_factory()
+    client = S(messages=S(create=lambda **kwargs: pytest.fail("invalid tools must not request a model")))
+    runner = workflow_runtime.SubagentRunner(client, "test")
+    with pytest.raises(workflow_runtime.WorkflowStepError, match="Tools unavailable in this mode") as caught:
+        runner.run("Inspect", tools=["unavailable-tool"])
+    assert caught.value.tokens == 0
+    assert not subagent_runtime.active_names()
+
+
+def test_workflow_preserves_budget_exhaustion_reason_and_partial_usage(host_factory, monkeypatch):
+    host = host_factory()
+    monkeypatch.setattr(core, "SUBAGENT_MAX_ROUNDS", 1)
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs)
+        return S(stop_reason="tool_use", usage=S(input_tokens=7, output_tokens=2),
+                 content=[S(type="text", text="Partial evidence"), S(
+                     type="tool_use", id="discover", name="glob", input={"pattern": "*"})])
+    wf = install(host, monkeypatch, create)
+    async def step(ctx, args):
+        return await ctx.agent("Inspect source", tools=["glob"])
+    out = asyncio.run(wf.WorkflowTool().call({"name": "bounded-child", "description": "test"}, step))
+    assert out["task"].status == "failed"
+    assert "model-call budget exhausted (1)" in str(out["result"])
+    assert "Partial evidence" not in str(out["result"])
+    assert out["task"].usage == {"agents": 1, "tokens": 9}
+    assert len(calls) == 1 and not subagent_runtime.active_names()
+    journal = wf.store_dir() / f"{out['task'].run_id}.journal.jsonl"
+    assert journal.read_text() == ""
+
+
 def test_parallel_format_retries_respect_concurrency_and_unique_names(host_factory, monkeypatch):
     host = host_factory()
     barrier = threading.Barrier(2)

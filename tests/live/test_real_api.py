@@ -214,6 +214,7 @@ def test_streaming_once_subagent_round_trip(live_runtime):
     _, finished, events, _ = run_submission(
         runtime,
         "请调用 spawn_subagent 创建一个一次性子 agent：name 用 live_helper，"
+        "description 写‘Reply child live’，"
         "prompt 写‘只回复 child live ok’，mode 设为 once，role 设为 coder，"
         "tools 设为空数组。等待子 agent 完成后，简短报告结果。")
 
@@ -224,6 +225,61 @@ def test_streaming_once_subagent_round_trip(live_runtime):
                and record["payload"].get("name") == "spawn_subagent"
                for record in records)
     assert any(event.type == "subagent_status" for event in events)
+
+
+def test_streaming_bounded_read_only_subagent_audit(live_runtime):
+    """Audit real source ranges with a discover/read whitelist and bounded work."""
+    import json
+    from pathlib import Path
+    from agent_harness.agents import subagent
+
+    runtime, store = live_runtime
+    source = (Path(__file__).resolve().parents[2] / "src" / "agent_harness" /
+              "agents" / "subagent.py").read_text(encoding="utf-8")
+    target = store.workdir / "src" / "agent_harness" / "agents" / "subagent.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+    lines = source.splitlines()
+    start = next(index for index, line in enumerate(lines)
+                 if line.startswith("def spawn_subagent("))
+    branch = next(index for index in range(start, len(lines))
+                  if lines[index].strip() == 'if mode == "persistent":'
+                  and any("def run_persistent" in item for item in lines[index:index + 5]))
+    delegation = ("先用 glob 查找 src/**/subagent.py，然后只用 read_file 读取 "
+                  f"src/agent_harness/agents/subagent.py，offset={branch}、limit=34。"
+                  "只根据这些源码简短说明 once 与 persistent 如何启动。"
+                  "最多调用 glob 和 read_file 各一次，不读整文件、其他文件或会话归档。"
+                  "不创建任务或工作树，不修改文件，完成后直接给出结论。")
+    _, finished, events, approvals = run_submission(
+        runtime,
+        "请实际调用 spawn_subagent：name=read-only-audit，description='Audit child startup'，"
+        "mode=once，tools=[read_file, glob]，max_rounds=6，max_tool_calls=6。"
+        f"子 agent 的 prompt 使用以下委派：{delegation}"
+        "只创建一次子 agent；等待结果后简短报告结论，出错就报告原因并结束。",
+        timeout=300,
+    )
+    assert finished.payload["outcome"]["status"] == "completed", finished.payload["outcome"]
+    calls = [event for event in events if event.type == "tool_call"]
+    creation = [event for event in calls if event.payload["name"] == "spawn_subagent"]
+    assert len(creation) == 1
+    results = [json.loads(event.payload["content"]) for event in events
+               if event.type == "tool_result" and event.payload.get("tool_use_id") == creation[0].payload["id"]]
+    assert len(results) == 1
+    result = results[0]
+    assert result["status"] == "completed" and result["text"].strip(), result
+    assert result["description"] == "Audit child startup"
+    assert 1 <= result["rounds"] <= 6 and result["tool_calls"] <= 6
+    child_calls = [event for event in calls if event.source == "read-only-audit"]
+    assert {event.payload["name"] for event in child_calls} == {"glob", "read_file"}
+    reads = [event.payload["input"] for event in child_calls if event.payload["name"] == "read_file"]
+    assert len(reads) == 1 and reads[0]["offset"] == branch and reads[0]["limit"] == 34
+    assert approvals == []
+    assert target.read_text(encoding="utf-8") == source
+    assert subagent.get_subagent_output(result["agent_id"], block=False) == result
+    assert not subagent.active_names()
+    print("\nRead-only subagent audit:", json.dumps(
+        {key: result[key] for key in ("agent_id", "status", "rounds", "tool_calls", "usage")},
+        ensure_ascii=False))
 
 
 def test_streaming_goal_followup_is_evaluated(live_runtime):

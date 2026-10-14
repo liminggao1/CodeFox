@@ -1,16 +1,18 @@
 """子 agent 会话：持久执行、共享执行、上下文恢复与工具副作用。"""
 
 from types import SimpleNamespace
+import os
 
 import pytest
 
-from agent_harness.agents.subagent_session import SubagentSession
+from agent_harness.agents.subagent_session import SubagentBudgetExceeded, SubagentSession
 from agent_harness.context.prompt_state import is_context_message
-from support.fakes import blocks, text_block
+from support.fakes import blocks, text_block, tool_call
 import agent_harness.agents.subagent as subagent_runtime
 import agent_harness.context.compaction as compaction
 import agent_harness.core as core
 import agent_harness.workspace.tasks as tasks
+from agent_harness.providers.llm_client import APIConnectionError
 
 
 @pytest.mark.parametrize("fail", [False, True, "truncated_text", "truncated_tool"])
@@ -44,7 +46,8 @@ def test_subagent_completion_and_failure_release_assignment(host_factory, monkey
         return subagent_runtime._BUS.read_inbox(name)
 
     monkeypatch.setattr(subagent_runtime._BUS, "wait_for_messages", shutdown)
-    subagent_runtime.spawn_subagent("alice", "Finish the task", "persistent", role="tester", task_id=task.id)
+    subagent_runtime.spawn_subagent("alice", "Finish the task", "persistent",
+                                     description="Finish the task", role="tester", task_id=task.id)
 
     assert "alice" not in tasks.assignments
     assert "alice" not in subagent_runtime._active_subagents
@@ -180,3 +183,164 @@ def test_current_delegation_survives_middle_history_archive(host_factory, mode):
     assert "Old delegation A" not in calls[0]["system"]
     assert "No assigned Task" in str(calls[0]["messages"])
     assert list((core.WORKDIR / ".transcripts").glob("*.jsonl"))
+
+
+def test_child_tool_budget_pairs_unexecuted_calls_and_stops_without_summary(
+    host_factory, no_approval,
+):
+    host = host_factory()
+    calls = []
+    first = SimpleNamespace(
+        stop_reason="tool_use",
+        content=[
+            SimpleNamespace(type="tool_use", id="one", name="read_file",
+                            input={"path": "missing-one.txt"}),
+            SimpleNamespace(type="tool_use", id="two", name="read_file",
+                            input={"path": "missing-two.txt"}),
+        ],
+    )
+    client = SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kwargs: calls.append(kwargs) or first))
+    session = SubagentSession("child", client, "test", "", mode="once",
+                              tools=["read_file"], max_tool_calls=1)
+    messages = [{"role": "user", "content": "Inspect"}]
+
+    with pytest.raises(SubagentBudgetExceeded, match="tool-call budget exhausted"):
+        session.run(messages)
+
+    assert len(calls) == 1
+    results = messages[-1]["content"]
+    assert [result["tool_use_id"] for result in results] == ["one", "two"]
+    assert results[0]["is_error"] is True
+    assert results[1]["is_error"] is True
+    assert "Stopped: subagent tool-call budget exhausted" in results[1]["content"]
+
+
+def test_child_network_failure_does_not_consume_model_budget(host_factory):
+    host = host_factory()
+    client = SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kwargs: (_ for _ in ()).throw(APIConnectionError("offline"))))
+    result = subagent_runtime.spawn_subagent(
+        "offline-child", "Inspect", "once", client=client,
+        description="Inspect offline", max_rounds=1,
+    )
+
+    assert result["status"] == "network_error"
+    assert result["usage"]["model_calls"] == 0
+    assert "offline" in result["error"]
+
+
+def test_child_session_archive_path_is_not_read_through_generic_file_tool(
+    host_factory, tmp_path, no_approval,
+):
+    host = host_factory()
+    archive = core.sessions_dir() / "20261014-000000-abcdef12.artifacts" / "tool-results" / "x.txt"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("internal result", encoding="utf-8")
+    session = SubagentSession("child", None, "test", "", mode="once",
+                              tools=["read_file"])
+
+    result = session.execute_tool(SimpleNamespace(
+        name="read_file", input={"path": str(archive)})).result
+
+    assert result.status == "failed"
+    assert "session tool-result archives" in result.content
+
+
+def test_relative_session_archive_is_blocked_from_the_assigned_directory(
+    host_factory, monkeypatch,
+):
+    host_factory()
+    from agent_harness.runtime import hooks
+    from agent_harness.workspace import worktrees
+
+    directory = core.WORKDIR / ".worktrees" / "reader"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr(worktrees, "_registered_worktree", lambda name: (directory, None))
+    task = tasks.create_task("Inspect")
+    task.worktree = "reader"
+    tasks.save_task(task)
+    tasks.claim_task(task.id, owner="reader")
+    archive = core.sessions_dir() / "20261014-000000-abcdef12.artifacts" / "tool-results" / "x.txt"
+    archive.parent.mkdir(parents=True)
+    archive.write_text("internal result", encoding="utf-8")
+    monkeypatch.setattr(hooks, "check_tool_use",
+                        lambda *args, **kwargs: pytest.fail("archive must bypass path approval"))
+    session = SubagentSession("reader", None, "test", "", tools=["read_file"])
+    result = session.execute_tool(SimpleNamespace(
+        name="read_file", input={"path": os.path.relpath(archive, directory)})).result
+    assert result.status == "failed"
+    assert "session tool-result archives" in result.content
+    assert "offset" in result.content and "limit" in result.content
+
+
+def test_child_pre_tool_failure_pairs_the_entire_batch(host_factory, monkeypatch):
+    host_factory()
+    from agent_harness.runtime import hooks
+
+    def fail(block):
+        raise RuntimeError("pre-tool hook failed")
+
+    monkeypatch.setitem(hooks.HOOKS, "PreToolUse", [fail])
+    response = blocks(*[SimpleNamespace(
+        type="tool_use", id=call_id, name="read_file", input={"path": "file.txt"})
+        for call_id in ("first", "second")])
+    session = SubagentSession(
+        "reader", SimpleNamespace(messages=SimpleNamespace(create=lambda **kwargs: response)),
+        "test", "", mode="once", tools=["read_file"])
+    messages = [{"role": "user", "content": "Inspect"}]
+    with pytest.raises(RuntimeError, match="pre-tool hook failed"):
+        session.run(messages)
+    results = messages[-1]["content"]
+    assert [item["tool_use_id"] for item in results] == ["first", "second"]
+    assert all(item["is_error"] for item in results)
+    assert "pre-tool hook failed" in results[0]["content"]
+    assert "Interrupted" in results[1]["content"]
+    assert sum(isinstance(message["content"], list) and message["role"] == "user"
+               for message in messages) == 1
+
+
+def test_context_summary_cannot_spend_an_extra_model_request(host_factory, monkeypatch):
+    host_factory()
+    monkeypatch.setattr(core, "COMPACT_TRIGGER", 30)
+    monkeypatch.setattr(core, "COMPACT_TARGET", 20)
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs)
+        return blocks(text_block("Earlier findings"))
+    result = subagent_runtime.spawn_subagent(
+        "bounded-summary", "Inspect source " * 30, "once", description="Inspect source",
+        client=SimpleNamespace(messages=SimpleNamespace(create=create)), max_rounds=1)
+    assert len(calls) == 1
+    assert "tools" not in calls[0]
+    assert result["status"] == "budget_exhausted"
+    assert result["rounds"] == 1 and result["tool_calls"] == 0
+
+
+@pytest.mark.parametrize("earlier_text", ["", "Earlier plan"])
+def test_budget_output_preserves_the_latest_tool_evidence(host_factory, no_approval, earlier_text):
+    host_factory()
+    core.WORKDIR.joinpath("old.txt").write_text("Old evidence", encoding="utf-8")
+    core.WORKDIR.joinpath("new.txt").write_text("Current evidence", encoding="utf-8")
+    responses = iter([
+        blocks(*([text_block(earlier_text)] if earlier_text else []),
+               tool_call("read_file", path="old.txt")),
+        blocks(tool_call("read_file", path="new.txt")),
+    ])
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return next(responses)
+
+    result = subagent_runtime.spawn_subagent(
+        "reader", "Read both files", "once", description="Inspect current evidence",
+        tools=["read_file"], max_rounds=2,
+        client=SimpleNamespace(messages=SimpleNamespace(create=create)))
+
+    assert result["status"] == "budget_exhausted"
+    assert "Current evidence" in result["text"]
+    assert "Old evidence" not in result["text"] and "Earlier plan" not in result["text"]
+    assert result["rounds"] == 2 and result["tool_calls"] == 2
+    assert len(calls) == 2
+    assert subagent_runtime.get_subagent_output(result["agent_id"], block=False) == result

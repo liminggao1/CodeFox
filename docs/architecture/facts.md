@@ -66,18 +66,21 @@
 - `agents/recovery.py` 的 `RecoveryState` 提供只读模型/额度/计数和固定转换方法，集中 Lead 的重试与恢复状态；
   429 与成功调用都打断连续 529 计数。
 
-## 4. 统一子 agent（2026-10-08）
+## 4. 统一子 agent（2026-10-14）
 
 一次性子代理与持久实例统一称为**子 agent**，由模型通过运行模式选择生命周期。
 
-- 创建入口唯一：`spawn_subagent(name, prompt, mode, role)`；`mode` 必须显式为 `once` 或 `persistent`，
-  运行时不猜测模式。没有工具别名。
-- `once` 在工具调用内同步等待，返回 `completed` 或 `failed`；`persistent` 登记并启动线程后返回 `started`，
-  结果与错误随后经信箱事件交付。模式在创建时固定，存活期间不变。
-- 创建工具返回 JSON 文本，字段为 `name` / `mode` / `status` / `text` / `usage`；校验失败时只回填已验证值。
-- `agents/subagent.py` 拥有创建、生命周期、活跃登记（`active_subagents`）、信箱与协议投递；
+- 创建入口唯一：`spawn_subagent(name, prompt, mode, description=...)`；短任务描述必填，
+  `mode` 必须显式为 `once` 或 `persistent`。创建时生成稳定 `agent_id`，名称仍是可读别名。
+  身份和结果只保留在当前进程内，不恢复线程、不新增会话持久化字段；展示事件仍随 Lead 会话保存。
+- `once` 在工具调用内同步等待；`persistent` 登记并启动线程后立即返回 `started`，
+  完成、失败、停止、预算耗尽和网络错误随后通过信箱通知。模式在创建时固定，存活期间不变。
+- 已创建实例的返回值、终态通知和查询使用同一结果结构：`agent_id` / `name` / `description` /
+  `role` / `mode` / `status` / `text` / `error` / `reason`、两种预算的计数与上限，以及 `usage`。
+  usage 包含累计 `model_calls`、`input_tokens`、`output_tokens` 和总 `tokens`；校验失败不创建身份。
+- `agents/subagent.py` 拥有创建、生命周期、活跃登记、进程内结果、信箱与协议投递；
   `agents/subagent_session.py` 提供两种模式共用的模型回合。
-- 管理工具：`list_subagents`、`send_message`、`request_shutdown`、`request_plan`、`review_plan`、
+- 管理工具：`list_subagents`、`get_subagent_output`、`send_message`、`request_shutdown`、`request_plan`、`review_plan`、
   `remove_worktree`（仅 Lead）。任何子 agent 都不提供 `spawn_subagent`、依赖修改或 worktree 创建/移除，
   保持不可递归。
 - 通信由发送方模型决定；运行时只负责投递、唤醒和状态通知。执行结果、失败、IDLE 与关闭确认仍由运行时通知。
@@ -85,8 +88,28 @@
   再执行。子模型可调用 `list_tasks` 决定是否认领；每个实例同时最多占用一个任务。
 - 已移除空闲线程定时扫描自动认领第一个任务的行为。
 - 目录规则：有有效分配时用任务目录，无分配时用启动目录，分配失效时报错；任务状态与目录租约只由 tasks 管理。
-- 工具能力：两种模式共用 bash、读、写、编辑、glob；`persistent` 追加 `send_message` / `submit_plan`，
-  有任务时提供任务管理工具；`once` 完成后汇报并结束，`persistent` 汇报后进入 IDLE 并保留上下文。
+- 工具能力：两种模式默认共用 bash、读、写、编辑、glob；`persistent` 追加 `send_message` / `submit_plan`
+  和任务管理工具；`once` 显式分配 Task 后增加任务工具。省略 `tools` 使用默认集合，显式白名单只保留
+  所选工具，`[]` 无工具。`shared_tools.child_tool_definitions` 是定义、处理器、描述、白名单及能力提示的统一来源。
+  子 agent 提示只描述实际可用工具，不拼入 Lead 的通用工具提示；`read_file` 明示从 0 开始的 offset 和 limit。
+- 每个工作单元默认最多 12 次模型请求、40 次工具调用，创建时可传正整数 `max_rounds` / `max_tool_calls`。
+  模型预算包含上下文摘要请求；工具预算包含拒绝、未知工具和失败尝试，预算外调用只补 stopped 结果。
+  进入计划审批等待前也检查预算；耗尽直接返回 `budget_exhausted`、部分结果和计数，不额外请求总结。
+  部分结果取最新模型正文；本轮无正文时使用最新工具批次，不沿用早期证据。整批调用被停止或 Hook 抛错也补齐结果。
+  once 结束并清理分配；persistent 耗尽后汇报并进入 IDLE，收到新委派重置计数，保留历史和累计用量。
+  审批回复只恢复仍在等待的工作；已耗尽的工作可更新计划门禁，但须收到新委派才重新执行。
+  未完成 Task 仍等待指导，失败或关闭时释放分配；空闲不请求模型。
+- `get_subagent_output(agent_id, block=True, timeout=30)` 可即时查看或等待当前工作的结果，最多等待 60 秒。
+  超时保留实际状态并标记 `timed_out`；查询不请求模型、不消费信箱、不重复通知，不暴露消息历史。
+  结果在实例清理后仍可按 ID 查询；空闲后的消息或计划请求成功投递时同步清除旧结果，状态变为 `pending`。
+  阻塞查询等待新工作，投递失败保留旧结果；启动前排队的消息合并到同一委派。通信、关闭及计划协议统一解析名称或 ID。
+  计划请求在接收时按当前分配版本更新门禁，旧工作收尾不会解除新工作的审批要求。
+- 子 agent 的通用 `read_file` 在权限审批前拒绝会话内部 `tool-results` 归档，
+  按当前任务目录解析相对路径并解析符号链接；提示改读原始文件行范围。Lead 的目录外权限规则保持原状。
+  连接失败独立返回 `network_error` 并回滚该次模型预算；本地文件或清理错误归入 `failed`。
+- 状态事件和 `list_subagents` 带身份、预算、累计用量及最后终止原因，保留原 `name` / `mode` / `status` 字段。
+  列表与状态事件共用无正文的结果快照。同步 once 随用户停止结束；persistent 使用既有关闭协议，
+  不因 Lead 单轮停止而批量终止。
 - 工作流的 agent 步骤（`ctx.agent`）通过同一入口执行 once 子 agent，默认开放五项基础工具；`tools=[]` 只处理文本。
 - 上下文压缩复用 `compaction`；实例身份与历史列表对象保留，压缩后模型输入必须包含当前委派与当前有效任务。
 
@@ -289,3 +312,14 @@
 - 每次新请求只装配一份 system、历史和工具快照，计量和发送共用；网络及输出额度重试不重复检索或追加通知。
   工具集合按名称排序，并反映实际能力增减。本实现只减少程序造成的前缀变化，不保证 API 平台缓存命中，
   不增加缓存统计、专用缓存参数或额外真实 API 请求。
+
+## 11. 上下文输入预算（2026-10-14）
+
+- `MODEL_CONTEXT_TOKENS` 配置当前模型与服务端共同支持的窗口；默认 258000 token。
+  可用输入预算扣除升级输出额度 `ESCALATED_MAX_TOKENS` 和窗口的 10% 估算余量，非正预算在启动时报错。
+- 自动压缩触发线、目标与最新工具批次预算分别为可用输入预算的 90%、80%、16%，
+  请求估算包含 system、消息和工具定义。压缩摘要输入沿用压缩目标。
+- 记忆召回按可用输入预算的 5%、20000 token 和正文 20000 字符共同限制；
+  token 估算包含 JSON 来源信息与序列化开销，按相关性顺序截取。记忆仍默认关闭。
+- 单条工具结果落盘默认 30000 字符，预览默认 1000 字符，分别由
+  `TOOL_PERSIST_THRESHOLD_CHARS` / `TOOL_PREVIEW_CHARS` 覆盖，不随 token 窗口成比例变化。

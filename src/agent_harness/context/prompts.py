@@ -39,7 +39,7 @@ PROMPT_SECTIONS = {
              "create_task, update_task, list_tasks, get_task, claim_task, "
              "complete_task, "
              "schedule_cron, list_crons, cancel_cron, "
-             "spawn_subagent, list_subagents, send_message, "
+             "spawn_subagent, list_subagents, get_subagent_output, send_message, "
              "request_shutdown, request_plan, review_plan, "
              "create_worktree, remove_worktree, "
              "connect_mcp. MCP tools are prefixed mcp__{server}__{tool}.",
@@ -51,6 +51,9 @@ PROMPT_SECTIONS = {
     ),
     "subagent": (
         "Choose whether delegation helps and explicitly select spawn_subagent mode. "
+        "Every spawn_subagent call requires a short description, a prompt and a mode. "
+        "The result includes a stable agent_id; persistent children can be queried with "
+        "get_subagent_output and also send completion events. "
         "Use once for a bounded investigation with only a final result; it waits synchronously. "
         "Use persistent for successive delegations, two-way communication or plan approval; "
         "it returns started and later reports results and idle events. Respect explicit user "

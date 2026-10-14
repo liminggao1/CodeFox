@@ -307,11 +307,13 @@ class SubagentRunner:
         context = parent.delegate("workflow", "workflow") if parent else None
         with interaction.execution_context(context):
             result = subagent.spawn_subagent(
-                f"wf-{uuid.uuid4().hex}", request, "once", role="workflow", tools=tools,
+                name=f"wf-{uuid.uuid4().hex}",
+                description=" ".join((label or "workflow step").split()[:5]),
+                prompt=request, mode="once", role="workflow", tools=tools,
                 client=self.client, model=self.model, max_tokens=core.WORKFLOW_AGENT_MAX_TOKENS)
         tokens = result["usage"]["tokens"]
         if result["status"] != "completed":
-            raise WorkflowStepError(result["text"], tokens)
+            raise WorkflowStepError(result["error"] or result["reason"] or result["text"], tokens)
         text = result["text"]
         if schema is None:
             value = text

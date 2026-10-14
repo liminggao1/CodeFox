@@ -8,9 +8,9 @@
 | [lead_turn.py](lead_turn.py) | `LeadTurn`：接受的模型历史、流式调用与正式消息关联、逐项工具结果与检查点、cron 交付登记，以及完成/失败/停止/截断的收尾 |
 | [turn_engine.py](turn_engine.py) | `TurnEngine`：上下文准备、单轮 API 请求快照、重试/续写、工具批次、Goal/memory 收尾、合法 `TurnPhase` 转换和阶段历史 |
 | [lead_tools.py](lead_tools.py) | `execute_tool_batch`：Lead 的 compact 特殊路径、普通工具与后台派发；逐项记录结果，权限检查与执行结算分别委托运行时 |
-| [subagent.py](subagent.py) | `spawn_subagent` 统一创建 once/persistent 子 agent；维护生命周期、信箱和协议投递 |
+| [subagent.py](subagent.py) | `spawn_subagent` 统一创建 once/persistent 子 agent；维护稳定身份、生命周期、结果查询、信箱和协议投递 |
 | [subagent_protocol.py](subagent_protocol.py) | 唯一计划门禁与计划/关闭请求状态；集中提交、审核、回复校验、任务版本失效与清理 |
-| [subagent_session.py](subagent_session.py) | `SubagentSession`：两种模式共用的模型回合、提示词状态、工具能力选择与白名单、执行门禁和历史压缩；共用定义与身份绑定委托 tools |
+| [subagent_session.py](subagent_session.py) | `SubagentSession`：共用模型回合、模型/工具预算、用量、提示词状态、白名单、执行门禁与历史压缩；工具定义与身份绑定委托 tools |
 | [goal.py](goal.py) | `GoalController`：目标状态、事件与 Stop 边界的继续/结束决定 |
 | [goal_evaluator.py](goal_evaluator.py) | `PromptGoalEvaluator` / `JevGoalEvaluator`：无工具目标评估、对话转录与结构化结果校验；Jev confidence 随目标状态事件记录 |
 | [recovery.py](recovery.py) | `RecoveryState`：Lead 模型调用的重试、错误分类及恢复状态 |

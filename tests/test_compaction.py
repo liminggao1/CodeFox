@@ -35,9 +35,22 @@ def test_context_thresholds_follow_the_main_budget(host_factory) -> None:
     host_factory()
 
     assert core.CONTEXT_LIMIT > 0
-    assert core.COMPACT_TRIGGER == int(core.CONTEXT_LIMIT * 0.8)
-    assert core.COMPACT_TARGET == int(core.CONTEXT_LIMIT * 0.7)
-    assert core.TOOL_RESULT_BUDGET == int(core.CONTEXT_LIMIT * 0.16)
+    assert core.CONTEXT_INPUT_BUDGET == (
+        core.CONTEXT_LIMIT - core.ESCALATED_MAX_TOKENS - core.CONTEXT_SAFETY_MARGIN
+    )
+    assert core.CONTEXT_SAFETY_MARGIN == int(
+        core.CONTEXT_LIMIT * core.CONTEXT_SAFETY_RATIO
+    )
+    assert core.COMPACT_TRIGGER == int(
+        core.CONTEXT_INPUT_BUDGET * core.COMPACT_TRIGGER_RATIO
+    )
+    assert core.COMPACT_TARGET == int(
+        core.CONTEXT_INPUT_BUDGET * core.COMPACT_TARGET_RATIO
+    )
+    assert core.TOOL_RESULT_BUDGET == int(
+        core.CONTEXT_INPUT_BUDGET * core.TOOL_RESULT_BUDGET_RATIO
+    )
+    assert core.COMPACTION_INPUT_TOKEN_LIMIT == core.COMPACT_TARGET
     assert core.PERSIST_THRESHOLD > 0
     assert core.TOOL_PREVIEW_CHARS > 0
 
@@ -146,7 +159,8 @@ def test_tool_result_budget_persists_a_single_large_result(host_factory) -> None
 
 def test_tool_result_budget_reduces_batch_below_individual_limit(host_factory) -> None:
     host = host_factory()
-    output = "中" * (core.PERSIST_THRESHOLD - 1000)
+    output_chars = min(core.PERSIST_THRESHOLD - 1, int(core.TOOL_RESULT_BUDGET * 0.4))
+    output = "中" * output_chars
     messages = [{"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": f"t{index}", "content": output}
         for index in range(3)

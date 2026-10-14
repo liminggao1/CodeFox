@@ -119,10 +119,18 @@ def run_complete_task(task_id: str) -> ToolResult:
 
 
 def run_spawn_subagent(name: str, prompt: str, mode: str, role: str = "coder",
-                       task_id: str | None = None, require_plan: bool = False, tools=None) -> ToolResult:
+                       task_id: str | None = None, require_plan: bool = False, tools=None,
+                       *, description: str,
+                       max_rounds: int | None = None, max_tool_calls: int | None = None) -> ToolResult:
     """Serialize the unified runtime result for the Lead's creation tool."""
-    result = subagent.spawn_subagent(name, prompt, mode, role, task_id, require_plan, tools)
-    status = {"completed": "success", "started": "started", "failed": "failed"}[result["status"]]
+    result = subagent.spawn_subagent(
+        name=name, prompt=prompt, mode=mode, role=role, description=description,
+        task_id=task_id, require_plan=require_plan, tools=tools,
+        max_rounds=max_rounds, max_tool_calls=max_tool_calls)
+    status = {"completed": "success", "started": "started",
+              "budget_exhausted": "failed", "network_error": "failed",
+              "stopped": "stopped",
+              "failed": "failed"}[result["status"]]
     return ToolResult(json.dumps(result, ensure_ascii=False), status)
 
 
@@ -134,6 +142,16 @@ def run_list_subagents() -> ToolResult:
 def run_send_message(to: str, content: str) -> ToolResult:
     """Deliver the Lead's chosen message to a live persistent child."""
     return ToolResult(subagent.send_message("lead", to, content), "success")
+
+
+def run_get_subagent_output(agent_id: str, block: bool = True,
+                            timeout: float = 30) -> ToolResult:
+    """Return a child task status/result without exposing its full history."""
+    try:
+        result = subagent.get_subagent_output(agent_id, block=block, timeout=timeout)
+    except ValueError as exc:
+        return ToolResult(f"Error: {exc}", "failed")
+    return ToolResult(json.dumps(result, ensure_ascii=False), "success")
 
 
 def run_connect_mcp(name: str) -> ToolResult:
@@ -235,19 +253,32 @@ BUILTIN_DEFINITIONS = [
      "input_schema": {"type": "object",
                       "properties": {
                           "name": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+                          "description": {"type": "string", "minLength": 1,
+                                          "description": "A short 3-5 word task description."},
                           "prompt": {"type": "string", "minLength": 1},
                           "mode": {"type": "string", "enum": ["once", "persistent"]},
                           "role": {"type": "string"},
                           "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{8}$"},
                           "require_plan": {"type": "boolean"},
                           "tools": {"type": "array", "items": {"type": "string"},
-                                    "description": "Optional tool whitelist; omit for mode defaults, [] for no tools."}},
-                      "required": ["name", "prompt", "mode"],
+                                    "description": "Optional tool whitelist; omit for mode defaults, [] for no tools."},
+                          "max_rounds": {"type": "integer", "minimum": 1},
+                          "max_tool_calls": {"type": "integer", "minimum": 1}},
+                      "required": ["name", "description", "prompt", "mode"],
                       "additionalProperties": False}},
                    run_spawn_subagent, "built-in tool 'spawn_subagent'"),
     ToolDefinition({"name": "list_subagents", "description": "List active child instances, modes and states.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
                    run_list_subagents, "built-in tool 'list_subagents'"),
+    ToolDefinition({"name": "get_subagent_output",
+     "description": "Get a child status, partial result, error and usage by agent ID.",
+     "input_schema": {"type": "object",
+                      "properties": {"agent_id": {"type": "string"},
+                                     "block": {"type": "boolean"},
+                                     "timeout": {"type": "number", "minimum": 0, "maximum": 60,
+                                                 "description": "Wait at most 60 seconds; a timeout preserves the child's status."}},
+                      "required": ["agent_id"], "additionalProperties": False}},
+                   run_get_subagent_output, "built-in tool 'get_subagent_output'"),
     ToolDefinition({"name": "send_message", "description": "Send message to a persistent subagent.",
      "input_schema": {"type": "object",
                       "properties": {"to": {"type": "string"},

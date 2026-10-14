@@ -1,6 +1,7 @@
 """Exercise the optional UI against the real offline runtime."""
 
 import agent_harness.core as core
+from agent_harness.frontends.presentation import compact_count
 import agent_harness.runtime.scheduler as scheduler
 import agent_harness.agents.subagent as subagent_runtime
 
@@ -117,11 +118,12 @@ def test_tui_resume_preserves_context_footer_and_new_session_clears_it(runtime_f
             await wait_for(pilot, lambda: app.generation == 2 and not app.busy)
             assert app.snapshot["context_input_tokens"] == 3200
             footer = app.query_one("#bottom-status", Static)
-            assert "3.20k/50k（6%）" in str(footer.content)
+            expected_usage = f"3.20k/{compact_count(core.CONTEXT_LIMIT)}（{3200 * 100 / core.CONTEXT_LIMIT:.0f}%）"
+            assert expected_usage in str(footer.content)
             app._submit("/new")
             await wait_for(pilot, lambda: app.generation == 3 and not app.busy)
             assert app.snapshot["context_input_tokens"] == 0
-            assert "0/50k（0%）" in str(footer.content)
+            assert f"0/{compact_count(core.CONTEXT_LIMIT)}（0%）" in str(footer.content)
             await pilot.press("ctrl+d")
             await wait_for(pilot, lambda: app.runtime_closed)
     asyncio.run(exercise())
@@ -258,7 +260,7 @@ def test_tui_subagent_conversation_updates_while_background_lead_is_paused(runti
             return response("child done")
         lead_calls.append(True)
         if len(lead_calls) == 1:
-            return response(tools=[tool("spawn_subagent", name="helper", prompt="work", mode="persistent")], stop="tool_use")
+            return response(tools=[tool("spawn_subagent", name="helper", description="Run child work", prompt="work", mode="persistent")], stop="tool_use")
         lead_started.set()
         assert lead_release.wait(5)
         return response("lead done")

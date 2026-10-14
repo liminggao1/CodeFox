@@ -85,6 +85,7 @@ def host_factory(tmp_path, monkeypatch):
         core.WORKDIR = tmp_path
         monkeypatch.setattr(core, "MEMORY_ENABLED", enable_memory)
         subagent_runtime._active_subagents.clear()
+        subagent_runtime._subagent_results.clear()
         subagent_runtime._PROTOCOL.clear()
         tasks.assignments.clear()
         tasks.assignment_versions.clear()

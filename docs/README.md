@@ -10,7 +10,7 @@ Git 历史按功能里程碑整理。当前生效的架构与行为事实写在 
 
 项目面向可长期演进的本地 agent 运行环境，保留主循环、工具、子 agent、工作流和目标控制的完整机制。
 项目当前不做打包发布。
-当前验证包括离线模型驱动的持久子 agent、跨任务目录与历史、通信和关闭，以及两种子 agent 模式的端到端自检；真实 API 交互问答和 memory 抽取尚未实测，未验证边界见 [待验证事项](plans/2026-10-11-01待验证事项.md)。
+当前验证包括离线模型驱动的持久子 agent、跨任务目录与历史、通信和关闭，以及两种子 agent 模式的端到端自检；真实 Responses API 的 once 只读审计已通过，记录见 [子 agent 验收](handoff/2026-10-14-subagent-api-run-handoff.md)。真实 API 的 TUI 人工交互、持久子 agent 和 memory 抽取等边界见 [待验证事项](plans/2026-10-11-01待验证事项.md)。
 
 | 目录/文件 | 内容 | 状态 |
 | --- | --- | --- |
@@ -36,6 +36,7 @@ Git 历史按功能里程碑整理。当前生效的架构与行为事实写在 
 | `adr/` | 架构决策记录，`<四位序号>-<短名称>.md` | 空，预留 |
 | `plans/` | 计划类文档：功能开发计划、路线、待验证与待决策等 | 有内容 |
 | `research/` | 外部一手来源的调研笔记；实施计划的调查依据随对应计划保存 | [2026-10-10 架构审查报告](research/2026-10-10-架构审查报告.html)；[2026-10-10 代码架构可视化工具调研](research/2026-10-10-代码架构可视化工具调研.md) |
+| [handoff/2026-10-14-subagent-api-run-handoff.md](handoff/2026-10-14-subagent-api-run-handoff.md) | 子 agent 能力与任务边界改造、真实 API 验收及网络故障证据 | 已实施；真实只读审计通过 |
 | `handoff/` | 独立会话的交接记录；计划实施和验收结果写回对应计划 | [2026-10-04 结构初始化](handoff/2026-10-04-structure-init-handoff.md) |
 | `guides/` | 可复现的安装、导入和操作说明 | 空，预留 |
 | `agents/` | agent 协作约定 | [issue-tracker.md](agents/issue-tracker.md)、[triage-labels.md](agents/triage-labels.md)、[domain.md](agents/domain.md) |

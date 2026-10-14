@@ -7,6 +7,7 @@ import json
 from types import SimpleNamespace
 
 from agent_harness.context import memory_runtime
+from agent_harness.providers.llm_client import estimate_input_tokens
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +81,26 @@ def test_memory_recall_survives_model_failure(tmp_path, monkeypatch) -> None:
         {"role": "user", "content": "Remember the project layout"}
     ]) == 0
     assert memory_runtime.read_memory_file(path.name) == recalled[0]["content"]
+
+
+def test_memory_recall_respects_serialized_token_budget(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(memory_runtime.core, "WORKDIR", tmp_path)
+    monkeypatch.setattr(memory_runtime.core, "MEMORY_ENABLED", True)
+    monkeypatch.setattr(memory_runtime.core, "MEMORY_RECALL_TOKEN_BUDGET", 120)
+    path = memory_runtime.write_memory_file(
+        "Long note", "project", "Long content", "中" * 1000
+    )
+    monkeypatch.setattr(
+        memory_runtime, "select_relevant_memories", lambda messages: [path.name]
+    )
+
+    result = memory_runtime.load_memories([])
+    recalled = json.loads(result)
+
+    assert len(recalled[0]["content"]) < 1000
+    assert estimate_input_tokens(
+        messages=[{"role": "user", "content": result}]
+    ) <= memory_runtime.core.MEMORY_RECALL_TOKEN_BUDGET
 
 
 def test_remember_after_turn_reports_memory_operations_when_enabled(monkeypatch) -> None:

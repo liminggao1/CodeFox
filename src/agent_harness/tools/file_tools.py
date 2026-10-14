@@ -35,6 +35,18 @@ def resolve_path(path: str, cwd: Path | None = None) -> Path:
     return (base / path).resolve()
 
 
+def is_session_tool_result_archive(path: str | Path, cwd: Path | None = None) -> bool:
+    """Return whether a path points into a session's internal tool archive."""
+    try:
+        candidate = resolve_path(Path(path).expanduser(), cwd)
+        sessions = core.sessions_dir().resolve()
+        if not candidate.is_relative_to(sessions):
+            return False
+        return "tool-results" in candidate.parts
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return False
+
+
 _shell_processes: set[subprocess.Popen] = set()
 _shell_process_lock = threading.RLock()
 

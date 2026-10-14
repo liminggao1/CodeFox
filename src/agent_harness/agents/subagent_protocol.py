@@ -66,11 +66,13 @@ class SubagentProtocol:
         with self._lock:
             self._plans[name] = _Plan("not_required", work_version)
 
-    def require_plan(self, name):
+    def require_plan(self, name, work_version=None):
         with self._lock:
             plan = self._plans.setdefault(name, _Plan("not_required", 0))
             plan.gate = "required"
             plan.request_id = None
+            if work_version is not None:
+                plan.work_version = work_version
 
     def authorize(self, name, tool_name, identity):
         """Invalidate stale approval before checking a mutation against its gate."""

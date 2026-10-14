@@ -65,12 +65,28 @@ _SCHEMAS = [
 ]
 
 _CHILD_DESCRIPTIONS = {
-    "read_file": "Read a known file or line range; prefer over bash cat, head, tail, or sed.",
+    "bash": "Run shell commands for content search with rg/grep, tests, git or other shell operations. Prefer an available dedicated tool when it can express the operation.",
+    "read_file": "Read an original project file. offset skips lines from 0; limit bounds the number of lines returned. Prefer a focused range over repeatedly reading the complete file. Internal session tool-result archives cannot be read with this tool.",
     "write_file": "Create or completely replace a file; prefer over shell redirection, echo, or heredoc.",
     "edit_file": "Replace text in an existing file; prefer over sed or awk for targeted edits.",
     "glob": "Find files by glob pattern; prefer over find or ls for file discovery. ** matches recursively.",
     "list_tasks": "List all tasks on the board.",
+    "claim_task": "Claim a pending task before working on it.",
     "complete_task": "Mark an in-progress task as completed.",
+}
+
+_CHILD_COORDINATION_SCHEMAS = {
+    "send_message": {
+        "name": "send_message",
+        "description": "Send an intermediate message to 'lead' or an active persistent subagent.",
+        "input_schema": {"type": "object", "properties": {
+            "to": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["to", "content"]}},
+    "submit_plan": {
+        "name": "submit_plan",
+        "description": "Submit a plan for Lead approval.",
+        "input_schema": {"type": "object", "properties": {
+            "plan": {"type": "string"}}, "required": ["plan"]}},
 }
 
 # -- Task board text and actor binding --
@@ -131,3 +147,41 @@ def shared_tool_definitions(owner: str, *, profile: str) -> dict[str, ToolDefini
         origin = f"built-in tool '{name}'" if lead else f"child tool '{name}'"
         definitions[name] = ToolDefinition(schema, handlers[name], origin)
     return definitions
+
+
+def child_tool_definitions(owner: str, *, mode: str, task_tools: bool,
+                           send_message=None, submit_plan=None) -> dict[str, ToolDefinition]:
+    """Build the complete child capability contract before whitelist selection.
+
+    Schemas, handlers and descriptions come from this single map so the prompt
+    cannot advertise a tool that the child cannot execute.
+    """
+    if mode not in {"once", "persistent"}:
+        raise ValueError(f"Unknown child mode: {mode}")
+    definitions = shared_tool_definitions(owner, profile="child")
+    if not task_tools:
+        for name in TASK_TOOL_NAMES:
+            definitions.pop(name)
+    if mode == "persistent":
+        definitions.update({
+            "send_message": ToolDefinition(
+                deepcopy(_CHILD_COORDINATION_SCHEMAS["send_message"]),
+                send_message or (lambda **_: ToolResult(
+                    "Error: child messaging is unavailable", "failed")),
+                "child tool 'send_message'"),
+            "submit_plan": ToolDefinition(
+                deepcopy(_CHILD_COORDINATION_SCHEMAS["submit_plan"]),
+                submit_plan or (lambda **_: ToolResult(
+                    "Error: plan submission is unavailable", "failed")),
+                "child tool 'submit_plan'"),
+        })
+    return definitions
+
+
+def child_tool_prompt(definitions: dict[str, ToolDefinition], selected: tuple[str, ...]) -> str:
+    """Render only the selected child tools and their descriptions."""
+    if not selected:
+        return "No tools are available; use only the supplied text."
+    lines = [f"- {name}: {definitions[name].schema.get('description', '')}"
+             for name in selected]
+    return "Available child tools:\n" + "\n".join(lines)

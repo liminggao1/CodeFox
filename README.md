@@ -80,8 +80,8 @@ Textual 的本机安装、启动、快捷键、审批和会话操作见
 - **资源归属**：任务、记忆、工作流、后台任务等运行时状态（`.tasks` / `.memory` / `.runtime` /
   `.mailboxes` / `.worktrees` / `.scheduled_tasks.json` / `.task_outputs`）跟随**当前会话的启动目录**；
   会话上下文、诊断、压缩归档和长工具输出统一存放在用户目录 `~/.agent-harness/sessions/` 并随会话删除；`skills/` 随包分发。
-- **子 agent**：统一用 `spawn_subagent(name, prompt, mode)` 创建；模式、通信和后续任务由模型决定。
-  能力与生命周期见 [调试笔记第 9 节](note/dev-notes.md#9-统一子-agent-生命周期与协议)。
+- **子 agent**：统一用 `spawn_subagent(name, prompt, mode, description=...)` 创建；模式、通信和后续任务由模型决定。
+  身份、工具能力、预算与查询见 [仓库事实第 4 节](docs/architecture/facts.md#4-统一子-agent2026-10-14)，操作路径见 [调试笔记第 9 节](note/dev-notes.md#9-统一子-agent-生命周期与协议)。
 - **工作流步骤**：`ctx.agent` 通过同一入口执行 once 子 agent，默认开放五项基础工具；
   `tools=[]` 只处理文本，名单可限制工具。预算、格式重试与缓存恢复仍由工作流管理，见 [调试笔记第 12 节](note/dev-notes.md#12-工作流单次-agent-调用)。
 - **goal 接在 Stop 边界**：模型不再请求工具时先问目标控制器，返回 `block` 就补一条

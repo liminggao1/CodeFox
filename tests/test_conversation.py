@@ -50,18 +50,19 @@ def test_historical_running_operations_are_marked_interrupted(runtime_factory):
     assert historical[2]["payload"]["status"] == "interrupted"
 
 
-def test_historical_idle_subagent_is_not_marked_interrupted(runtime_factory):
+@pytest.mark.parametrize("status", ["idle", "budget_exhausted", "network_error"])
+def test_historical_idle_or_terminal_subagent_is_not_marked_interrupted(runtime_factory, status):
     runtime, _ = runtime_factory()
     runtime.session.activate(runtime.session.store.create())
     runtime.session.snapshot["events"] = [
         {"id": "working", "kind": "display", "type": "subagent_status", "source": "helper",
          "turn_id": "turn", "payload": {"name": "helper", "mode": "persistent", "status": "working"}},
         {"id": "idle", "kind": "display", "type": "subagent_status", "source": "helper",
-         "turn_id": "turn", "payload": {"name": "helper", "mode": "persistent", "status": "idle"}},
+         "turn_id": "turn", "payload": {"name": "helper", "mode": "persistent", "status": status}},
     ]
     historical = runtime.session.display_records(historical=True)
     assert historical[0]["payload"]["status"] == "working"
-    assert historical[1]["payload"]["status"] == "idle"
+    assert historical[1]["payload"]["status"] == status
 
 
 def test_full_conversation_exit_resume_and_continue(runtime_factory):
@@ -189,7 +190,7 @@ def test_approval_checkpoint_saves_request_and_background_while_waiting(runtime_
     from agent_harness.runtime.interaction import ExecutionContext
 
     bash = response(tools=[tool("bash", command="printf approved")], stop="tool_use")
-    values = ([response(tools=[tool("spawn_subagent", name="helper", prompt="run", mode="once")], stop="tool_use"),
+    values = ([response(tools=[tool("spawn_subagent", name="helper", description="Run child work", prompt="run", mode="once")], stop="tool_use"),
                bash, response("child done"), response("lead done")] if once
               else [bash, response("lead done")])
     runtime, host = runtime_factory(values)

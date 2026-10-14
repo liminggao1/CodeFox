@@ -401,7 +401,7 @@ def test_background_delivery_runs_with_noninteractive_permissions(runtime_factor
 
 def test_frontend_once_inherits_approval_and_workflow_does_not(runtime_factory):
     from agent_harness.workflows import workflow_runtime
-    child_call = tool("spawn_subagent", name="helper", prompt="execute", mode="once")
+    child_call = tool("spawn_subagent", name="helper", description="Execute child work", prompt="execute", mode="once")
     runtime, host = runtime_factory([response(tools=[child_call], stop="tool_use"),
                                      response(tools=[tool("bash", command="printf child")], stop="tool_use"),
                                      response("child done"), response("lead done")])
@@ -424,7 +424,7 @@ def test_frontend_once_inherits_approval_and_workflow_does_not(runtime_factory):
 
 
 def test_close_waits_for_owned_persistent_thread(runtime_factory):
-    child_call = tool("spawn_subagent", name="helper", prompt="work", mode="persistent")
+    child_call = tool("spawn_subagent", name="helper", description="Execute child work", prompt="work", mode="persistent")
     def create(**kwargs):
         if "You are 'helper'" in str(kwargs.get("system")):
             return response("child done")

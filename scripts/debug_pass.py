@@ -295,9 +295,11 @@ def _main() -> int:
         ])
         try:
             create = registrations.BUILTIN_HANDLERS["spawn_subagent"]
-            once = json.loads(create(name="scout", prompt="Inspect", mode="once").content)
+            once = json.loads(create(name="scout", description="Inspect source",
+                                     prompt="Inspect", mode="once").content)
             assert once["status"] == "completed" and "scout" not in subagent_runtime._active_subagents
-            started = json.loads(create(name="worker", prompt="Write child.txt", mode="persistent").content)
+            started = json.loads(create(name="worker", description="Write child file",
+                                        prompt="Write child.txt", mode="persistent").content)
             assert started["status"] == "started"
             events = []
             deadline = time.monotonic() + 3

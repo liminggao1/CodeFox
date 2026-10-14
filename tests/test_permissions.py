@@ -142,7 +142,8 @@ def test_subagent_uses_restricted_tools_and_permission_hook(
         return next(responses)
 
     core.client = SimpleNamespace(messages=SimpleNamespace(create=create))
-    assert subagent_runtime.spawn_subagent("inspector", "Inspect only", "once")["text"] == "Done"
+    assert subagent_runtime.spawn_subagent("inspector", "Inspect only", "once",
+                                            description="Inspect only")["text"] == "Done"
 
     assert {tool["name"] for tool in calls[0]["tools"]} == {
         "bash", "read_file", "write_file", "edit_file", "glob",
@@ -175,7 +176,7 @@ def test_tool_gate_uses_non_none_contract_for_lead_and_child(host_factory, monke
         messages = [{"role": "user", "content": "write"}]
         host.agent_loop(messages, "write")
     else:
-        subagent_runtime.spawn_subagent("gate-child", "write", "once")
+        subagent_runtime.spawn_subagent("gate-child", "write", "once", description="Write file")
     assert (tmp_path / "gate.txt").exists() is (decision is None)
     assert posted == (["write_file"] if decision is None else [])
     output = histories[1][-1]["content"][0]["content"]

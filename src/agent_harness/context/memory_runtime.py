@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 
 from .. import core
+from ..providers.llm_client import estimate_input_tokens
 
 MEMORY_INDEX_NAME = "MEMORY.md"
 
@@ -53,7 +54,6 @@ TEMPORARY_MEMORY_MARKERS = (
     "\u3053\u306e\u30bb\u30c3\u30b7\u30e7\u30f3",
     "\u73fe\u5728\u306e\u30bf\u30b9\u30af",
 )
-RECALL_CHAR_LIMIT = 20000
 CONSOLIDATE_THRESHOLD = 10
 CONSOLIDATE_INPUT_CHAR_LIMIT = 20000
 MEMORY_QUERY_CHAR_LIMIT = 4000
@@ -378,34 +378,58 @@ def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
 
 
 def load_memories(messages: list) -> str:
-    """根据当前对话历史检索相关记忆，在字符预算限制下加载记忆内容，返回JSON字符串。
+    """检索相关记忆，并按字符数和序列化结果的 token 数限制召回内容。
     Args:
         messages: 当前对话消息列表，用于筛选相关性记忆
     Returns:
         JSON字符串，包含记忆来源文件名与截取后的记忆内容；无匹配记忆时返回空字符串
     Note:
-        按照记忆相关性顺序依次加载，达到字符上限后停止加载后续记忆；
-        单条记忆会按需截断，保证总记忆字符不超过 RECALL_CHAR_LIMIT。
+        按照记忆相关性顺序依次加载；单条记忆会按需截断，
+        保证字符数和序列化结果的 token 数均不超过配置预算。
     """
-    # 存放成功加载的记忆条目
     loaded = []
-    # 剩余可使用的记忆字符预算
-    remaining = RECALL_CHAR_LIMIT
-    # 根据对话筛选相关记忆文件，按相关性顺序遍历
+    remaining_chars = core.MEMORY_RECALL_MAX_CHARS
+    token_budget = core.MEMORY_RECALL_TOKEN_BUDGET
+
+    def serialize(items: list[dict]) -> str:
+        return json.dumps(items, ensure_ascii=False, indent=2)
+
+    def fits(items: list[dict]) -> bool:
+        return estimate_input_tokens(
+            messages=[{"role": "user", "content": serialize(items)}]
+        ) <= token_budget
+
     for filename in select_relevant_memories(messages):
-        # 读取单个记忆文件原文
         content = read_memory_file(filename)
-        # 文件无内容 / 字符预算耗尽，跳过本条记忆
-        if not content or remaining <= 0:
+        if not content or remaining_chars <= 0:
             continue
-        # 截取不超过剩余预算长度的记忆文本
-        recalled = content[:remaining]
-        # 记录记忆来源和截取后的内容
+
+        recalled = content[:remaining_chars]
+        candidate = loaded + [{"source": filename, "content": recalled}]
+        if not fits(candidate):
+            low, high = 0, len(recalled)
+            best = 0
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = loaded + [{
+                    "source": filename,
+                    "content": recalled[:middle],
+                }]
+                if fits(candidate):
+                    best = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            if best == 0:
+                break
+            recalled = recalled[:best]
+
         loaded.append({"source": filename, "content": recalled})
-        # 扣除已使用字符，更新剩余预算
-        remaining -= len(recalled)
-    # 存在记忆则输出格式化JSON；无记忆返回空字符串
-    return json.dumps(loaded, ensure_ascii=False, indent=2) if loaded else ""
+        remaining_chars -= len(recalled)
+        if len(recalled) < len(content):
+            break
+
+    return serialize(loaded) if loaded else ""
 
 
 # -- 提取与整合 --
