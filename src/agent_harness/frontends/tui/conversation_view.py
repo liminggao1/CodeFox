@@ -254,10 +254,18 @@ class ConversationView:
                                        format_elapsed(widget.elapsed_seconds(datetime.now(timezone.utc))),
                                        started_at=entry["started_at"], finished_at=entry["finished_at"])
         else:
-            # 每条记录独占一行：用户消息靠右，模型回复和事件靠左。
+            # 同一子 agent 的进度就地更新；其他记录独占一行。
+            key = (("subagent", data.get("agent_id") or
+                    (record.get("turn_id"), record["source"], data["name"]))
+                   if kind == "subagent_status" else record["id"])
+            row = self._rows.get(key)
+            if row is not None and row.is_mounted:
+                row.query_one(ConversationRecord).update_status(record)
+                return
+            # 用户消息靠右，模型回复和事件靠左。
             row = MessageRow(classes="user" if kind == "user_message" else "")
             row.record_start_index = index
-            self._rows[record["id"]] = row
+            self._rows[key] = row
             await chat.mount(row)
             await row.mount(ConversationRecord(record, entry["tool_name"]))
 

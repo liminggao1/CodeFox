@@ -407,6 +407,17 @@ class ConversationRecord(Vertical):
         self.record = record
         self.tool_name = tool_name
 
+    def update_status(self, record):
+        """子 agent 的进度只更新已有状态行。"""
+        self.record = record
+        self.query_one(".subagent-status", Static).update(self._status_text())
+
+    def _status_text(self):
+        data = self.record["payload"]
+        name = data.get("name") or data.get("task_id", "后台任务")
+        status = "上次中断，结束状态未记录" if data.get("interrupted") else data["status"]
+        return f"{name} · {status}"
+
     def compose(self) -> ComposeResult:
         record, data = self.record, self.record["payload"]
         kind, source = record["type"], record["source"]
@@ -415,6 +426,9 @@ class ConversationRecord(Vertical):
             return
         if kind == "system_error":
             yield Static(data["error"], markup=False)
+            return
+        if kind == "subagent_status":
+            yield Static(self._status_text(), classes="subagent-status", markup=False)
             return
         yield Static(source, classes="record-source", markup=False)
         if kind == "tool_call":
@@ -438,10 +452,8 @@ class ConversationRecord(Vertical):
         elif kind == "todo_updated":
             text = "\n".join(todo_lines(data.get("todos", []))) or "无待办"
             yield Static("TODO\n" + text, markup=False)
-        elif kind in {"subagent_status", "background_status"}:
-            name = data.get("name") or data.get("task_id", "后台任务")
-            status = "上次中断，结束状态未记录" if data.get("interrupted") else data["status"]
-            yield Static(f"{name} · {status}", markup=False)
+        elif kind == "background_status":
+            yield Static(self._status_text(), markup=False)
         elif kind == "command_result":
             result = data.get("data", {})
             yield Static(str(result.get("text") or result.get("error") or data.get("command", "")), markup=False)

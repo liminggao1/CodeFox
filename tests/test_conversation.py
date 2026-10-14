@@ -772,6 +772,84 @@ class DisplayRuntime:
         self.closed = True
 
 
+@pytest.mark.parametrize("delivery", ["live", "restore"])
+def test_tui_subagent_progress_updates_one_row_and_preserves_records(delivery):
+    pytest.importorskip("textual")
+    from textual.widgets import Static
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import ConversationRecord
+
+    app = HarnessApp(DisplayRuntime())
+    updates = [record(1, "user_message", {"text": "Summarize README"})]
+    updates += [record(index + 2, "subagent_status", {
+        "agent_id": "child-1", "name": "readme_summarizer", "mode": "once",
+        "status": "working", "rounds": index // 5, "tool_calls": index // 6,
+    }, source="readme_summarizer") for index in range(11)]
+    updates.append(record(13, "assistant_message", {"text": "README summary"}))
+    updates.append(record(14, "subagent_status", {
+        "agent_id": "child-1", "name": "readme_summarizer", "mode": "once",
+        "status": "completed", "rounds": 2, "tool_calls": 1,
+    }, source="readme_summarizer"))
+
+    def status_row():
+        rows = [widget for widget in app.query(ConversationRecord)
+                if widget.record["type"] == "subagent_status"]
+        assert len(rows) == 1
+        assert [str(widget.content) for widget in rows[0].query(Static)] == [
+            "readme_summarizer · completed"]
+        assert rows[0].record == updates[-1]
+        return rows[0]
+
+    async def exercise():
+        async with app.run_test(size=(100, 30)) as pilot:
+            if delivery == "live":
+                for update in updates[:-1]:
+                    await app.conversation.display_record(update)
+                initial = [widget for widget in app.query(ConversationRecord)
+                           if widget.record["type"] == "subagent_status"]
+                assert len(initial) == 1
+                await app.conversation.display_record(updates[-1])
+                assert status_row() is initial[0]
+            else:
+                await app.conversation.restore(updates, session_id="test", generation=1)
+            await pilot.pause()
+            status_row()
+            assert app.records == updates
+            await app.conversation.render_window()
+            await pilot.pause()
+            status_row()
+            assert app.records == updates
+            await app.conversation.restore([], session_id="new", generation=2)
+            assert not app.query(ConversationRecord)
+    asyncio.run(exercise())
+
+
+def test_tui_subagent_status_keeps_same_named_instances_separate():
+    pytest.importorskip("textual")
+    from textual.widgets import Static
+    from agent_harness.frontends.tui.app import HarnessApp
+    from agent_harness.frontends.tui.widgets import ConversationRecord
+
+    app = HarnessApp(DisplayRuntime())
+    updates = [record(index + 1, "subagent_status", {
+        "agent_id": agent, "name": "helper", "mode": "once", "status": status,
+    }, source="helper") for index, (agent, status) in enumerate([
+        ("first", "working"), ("second", "working"), ("first", "completed"),
+    ])]
+
+    async def exercise():
+        async with app.run_test(size=(100, 30)) as pilot:
+            for update in updates:
+                await app.conversation.display_record(update)
+            await pilot.pause()
+            rows = list(app.query(ConversationRecord))
+            assert len(rows) == 2
+            assert {row.record["payload"]["agent_id"]: str(row.query_one(Static).content)
+                    for row in rows} == {
+                "first": "helper · completed", "second": "helper · working"}
+    asyncio.run(exercise())
+
+
 def test_tui_record_window_expansion_history_and_dedup():
     pytest.importorskip("textual")
     from textual.widgets import Button, Collapsible, Static
