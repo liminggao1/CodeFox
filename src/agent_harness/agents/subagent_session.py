@@ -190,99 +190,134 @@ class SubagentSession:
         return execute_tool(block, self.handlers[block.name])
 
     def run(self, messages: list):
-        """Request one response and append its paired tool results.
-
-        Input: the mutable conversation for the current delegation.
-        Return: a complete model response. Context recovery is attempted at most
-            once per delegation; truncated responses produce no tool effects.
+        """发起一轮模型请求，并追加配套的工具执行结果。
+        入参：当前子代理会话的可变对话消息列表。
+        返回：完整的模型响应。单次委托任务最多尝试一次上下文恢复；
+              被截断的模型响应不会产生任何工具执行效果。
         """
+        # 检查预算/调用次数限额
         self.check_budget()
+        # 获取当前用户请求文本，优先使用active_request，为空则取第一条消息内容
         request = self.active_request or str(messages[0].get("content", ""))
+        # 切换到当前任务分配对应的工作目录
         tasks.assignment_cwd(self.name)
         assignment = tasks.assignments.get(self.name)
+        # 默认上下文：无分配任务，工作目录为程序启动目录
         context = "No assigned Task; workspace is the startup directory."
         if assignment:
+            # 加载任务信息，获取任务工作目录
             task = tasks.load_task(str(assignment["task_id"]))
             cwd = tasks.assignment_cwd(self.name)
             context = (f"Current Task: {task.id} [{task.status}] {task.subject}\n"
                        f"Task description: {task.description}\nWork directory: {cwd}")
+        # 追加当前运行环境上下文
         context += f"\n{self.work_context()}"
+        # 模板变量，用于填充prompt
         values = {"current_delegation": request, "current_work": context}
+        # 拼接用户请求与任务上下文
         request = f"{request}\n\n[Current work]\n{context}"
+        # 准备系统提示词，执行prompt状态预处理（上下文压缩预处理）
         system, result = self.prompt_state.prepare(
             messages, values, lambda: self.system, request, client=self.client,
             model=self.model, tools=self.tools, preserve_tail=True)
+        # 如果发生上下文压缩，打印压缩日志
         if result.reason:
             core.terminal_print(f"[subagent compact] {result.reason}")
+        # 再次校验预算限额
         self.check_budget()
         try:
+            # 调用模型，获取模型返回响应
             response = self._request(messages, system)
         except Exception as exc:
+            # 如果不是prompt超长错误，或者已经执行过一次上下文恢复，则直接抛出异常
             if not recovery.is_prompt_too_long_error(exc) or self._reactive_claimed:
                 raise
+            # 标记已经执行过上下文恢复，防止重复触发
             self._reactive_claimed = True
+            # 执行响应式上下文压缩，对消息做摘要缩减长度
             result = compaction.reactive_compact(
                 messages, request, client=self.client, model=self.model,
                 strict_summary=True)
             self.check_budget()
+            # 压缩失败或者未生效，抛出子代理上下文恢复失败异常
             if result.reason or not result.applied:
                 raise RuntimeError(f"Subagent context recovery failed: {result.reason}") from exc
+            # 重置prompt状态，重新生成系统提示词
             self.prompt_state.reset()
             system, _ = self.prompt_state.prepare(
                 messages, values, lambda: self.system, request, client=self.client,
                 model=self.model, tools=self.tools, enabled=False, preserve_tail=True)
+            # 使用压缩后的消息再次调用模型
             response = self._request(messages, system)
+        # 模型因max_tokens截断输出，抛出异常
         if getattr(response, "stop_reason", None) == "max_tokens":
             raise RuntimeError("Subagent response was truncated (max_tokens)")
+        # 提取模型返回的纯文本内容
         text = message_content.extract_text(response.content)
         if text:
             self.last_text = text
+        # 更新进度状态
         self._progress()
+        # 将助手（模型）这一轮输出追加到消息列表
         messages.append({"role": "assistant", "content": response.content})
+        # 筛选出本次模型返回的全部工具调用块
         calls = [block for block in response.content if block.type == "tool_use"]
         if calls:
             results = []
             post_error = None
+            # 开启交互操作上下文，用于事件发布、断点保存
             with interaction.operation_context(model_call_id=self._model_call_id):
+                # 发布工具调用开始事件，保存断点
                 for block in calls:
                     interaction.publish("tool_call", id=block.id, name=block.name, input=block.input)
-                context = interaction.current_context()
-                if context is not None and context.checkpoint is not None:
-                    context.checkpoint()
+                    context = interaction.current_context()
+                    if context is not None and context.checkpoint is not None:
+                        context.checkpoint()
+                # 逐个执行这批工具调用
                 for index, block in enumerate(calls):
                     try:
+                        # 执行单个工具
                         execution = self.execute_tool(block)
                     except Exception as exc:
-                        # 前置 Hook 或目录解析异常也必须补齐模型已提交的整批调用。
+                        # 前置Hook或目录解析异常，也必须补齐整批模型提交工具对应的返回结果
                         execution = ToolExecution(ToolResult(
                             f"Error: {type(exc).__name__}: {exc}", "failed"), exc)
+                    # 把工具执行结果包装成符合消息schema的结构
                     result = execution.result.model_result(block.id)
                     results.append(result)
+                    # 发布工具结果事件，推送给前端/SSE
                     interaction.publish("tool_result", **result, status=execution.result.status)
+                    # 如果工具执行后出现致命错误
                     if execution.post_error is not None:
-                        # 执行失败不运行后续工具，但必须补齐这批调用的配对结果。
+                        # 当前工具执行失败，后续未执行工具全部标记为中断，补齐结果
                         for pending in calls[index + 1:]:
                             stopped = ToolResult("Interrupted before execution", "stopped").model_result(pending.id)
                             results.append(stopped)
                             interaction.publish("tool_result", **stopped, status="stopped")
                         post_error = execution.post_error
+                    # 每执行完一个工具，保存会话断点
                     if context is not None and context.checkpoint is not None:
                         context.checkpoint()
+                    # 出现致命错误，终止后续工具循环
                     if execution.post_error is not None:
                         break
+            # 将本轮所有工具结果作为user消息追加进对话历史
             messages.append({"role": "user", "content": results})
             if not text:
-                # 本轮没有模型正文时，用最新工具批次替换旧证据。
+                # 如果模型本轮没有输出文本，把工具返回内容合并作为本轮输出文本
                 self.last_text = "\n".join(
                     str(item.get("content", "")) for item in results
                     if item.get("content")
                 )
             self._progress()
+            # 工具执行出现致命错误，向上抛出
             if post_error is not None:
                 raise post_error
+            # 工具调用次数超出上限，抛出子代理预算超限异常
             if self.tool_calls >= self.max_tool_calls and not self._stopped():
                 raise SubagentBudgetExceeded("tool-call", self.max_tool_calls)
         return response
+
 
     def check_budget(self):
         """在请求模型或等待审批前确认当前工作还有执行预算。"""

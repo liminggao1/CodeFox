@@ -677,7 +677,7 @@ cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 PYTHONPATH=src /home/gaogao/miniconda3/envs/learncc/bin/python -m agent_harness
 ```
 
-**准备断点：**按下面顺序设置断点后按 F5。断点停在对应语句执行前，需要查看赋值结果时先按 F10。
+**准备断点：**下面列出一次委派的主要观察点；实际命中顺序和次数以模型选择的调用路径为准。设置断点后按 F5，断点停在对应语句执行前，需要查看赋值结果时先按 F10。
 
 | 顺序 | 断点                                                                            | 看什么                                                                                  |
 | ---- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
@@ -686,31 +686,19 @@ PYTHONPATH=src /home/gaogao/miniconda3/envs/learncc/bin/python -m agent_harness
 | 3    | [subagent.py:382](../src/agent_harness/agents/subagent.py#L382)                 | 构造独立 SubagentSession，查看 system、历史和可用工具                                   |
 | 4    | [subagent.py:519](../src/agent_harness/agents/subagent.py#L519)                 | 在当前工具调用内同步执行工作单元，观察计数重置                                          |
 | 5    | [subagent_session.py:192](../src/agent_harness/agents/subagent_session.py#L192) | 整理当前委派历史并开始模型回合                                                          |
-| 6    | [subagent_session.py:294](../src/agent_harness/agents/subagent_session.py#L294) | 发起模型请求；查看 system 和工具数量，不展开认证字段                                    |
-| 7    | [file_tools.py:152](../src/agent_harness/tools/file_tools.py#L152)              | 执行 read_file；确认目标路径、offset 与 limit                                           |
-| 8    | [subagent_session.py:273](../src/agent_harness/agents/subagent_session.py#L273) | 整批工具结果回填历史，后续请求受工作预算约束                                            |
+| 6    | [subagent_session.py:329](../src/agent_harness/agents/subagent_session.py#L329) | 发起模型请求；查看 system 和工具数量，不展开认证字段                                    |
+| 7    | [file_tools.py:152](../src/agent_harness/tools/file_tools.py#L152)              | 子 agent 读取 README.md；查看 Lead 委派的任务和实际读取内容                              |
+| 8    | [subagent_session.py:305](../src/agent_harness/agents/subagent_session.py#L305) | 整批工具结果回填历史，后续请求受工作预算约束                                            |
 | 9    | [subagent.py:759](../src/agent_harness/agents/subagent.py#L759)                 | 保存最终结果，Lead 收到相同结构并继续自己的模型回合                                     |
 
 **输入请求：**程序出现 `agent-harness >>` 提示符后，在集成终端输入：
 
 ```text
-请实际调用 spawn_subagent 创建一个 once 子 agent，name 使用 read-only-audit，description 使用 "Audit child startup"，tools 限定为 ["glob", "read_file"]，max_rounds=6，max_tool_calls=6。先用 glob 查找 src/**/subagent.py，再只读检查 src/agent_harness/agents/subagent.py 的启动分支：offset=739、limit=34。只根据这个范围说明 once 与 persistent 如何启动。最多调用 glob 和 read_file 各一次；不要读取整文件、其他文件或会话归档，不要创建任务或 worktree，也不要修改文件。只创建一次子 agent；等待结果后简短报告结论，出错就报告原因并结束。
+请安排一个助手阅读项目根目录的 README.md，帮我整理这个项目的用途、启动方式和常用交互命令。等它完成后，你再给我一份简短的中文说明，只需要总结，不用修改文件。
 ```
 
-**预期结果：**先命中 Lead 的 `spawn_subagent` 断点，再进入子 agent 的独立模型请求和 `read_file`。once 子 agent 产生最终结果后立即退出，Lead 收到工具结果并继续回答。若 Lead 只解释而没有委派，可再次明确要求它实际调用 `spawn_subagent`。
-
-**安全收尾：**按 `q` 或 Ctrl+D 退出，确认回到 shell 后再按 Shift+F5 停止调试。演练前后分别运行
-`git status --short` 并比较，确认没有新增代码改动。会话与诊断记录存放在用户会话目录；persistent 生命周期仍以离线测试为准。
-
-**自动复测：**只读审计用例将当前启动分支复制到临时目录，验证 Lead 委派、glob 发现、范围读取、预算内完成与零路径审批。
-在 WSL 的 `learncc` 中执行（消耗真实 API 额度）：
-
-```sh
-LIVE_API=1 /home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q -s tests/live/test_real_api.py::test_streaming_bounded_read_only_subagent_audit
-```
-
-演练输入中的 offset 随源码行数变化；自动用例按函数和启动分支定位，不依赖固定行号。
-2026-10-14 的真实只读审计已通过，结果与网络故障边界见 [验收记录](../docs/handoff/2026-10-14-subagent-api-run-handoff.md)。WSL 经本机代理时，在该命令前增加 `HTTP_PROXY=http://127.0.0.1:7892 HTTPS_PROXY=http://127.0.0.1:7892`。
+这是一次有明确交付结果的阅读任务。用户只描述任务与期望结果，子 agent 的名称、生命周期、工具和预算由 Lead 选择。
+本节观察 Lead 是否使用 once 完成委派，以及子 agent 的结果如何返回并用于最终回答；自然语言请求不保证模型一定选择 once。
 
 #### 10. 权限与 hooks
 
