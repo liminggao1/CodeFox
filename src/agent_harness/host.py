@@ -62,11 +62,20 @@ def _create_goal(evaluator_model: str | None = None):
     use_jev = provider == "jev" or (provider == "auto" and bool(jev_key))
     if use_jev:
         timeout = float(os.getenv("JEV_TIMEOUT_SECONDS", "30"))
+
+        def log_jev_response(raw_response: str) -> None:
+            with interaction.operation_context(source="goal_evaluator"):
+                interaction.publish(
+                    "log",
+                    text=f"[Jev raw response]\n{raw_response}",
+                )
+
         evaluator = JevGoalEvaluator(
             api_key=jev_key,
             model=(evaluator_model or os.getenv("JEV_MODEL")),
             endpoint=os.getenv("JEV_API_URL"),
             timeout=timeout,
+            on_response=log_jev_response,
         )
     else:
         model = (evaluator_model

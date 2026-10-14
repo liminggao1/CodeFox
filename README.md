@@ -91,6 +91,7 @@ Textual 的本机安装、启动、快捷键、审批和会话操作见
   受限续做和目标失败；只有 `choice=complete` 且整体 `confidence` 超过
   `JEV_COMPLETION_CONFIDENCE_THRESHOLD` 才能结束。`probabilities` 会校验并保留在 Jev 返回中，
   但不作为第二个硬门槛。
+  Jev 原始响应会写入当前会话的诊断日志，不进入模型历史。
   对话输入默认限制为 `24000` 个字符，可通过 `GOAL_EVALUATOR_MAX_TRANSCRIPT_CHARACTERS` 调整。
   未配置 Jev 时默认使用现有 Prompt evaluator，离线测试不会访问外部 API。
 - **交互会话**：第一次有效用户交互创建 `~/.agent-harness/sessions/<id>.json`，历史、goal、任务关联、工作目录和 TODO 变化都更新同一文件；`/resume` 列出会话，`/resume <id>` 恢复上下文，`/delete <id>` 删除非活动会话，`/new` 保存当前会话并开启干净会话（旧会话仍可恢复），`/compact` 手动压缩当前会话上下文。CLI 与 TUI 共用后端命令与展示记录。

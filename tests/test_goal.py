@@ -334,6 +334,43 @@ def test_host_can_select_jev_goal_evaluator_from_configuration(host_factory, mon
     assert isinstance(goal.evaluator, evaluator_module.JevGoalEvaluator)
 
 
+def test_host_logs_raw_jev_response_to_session_diagnostics(host_factory, monkeypatch):
+    host = host_factory()
+    monkeypatch.setenv("GOAL_EVALUATOR_PROVIDER", "jev")
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+    published = []
+    monkeypatch.setattr(
+        host.interaction,
+        "publish",
+        lambda event_type, **payload: published.append((event_type, payload)),
+    )
+    raw_response = json.dumps({
+        "data": {"result": {"answers": {"completion": {
+            "choice": "complete",
+            "probabilities": {"complete": 0.99, "incomplete": 0.01},
+            "confidence": 0.98,
+        }}}},
+    })
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return raw_response.encode("utf-8")
+
+    goal = host._create_goal()
+    goal.evaluator._opener = lambda request, timeout: Response()
+
+    result = asyncio.run(goal.evaluator.evaluate("tests pass", []))
+
+    assert result.ok is True
+    assert published == [("log", {"text": f"[Jev raw response]\n{raw_response}"})]
+
+
 def test_transcript_keeps_recent_messages_whole():
     messages = [{"role": "user", "content": f"turn {i} " + "x" * 50}
                 for i in range(10)]

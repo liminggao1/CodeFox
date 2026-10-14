@@ -11,6 +11,7 @@ import json
 import os
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from collections.abc import Callable
 from typing import Any
 
 from .goal import GoalError, GoalEvaluation
@@ -250,6 +251,7 @@ class JevGoalEvaluator:
         endpoint: str | None = None,
         timeout: float = DEFAULT_JEV_TIMEOUT_SECONDS,
         completion_confidence_threshold: float | None = None,
+        on_response: Callable[[str], None] | None = None,
         opener=None,
     ):
         self.api_key = (api_key or os.getenv("JEV_API_KEY", "")).strip()
@@ -275,6 +277,7 @@ class JevGoalEvaluator:
             raise GoalError("Jev completion confidence threshold must be between 0 and 1")
         self.timeout = timeout
         self.completion_confidence_threshold = threshold
+        self._on_response = on_response
         self._opener = opener or urlopen
 
     async def evaluate(
@@ -338,8 +341,16 @@ class JevGoalEvaluator:
         except OSError as error:
             raise GoalError(f"Jev request failed: {error}") from error
 
+        raw_text = raw.decode("utf-8", errors="replace")
+        if self._on_response is not None:
+            try:
+                self._on_response(raw_text)
+            except Exception:
+                # Diagnostic logging must not change goal evaluation behavior.
+                pass
+
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            payload = json.loads(raw_text)
             answer = payload["data"]["result"]["answers"][self._QUESTION_NAME]
             choice = answer["choice"]
             probabilities = answer["probabilities"]
