@@ -669,13 +669,9 @@ Lead 模型选择是否委派及 mode。once 同步交付最终结果；persiste
 
 
 **启动前检查：**在 Remote-WSL 窗口中打开项目，确认解释器为
-`/home/gaogao/miniconda3/envs/learncc/bin/python`，项目根目录存在 `.env`，并只检查密钥是否存在。
-
-**launch 配置：**选择「Agent 交互（真实 API）」，入口为 `agent_harness` 模块，终端使用
-`integratedTerminal`。配置以 [`.vscode/launch.json`](../.vscode/launch.json) 为准。
-
+`/home/gaogao/miniconda3/envs/learncc/bin/python`，项目根目录存在 `.env`，
+**launch 配置：**选择「Agent 交互（真实 API）」，"module": "agent_harness",
 **启动命令（没有现成配置时）：**在 WSL 的 `learncc` 环境，从项目根目录执行：
-
 ```sh
 cd /mnt/d/01dpan/01project/life/learncc/agent-harness
 PYTHONPATH=src /home/gaogao/miniconda3/envs/learncc/bin/python -m agent_harness
