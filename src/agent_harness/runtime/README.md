@@ -6,6 +6,7 @@
 | 文件 | 职责 |
 | --- | --- |
 | [interactive_runtime.py](interactive_runtime.py) | `InteractiveRuntime`：接收输入、串行驱动 Lead 回合、消费后台输入、生成展示记录、统一保存与恢复交付、停止和关闭；命令路由委托 `CommandRouter`，会话切换委托 `SessionSwitch` |
+| [turn_runner.py](turn_runner.py) | `TurnRunner`：提交排队、回合状态、接受与终态事件、后台暂停和 Lead 用量账本 |
 | [session_switch.py](session_switch.py) | `SessionSwitch`：会话切换事务的唯一拥有者；读快照、校验、停服务、切换目录、激活归属、重启服务与发布 `session_changed` 都在实现内按序完成 |
 | [commands.py](commands.py) | `CommandRouter`：`/quit`、`/goal`、`/resume`、`/delete` 的解析与分派；结果经 `CommandOutcome` 显式返回，`/resume` 委托 `SessionSwitch` |
 | [lead_context.py](lead_context.py) | `LeadContext`：运行时拥有的 Todo、会话 ID 和保留工作树；防御性复制、显式激活和目录绑定；离线入口显式提供状态作用域 |
@@ -19,7 +20,7 @@
 | [tool_execution.py](tool_execution.py) | Lead/child/后台共用的 handler 执行、异常转明确失败、生命周期与 PostHook 结算；真实结果和 Hook 错误分别返回 |
 
 前端调用 `InteractiveRuntime`，后者经 `TurnRunner` 调用根目录 [host.agent_loop](../host.py)；该兼容入口装配
-`agents/turn_engine.py` 的 `TurnEngine`，不再在 `host.py` 内保存主循环实现。
+[agents/turn_engine.py](../agents/turn_engine.py) 的 `TurnEngine`；子 agent 的完整工作也进入同一循环。
 `start()` 在线程启动前调用 `host.initialize_runtime()`。配置失败可重试，不启动执行线程；重复配置保留已有 goal、runner 与注册器配置。导入模块和构造驱动不执行应用装配。
 执行代码通过 `interaction` 发布事件和请求审批，前端通过同一通道消费和确认。
 驱动提供只读事实的纯展示转换，通道在接受事实时按顺序交付展示记录，并将同 ID 的副本加入保存队列。

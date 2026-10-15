@@ -8,7 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from agent_harness import host
-from agent_harness.agents import recovery, turn_engine
+from agent_harness.agents import recovery
+from agent_harness.agents.lead_turn import LeadTurn
+from agent_harness.agents.subagent_session import SubagentSession
 from agent_harness.agents.turn_engine import (
     PreparedRequest, TurnCallbacks, TurnEngine, TurnPhase, TurnRequest,
 )
@@ -17,6 +19,10 @@ from agent_harness.runtime.interaction import (
     ExecutionContext, InteractionChannel, execution_context,
 )
 from agent_harness.runtime import interaction
+from agent_harness.runtime.tool_execution import ToolExecution
+from agent_harness.tools.tool_result import ToolResult
+from agent_harness.context import compaction
+from agent_harness.context.prompt_state import is_context_message
 
 
 class _PromptState:
@@ -42,15 +48,17 @@ def _response(text="done", *, blocks=(), stop="end_turn"):
                            content=[SimpleNamespace(type="text", text=text), *blocks], usage=None)
 
 
-def _callbacks(call_llm, *, assemble_tool_pool=None, evaluate_goal=None, goal_condition=None):
+def _callbacks(call_llm, *, assemble_tool_pool=None, evaluate_goal=None, goal_condition=None,
+               execute_tool=None, before_iteration=None):
+    turn = LeadTurn([], evaluate_goal=evaluate_goal, goal_condition=goal_condition)
     return TurnCallbacks(
+        turn=turn,
         assemble_tool_pool=assemble_tool_pool or (lambda: ([], {})),
-        build_context=lambda history: SimpleNamespace(prompt_values=lambda: {}),
-        call_llm=call_llm,
-        build_user_content=lambda results: results,
-        evaluate_goal=evaluate_goal or (lambda history: None),
-        remember_after_turn=lambda history: None,
-        goal_condition=goal_condition or (lambda: ""),
+        build_context=lambda history, request: ({}, request),
+        system_factory=lambda: "system",
+        call_llm=lambda prepared: call_llm(prepared, turn.recovery),
+        execute_tool=execute_tool or (lambda *args: ToolExecution(ToolResult("file contents"))),
+        before_iteration=before_iteration,
     )
 
 
@@ -106,14 +114,35 @@ def test_max_tokens_retry_reuses_detached_request_snapshot():
     assert token_limits[1] > token_limits[0]
 
 
-def test_tool_results_are_paired_and_prepare_a_new_request(monkeypatch):
+def test_request_usage_callback_records_each_successful_response_once():
+    responses = iter([_response("partial", stop="max_tokens"), _response("done")])
+    observed = []
+    channel = InteractionChannel()
+    context = ExecutionContext(channel, "session", 1, "turn")
+
+    def call_llm(*args):
+        response = next(responses)
+        response.usage = SimpleNamespace(input_tokens=10, output_tokens=5)
+        return response, None, None
+
+    engine = TurnEngine(_callbacks(call_llm))
+    with execution_context(context):
+        outcome = engine.run(TurnRequest(
+            [], "request", on_usage=observed.append, prompt_state=_PromptState()))
+
+    assert outcome.status == "completed"
+    assert observed == [{"input_tokens": 10, "output_tokens": 5}] * 2
+    events = []
+    while (event := channel.next_event()) is not None:
+        events.append(event)
+    assert [event.payload["usage"] for event in events if event.type == "lead_usage"] == observed
+
+
+def test_tool_results_are_paired_and_prepare_a_new_request():
     prompt_state = _PromptState()
     block = SimpleNamespace(type="tool_use", id="read-1", name="read_file", input={"path": "a.txt"})
     tools = [{"name": "read_file", "input_schema": {"type": "object"}}]
     calls = []
-    monkeypatch.setattr(turn_engine, "execute_tool_batch", lambda *args: [{
-        "type": "tool_result", "tool_use_id": "read-1", "content": "file contents"
-    }])
 
     def call_llm(prepared, state):
         calls.append(prepared)
@@ -161,7 +190,7 @@ def test_reactive_compaction_prepares_a_fresh_request(monkeypatch):
         history[:] = [{"role": "user", "content": "compressed"}]
         return SimpleNamespace(applied=True, reason=None)
 
-    monkeypatch.setattr(turn_engine.compaction, "reactive_compact", compact)
+    monkeypatch.setattr(compaction, "reactive_compact", compact)
 
     def call_llm(prepared, state):
         calls.append(prepared)
@@ -187,22 +216,15 @@ def test_model_failure_sets_failed_terminal_phase():
     assert outcome.status == "failed"
     assert "model failed" in outcome.reason
     assert engine.phase is TurnPhase.FAILED
-def test_tool_round_trip_records_tool_execution_phase(monkeypatch):
+
+
+def test_tool_round_trip_records_tool_execution_phase():
     block = SimpleNamespace(type="tool_use", id="call-1", name="read_file", input={})
     responses = iter([
         SimpleNamespace(stop_reason="tool_use", content=[block], usage=None),
         SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="done")], usage=None),
     ])
-    monkeypatch.setattr(turn_engine, "execute_tool_batch", lambda *args: [])
-    engine = TurnEngine(TurnCallbacks(
-        assemble_tool_pool=lambda: ([], {}),
-        build_context=lambda history: SimpleNamespace(prompt_values=lambda: {}),
-        call_llm=lambda *args: (next(responses), None, None),
-        build_user_content=lambda results: results,
-        evaluate_goal=lambda history: None,
-        remember_after_turn=lambda history: None,
-        goal_condition=lambda: "",
-    ))
+    engine = TurnEngine(_callbacks(lambda *args: (next(responses), None, None)))
 
     outcome = engine.run(TurnRequest([], "read", prompt_state=_PromptState()))
 
@@ -220,7 +242,7 @@ def test_tool_round_trip_records_tool_execution_phase(monkeypatch):
     )
 
 
-def test_tool_approval_is_recorded_in_turn_phase_history(monkeypatch):
+def test_tool_approval_is_recorded_in_turn_phase_history():
     channel = InteractionChannel()
     block = SimpleNamespace(type="tool_use", id="call-1", name="bash", input={})
     responses = iter([
@@ -243,18 +265,9 @@ def test_tool_approval_is_recorded_in_turn_phase_history(monkeypatch):
             waiting = pool.submit(approve)
             assert context.channel.request_approval(context, "bash", block.id, block.input) == "approve"
             waiting.result(timeout=2)
-        return []
+        return ToolExecution(ToolResult("approved"))
 
-    monkeypatch.setattr(turn_engine, "execute_tool_batch", execute)
-    engine = TurnEngine(TurnCallbacks(
-        assemble_tool_pool=lambda: ([], {}),
-        build_context=lambda history: SimpleNamespace(prompt_values=lambda: {}),
-        call_llm=lambda *args: (next(responses), None, None),
-        build_user_content=lambda results: results,
-        evaluate_goal=lambda history: None,
-        remember_after_turn=lambda history: None,
-        goal_condition=lambda: "",
-    ))
+    engine = TurnEngine(_callbacks(lambda *args: (next(responses), None, None), execute_tool=execute))
     context = ExecutionContext(channel, "session", 1, "turn", origin="frontend")
 
     with execution_context(context):
@@ -312,3 +325,181 @@ def test_host_sends_prepared_request_without_rebuilding_payload(monkeypatch):
     assert captured["system"] is expected.system
     assert captured["messages"] is expected.messages
     assert captured["tools"] is expected.tools
+
+
+@pytest.mark.parametrize("owner", ["lead", "once", "persistent"])
+def test_shared_loop_returns_full_work_and_pairs_denials(host_factory, owner):
+    host_factory()
+    block = SimpleNamespace(type="tool_use", id="read", name="read_file", input={"path": "file.txt"})
+    values = iter([_response("", blocks=[block]), _response("finished")])
+    calls, executed = [], []
+
+    def create(**kwargs):
+        calls.append(copy.deepcopy(kwargs))
+        return next(values)
+
+    def execute(*args):
+        executed.append(args[0].id)
+        return ToolExecution(ToolResult("Denied for this work", "denied"))
+
+    history = [{"role": "user", "content": "inspect"}]
+    channel = InteractionChannel()
+    context = ExecutionContext(channel, "session", 1, "turn", source=owner)
+    with execution_context(context):
+        if owner == "lead":
+            engine = TurnEngine(_callbacks(
+                lambda prepared, state: (create(messages=prepared.messages), "lead-call", None),
+                execute_tool=execute))
+            assert engine.run(TurnRequest(history, "inspect", prompt_state=_PromptState())).status == "completed"
+        else:
+            child = SubagentSession(owner, SimpleNamespace(messages=SimpleNamespace(create=create)),
+                                    "child-model", "Child rules", mode=owner, tools=["read_file"])
+            child.execute_tool = execute
+            final = child.run(history)
+            assert final.content[0].text == "finished"
+            assert child.rounds == 2
+            engine = child.engine
+
+    assert len(calls) == 2 and executed == ["read"]
+    assert calls[1]["messages"][-1]["content"] == [{
+        "type": "tool_result", "tool_use_id": "read", "content": "Denied for this work", "is_error": True}]
+    business = [item for item in history if not is_context_message(item)]
+    assert [item["role"] for item in business] == ["user", "assistant", "user", "assistant"]
+    assert engine.phase is TurnPhase.COMPLETED
+    events = []
+    while (event := channel.next_event()) is not None:
+        events.append(event)
+    assert len([event for event in events if event.type == "tool_call"]) == 1
+    results = [event for event in events if event.type == "tool_result"]
+    assert len(results) == 1 and results[0].payload["status"] == "denied"
+
+
+@pytest.mark.parametrize("owner", ["lead", "once", "persistent"])
+@pytest.mark.parametrize("hook", ["before", "after"])
+def test_shared_batch_preserves_results_before_propagating_hook_errors(host_factory, owner, hook):
+    host_factory()
+    blocks = [SimpleNamespace(type="tool_use", id=call_id, name="read_file", input={})
+              for call_id in ("first", "second")]
+    executed = []
+    error = RuntimeError("hook failed")
+
+    def execute(block, *args):
+        executed.append(block.id)
+        if hook == "before":
+            raise error
+        return ToolExecution(ToolResult("Real result"), error)
+
+    history = [{"role": "user", "content": "inspect"}]
+    channel = InteractionChannel()
+    with execution_context(ExecutionContext(channel, "session", 1, "turn", source=owner)):
+        if owner == "lead":
+            engine = TurnEngine(_callbacks(
+                lambda *args: (_response("", blocks=blocks), "lead-call", None), execute_tool=execute))
+            run = lambda: engine.run(TurnRequest(history, "inspect", prompt_state=_PromptState()))
+        else:
+            child = SubagentSession(owner, SimpleNamespace(messages=SimpleNamespace(
+                create=lambda **kwargs: _response("", blocks=blocks))), "child-model", "Child rules",
+                mode=owner, tools=["read_file"])
+            child.execute_tool = execute
+            run = lambda: child.run(history)
+        with pytest.raises(RuntimeError, match="hook failed"):
+            run()
+        if owner != "lead":
+            engine = child.engine
+
+    assert executed == ["first"] and engine.phase is TurnPhase.FAILED
+    results = history[-1]["content"]
+    assert [item["tool_use_id"] for item in results] == ["first", "second"]
+    assert bool(results[0].get("is_error")) is (hook == "before")
+    assert results[1]["is_error"] and "Interrupted" in results[1]["content"]
+    events = []
+    while (event := channel.next_event()) is not None:
+        events.append(event)
+    result_events = [event for event in events if event.type == "tool_result"]
+    assert [event.payload["tool_use_id"] for event in result_events] == ["first", "second"]
+    assert result_events[1].payload["status"] == "stopped"
+
+
+def test_nested_child_approval_restores_parent_phase_observer(host_factory):
+    host_factory()
+    channel = InteractionChannel()
+    outer_calls = iter([_response("", blocks=[SimpleNamespace(
+        type="tool_use", id="spawn", name="spawn_subagent", input={})]), _response()])
+    child_calls = iter([_response("", blocks=[SimpleNamespace(
+        type="tool_use", id="read", name="read_file", input={})]), _response()])
+    child = SubagentSession("child", SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kwargs: next(child_calls))), "child-model", "Child rules",
+        mode="once", tools=["read_file"])
+
+    def execute_child(block):
+        context = interaction.current_context()
+
+        def approve():
+            # 事件交付屏障必须先确认，再取审批请求。
+            while (event := channel.next_event(timeout=0.01)) is not None:
+                channel.acknowledge_event(event.sequence)
+            request = channel.next_approval(timeout=2)
+            assert request is not None
+            assert channel.respond(request.request_id, request.generation, "approve")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(approve)
+            assert context.channel.request_approval(context, block.name, block.id, block.input) == "approve"
+            future.result(timeout=2)
+        return ToolExecution(ToolResult("approved"))
+
+    child.execute_tool = execute_child
+
+    def execute_outer(*args):
+        parent = interaction.current_context()
+        observer = parent.phase_observer
+        with execution_context(parent.delegate("child")):
+            child.run([{"role": "user", "content": "inspect"}])
+            assert interaction.current_context().phase_observer is observer
+        assert engine.phase is TurnPhase.EXECUTING_TOOLS
+        return ToolExecution(ToolResult("child finished"))
+
+    engine = TurnEngine(_callbacks(lambda *args: (next(outer_calls), "parent-call", None),
+                                   execute_tool=execute_outer))
+    parent_context = ExecutionContext(channel, "session", 1, "turn", origin="frontend")
+    with execution_context(parent_context):
+        assert engine.run(TurnRequest([], "delegate", prompt_state=_PromptState())).status == "completed"
+        assert interaction.current_context() is parent_context
+    assert TurnPhase.WAITING_APPROVAL not in engine.phase_history
+    assert child.engine.phase_history[4:7] == (
+        TurnPhase.EXECUTING_TOOLS, TurnPhase.WAITING_APPROVAL, TurnPhase.EXECUTING_TOOLS)
+
+
+def test_iteration_plan_wait_resumes_preparation_without_extra_model_call(host_factory):
+    host_factory()
+    calls = []
+    child = SubagentSession("child", SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kwargs: calls.append(kwargs) or _response())), "child-model", "Child rules",
+        mode="persistent", tools=[])
+
+    def coordinate():
+        with child.engine.waiting_approval():
+            assert child.engine.phase is TurnPhase.WAITING_APPROVAL
+            assert child.rounds == child.tool_calls == 0
+        assert child.engine.phase is TurnPhase.PREPARING
+
+    child.run([{"role": "user", "content": "inspect"}], before_iteration=coordinate)
+    assert len(calls) == 1 and child.rounds == 1
+    assert child.engine.phase_history == (
+        TurnPhase.CREATED, TurnPhase.PREPARING, TurnPhase.WAITING_APPROVAL,
+        TurnPhase.PREPARING, TurnPhase.WAITING_MODEL, TurnPhase.PROCESSING_RESPONSE, TurnPhase.COMPLETED)
+
+
+def test_result_notification_failure_keeps_paired_history_before_raising():
+    from dataclasses import replace
+    block = SimpleNamespace(type="tool_use", id="read", name="read_file", input={})
+    callbacks = _callbacks(lambda *args: (_response("", blocks=[block]), None, None))
+    callbacks = replace(callbacks, build_user_content=lambda results: (
+        _ for _ in ()).throw(OSError("notification failed")))
+    engine = TurnEngine(callbacks)
+    history = [{"role": "user", "content": "Inspect"}]
+    with pytest.raises(OSError, match="notification failed"):
+        engine.run(TurnRequest(history, "Inspect", prompt_state=_PromptState()))
+    assert history[-1]["content"] == [{
+        "type": "tool_result", "tool_use_id": "read", "content": "file contents"}]
+    assert engine.phase is TurnPhase.FAILED

@@ -196,6 +196,102 @@ def test_persistent_without_task_keeps_history_and_never_auto_claims(runtime, mo
     assert duplicate["status"] == "failed" and "already exists" in duplicate["text"]
 
 
+def test_message_during_final_model_request_stays_in_current_work(runtime):
+    host = runtime
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    release_second = threading.Event()
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            first_started.set()
+            assert release_first.wait(3)
+            return blocks(text_block("First answer"))
+        second_started.set()
+        assert release_second.wait(3)
+        return blocks(text_block("Answer with the update"))
+
+    client(host, create)
+    created = spawn(host, mode="persistent")
+    assert created["status"] == "started"
+    assert first_started.wait(3)
+    try:
+        subagent_runtime.send_message("lead", created["agent_id"], "Add one more requirement")
+        release_first.set()
+        assert second_started.wait(3)
+        contexts = [message["content"] for message in requests[1]["messages"]
+                    if isinstance(message["content"], str)
+                    and "Current delegation:" in message["content"]]
+        assert contexts
+        context = contexts[-1]
+        assert "Current delegation: Investigate" in context
+        assert "Current delegation: Add one more requirement" not in context
+        assert "Add one more requirement" in str(requests[1]["messages"])
+    finally:
+        release_first.set()
+        release_second.set()
+
+    result = subagent_runtime.get_subagent_output(created["agent_id"], timeout=3)
+    delivered = []
+    wait_event(host, "idle_notification", received=delivered)
+    assert result["status"] == "completed"
+    assert result["rounds"] == 2
+    assert result["text"] == "Answer with the update"
+    assert sum(message["type"] == "result" for message in delivered) == 1
+
+
+def test_message_after_final_boundary_starts_next_work(runtime, monkeypatch):
+    from agent_harness.agents.turn_engine import TurnEngine
+
+    host = runtime
+    boundary_entered = threading.Event()
+    release_boundary = threading.Event()
+    second_started = threading.Event()
+    requests = []
+    original_finish = TurnEngine._finish
+
+    def pause_at_boundary(engine, status, reason="", *, response=None, error=None):
+        if (status == "completed" and engine.callbacks.turn.name == "worker"
+                and not boundary_entered.is_set()):
+            boundary_entered.set()
+            assert release_boundary.wait(3)
+        return original_finish(engine, status, reason, response=response, error=error)
+
+    monkeypatch.setattr(TurnEngine, "_finish", pause_at_boundary)
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 2:
+            second_started.set()
+        return blocks(text_block("First result" if len(requests) == 1 else "Follow-up result"))
+
+    client(host, create)
+    created = spawn(host, mode="persistent")
+    assert created["status"] == "started"
+    try:
+        assert boundary_entered.wait(3)
+        subagent_runtime.send_message("lead", created["agent_id"], "Follow-up")
+    finally:
+        release_boundary.set()
+
+    assert second_started.wait(3)
+    result = subagent_runtime.get_subagent_output(created["agent_id"], timeout=3)
+    delivered = []
+    wait_event(host, "idle_notification", received=delivered)
+    context = [message["content"] for message in requests[1]["messages"]
+               if isinstance(message["content"], str)
+               and "Current delegation:" in message["content"]][-1]
+    assert "Current delegation: Follow-up" in context
+    assert result["status"] == "completed"
+    assert result["rounds"] == 1
+    assert result["text"] == "Follow-up result"
+    assert sum(message["type"] == "result" for message in delivered) == 2
+    assert sum(message["type"] == "idle_notification" for message in delivered) == 1
+
+
 def test_persistent_switches_tasks_only_after_final_answer(runtime, monkeypatch):
     host = runtime
     directories = {}
@@ -333,6 +429,28 @@ def test_pending_plan_can_shutdown_without_another_model_call(runtime, runtime_t
     assert len(calls) == 1
     assert acknowledgement["metadata"]["approve"] is True
     assert subagent_runtime._PROTOCOL.request(plan["metadata"]["request_id"]) is None
+
+
+def test_plan_wait_shutdown_records_stopped_engine_without_new_model_call(runtime, monkeypatch):
+    from agent_harness.agents.turn_engine import TurnPhase
+    sessions = []
+    create_session = subagent_runtime.create_subagent_session
+
+    def capture(*args, **kwargs):
+        session = create_session(*args, **kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(subagent_runtime, "create_subagent_session", capture)
+    client(runtime, lambda **kwargs: blocks(tool_call("submit_plan", plan="Read source")))
+    created = spawn(runtime, mode="persistent", require_plan=True)
+    wait_event(runtime, "plan_approval_request")
+    subagent_runtime.run_request_shutdown(created["agent_id"])
+    stopped = wait_event(runtime, "stopped")
+    assert stopped["metadata"]["reason"] == "Stopped by Lead"
+    assert sessions[0].rounds == 1
+    assert sessions[0].engine.phase is TurnPhase.STOPPED
+    assert TurnPhase.WAITING_APPROVAL in sessions[0].engine.phase_history
 
 
 @pytest.mark.parametrize("replay_approval", [False, True])

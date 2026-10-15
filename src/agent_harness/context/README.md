@@ -11,8 +11,9 @@
 | [skills.py](skills.py) | 扫描 `SKILL.md`、维护技能索引，提供 `list_skills` 和 `load_skill` |
 
 根目录 [runtime_context.py](../runtime_context.py) 从记忆等状态构造每次请求的上下文快照，
-[host.py](../host.py) 将其交给 `PromptState`，并在回合结束时处理记忆。
-主循环和 [SubagentSession](../agents/subagent_session.py) 使用这里的历史压缩能力。
+调用方将上下文字段交给共享 [TurnEngine](../agents/turn_engine.py)，由它调用 `PromptState.prepare()`。
+[LeadTurn](../agents/lead_turn.py) 与 [SubagentSession](../agents/subagent_session.py) 各自持有提示词状态和恢复策略，
+并使用这里的历史压缩能力；Lead 回合结束时由宿主侧处理记忆。
 
 `skills.py` 是加载代码，资源目录是包根目录的 [skills/](../skills/)。
 资源路径由 `core.SKILLS_DIR` 提供，不能改成相对于本子包查找。

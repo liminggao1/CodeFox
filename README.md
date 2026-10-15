@@ -43,10 +43,10 @@ Textual 的本机安装、启动、快捷键、审批和会话操作见
 
 | 路径 | 内容 |
 | --- | --- |
-| [src/agent_harness/](src/agent_harness/README.md) | 包入口、共享配置、Lead 主循环和装配代码 |
+| [src/agent_harness/](src/agent_harness/README.md) | 包入口、共享配置与 Lead 装配代码 |
 | [frontends/](src/agent_harness/frontends/README.md) | CLI / Textual 输入与显示 |
 | [runtime/](src/agent_harness/runtime/README.md) | 共享交互驱动、命令、事件/审批、会话存储与调度 |
-| [agents/](src/agent_harness/agents/README.md) | 子 agent 执行、goal 与恢复控制 |
+| [agents/](src/agent_harness/agents/README.md) | Lead 与子 agent 的共享循环、各自策略、子 agent 生命周期、goal 与恢复控制 |
 | [context/](src/agent_harness/context/README.md) | 提示词、历史压缩、memory 与技能加载 |
 | [providers/](src/agent_harness/providers/README.md) | 模型协议适配和消息内容读取 |
 | [tools/](src/agent_harness/tools/README.md) | 基础工具、MCP 与工具注册机制 |

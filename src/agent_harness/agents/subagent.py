@@ -23,7 +23,7 @@ from ..runtime import interaction
 from ..workspace import tasks
 from ..context import prompts
 from ..providers import message_content
-from ..providers.llm_client import APIConnectionError
+from ..providers.llm_client import APIConnectionError, StreamStopped
 from .subagent_session import SubagentBudgetExceeded, SubagentSession, selected_tool_names
 from .subagent_protocol import SubagentProtocol
 
@@ -151,6 +151,8 @@ class SubagentRecord:
     error: str = ""
     reason: str = ""
     last_text: str = ""
+    finalizing: bool = False
+    pending_next_work: bool = False
 
 
 _active_subagents: dict[str, SubagentRecord] = {}
@@ -239,7 +241,10 @@ def _clear_work_result(record: SubagentRecord, status: str):
 
 
 def _queue_work(record: SubagentRecord):
-    """空闲后的新消息标记为待执行；运行中的消息仍属于当前工作。"""
+    """按最终回答边界区分当前工作的消息与下一项工作。"""
+    if record.finalizing:
+        record.pending_next_work = True
+        return
     if record.status == "idle" or (record.latest_result is not None and
                                    record.status in {"completed", "budget_exhausted"}):
         _clear_work_result(record, "pending")
@@ -527,26 +532,51 @@ def _execute_work(record, session):
                 record.active_request = f"{accepted}\n\n{record.active_request}"
         _clear_work_result(record, "working")
     session.begin_work(record.active_request)
-    while True:
-        if record.mode == "once" and interaction.stopped():
-            raise _StopSubagent("Interrupted by user")
-        if record.mode == "persistent":
-            _receive(record, session, _BUS.read_inbox(record.name))
-            session.check_budget()
-            while _PROTOCOL.gate(record.name) == "pending":
-                _publish_status(record, "waiting_approval")
-                _wait_for_work(record, session)
+
+    def before_iteration():
+        try:
+            if record.mode == "once" and interaction.stopped():
+                raise _StopSubagent("Interrupted by user")
+            if record.mode == "persistent":
+                _receive(record, session, _BUS.read_inbox(record.name))
+                session.check_budget()
+                if _PROTOCOL.gate(record.name) == "pending":
+                    with session.engine.waiting_approval():
+                        while _PROTOCOL.gate(record.name) == "pending":
+                            _publish_status(record, "waiting_approval")
+                            _wait_for_work(record, session)
+                            session.check_budget()
+        except _StopSubagent as exc:
+            # 共享执行机登记 stopped，生命周期层再还原关闭协议的原因。
+            raise StreamStopped(str(exc)) from exc
         record.rounds = session.rounds
         record.tool_calls = session.tool_calls
         _publish_status(record, "working")
-        response = session.run(record.messages)
+
+    def before_complete():
+        try:
+            with _team_lock():
+                wake = _receive(record, session, _BUS.read_inbox(record.name))
+                if not wake:
+                    # Serialize the final-answer boundary with messages being queued.
+                    record.finalizing = True
+                return wake
+        except _StopSubagent as exc:
+            raise StreamStopped(str(exc)) from exc
+
+    try:
+        response = session.run(record.messages, before_iteration=before_iteration,
+                               before_complete=(before_complete
+                                                if record.mode == "persistent" else None))
+    except StreamStopped as exc:
+        raise _StopSubagent(str(exc)) from exc
+    finally:
         record.rounds = session.rounds
         record.tool_calls = session.tool_calls
         record.last_text = session.last_text
-        if record.mode == "once" and interaction.stopped():
-            raise _StopSubagent("Interrupted by user")
-        if not message_content.has_tool_use(response.content):
-            return message_content.extract_text(response.content)
+    if record.mode == "once" and interaction.stopped():
+        raise _StopSubagent("Interrupted by user")
+    return message_content.extract_text(response.content)
 
 
 def _cleanup(record):
@@ -583,23 +613,33 @@ def _persistent_loop(record, session):
                 snapshot = _save_result(record, status, summary, error=error)
                 _publish_status(record, status)
             _notify_result(record, snapshot)
-            with tasks.task_lock:
+            with _team_lock():
                 assignment = tasks.assignments.get(record.name)
                 unfinished = (assignment and tasks.load_task(
                     str(assignment["task_id"])).status == "in_progress")
-            released = tasks.release_completed_assignment(record.name)
-            if released or not assignment:
-                if not assignment:
-                    tasks.advance_assignment_version(record.name)
-                with _team_lock():
+                released = tasks.release_completed_assignment(record.name)
+                if released or not assignment:
+                    if not assignment:
+                        tasks.advance_assignment_version(record.name)
                     _PROTOCOL.reset_work(record.name, tasks.assignment_identity(record.name)[0])
-            with _subagent_changed:
-                # 结果通知后可能已收到新委派，不能用 idle 覆盖待执行状态。
-                _publish_status(record, "pending" if record.status == "pending" else "idle")
-            _BUS.send(record.name, "lead",
-                     "Waiting for guidance on the unfinished Task." if unfinished else "Waiting for more work.",
-                     "idle_notification", {"agent_id": record.agent_id, "name": record.name,
-                                            "description": record.description})
+                next_work = record.pending_next_work
+                record.pending_next_work = False
+                record.finalizing = False
+                if next_work:
+                    _clear_work_result(record, "pending")
+                else:
+                    with _subagent_changed:
+                        record.status = "idle"
+                        _subagent_changed.notify_all()
+            # Publish the state chosen under the same lock used by message delivery.
+            _publish_status(record)
+            # A message queued after the completion boundary already represents next work.
+            with _subagent_lock:
+                if record.status != "pending":
+                    _BUS.send(record.name, "lead",
+                             "Waiting for guidance on the unfinished Task." if unfinished else "Waiting for more work.",
+                             "idle_notification", {"agent_id": record.agent_id, "name": record.name,
+                                                    "description": record.description})
             _wait_for_work(record, session)
     except _StopSubagent as exc:
         snapshot = _save_result(record, "stopped", reason=str(exc))

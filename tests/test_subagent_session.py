@@ -230,6 +230,33 @@ def test_child_network_failure_does_not_consume_model_budget(host_factory):
     assert "offline" in result["error"]
 
 
+@pytest.mark.parametrize("recovery", ["automatic", "reactive"])
+def test_summary_network_failure_remains_a_network_error(host_factory, monkeypatch, recovery):
+    host_factory()
+    if recovery == "automatic":
+        monkeypatch.setattr(core, "COMPACT_TRIGGER", 30)
+        monkeypatch.setattr(core, "COMPACT_TARGET", 20)
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        if "tools" in kwargs:
+            raise ValueError("context_length_exceeded")
+        raise APIConnectionError("summary endpoint offline")
+
+    result = subagent_runtime.spawn_subagent(
+        "summary-offline", "Inspect source " * 30, "once", description="Inspect source",
+        tools=["read_file"], max_rounds=3,
+        client=SimpleNamespace(messages=SimpleNamespace(create=create)))
+
+    assert result["status"] == "network_error"
+    assert "summary endpoint offline" in result["error"]
+    assert result["rounds"] == result["usage"]["model_calls"] == (recovery == "reactive")
+    assert len(calls) == (2 if recovery == "reactive" else 1)
+    assert result["tool_calls"] == 0
+    assert subagent_runtime.get_subagent_output(result["agent_id"], block=False) == result
+
+
 def test_child_session_archive_path_is_not_read_through_generic_file_tool(
     host_factory, tmp_path, no_approval,
 ):
@@ -344,3 +371,73 @@ def test_budget_output_preserves_the_latest_tool_evidence(host_factory, no_appro
     assert result["rounds"] == 2 and result["tool_calls"] == 2
     assert len(calls) == 2
     assert subagent_runtime.get_subagent_output(result["agent_id"], block=False) == result
+
+
+def test_sessions_keep_configuration_history_and_work_budgets_independent(host_factory):
+    host_factory()
+    calls = {"first": [], "second": []}
+    sessions, histories = [], []
+    for name, tools in (("first", ["read_file"]), ("second", ["glob"])):
+        def create(name=name, **kwargs):
+            calls[name].append(kwargs)
+            return blocks(text_block(f"{name} finding"))
+        session = SubagentSession(name, SimpleNamespace(messages=SimpleNamespace(create=create)),
+                                  f"{name}-model", f"{name} rules", mode="persistent", tools=tools)
+        history = [{"role": "user", "content": f"{name} delegation"}]
+        session.begin_work(f"{name} delegation")
+        session.run(history)
+        sessions.append(session)
+        histories.append(history)
+
+    first, second = sessions
+    second_state = second.prompt_state.snapshot()
+    second_history = list(histories[1])
+    first.begin_work("First next delegation")
+    histories[0].append({"role": "user", "content": "First next delegation"})
+    first.run(histories[0])
+
+    assert first.usage["model_calls"] == 2 and second.usage["model_calls"] == 1
+    assert first.rounds == second.rounds == 1
+    assert first.prompt_state is not second.prompt_state and first.engine is not second.engine
+    assert second.prompt_state.snapshot() == second_state and histories[1] == second_history
+    for name, tools in (("first", {"read_file"}), ("second", {"glob"})):
+        assert all(item["model"] == f"{name}-model" for item in calls[name])
+        assert all({tool["name"] for tool in item["tools"]} == tools for item in calls[name])
+        assert all(f"{name} rules" in item["system"] for item in calls[name])
+    assert "First next delegation" not in str(histories[1])
+
+
+def test_child_snapshot_detaches_model_mutations_from_history_and_tools(host_factory):
+    host_factory()
+    def create(**kwargs):
+        kwargs["messages"][0]["content"] = "Changed by client"
+        kwargs["tools"][0]["description"] = "Changed by client"
+        return blocks(text_block("done"))
+    child = SubagentSession("child", SimpleNamespace(messages=SimpleNamespace(create=create)),
+                            "test", "Child rules", tools=["read_file"])
+    history = [{"role": "user", "content": "Inspect original"}]
+    child.run(history)
+    assert history[0]["content"] == "Inspect original"
+    assert child.tools[0]["description"] != "Changed by client"
+
+
+def test_child_context_changes_follow_complete_tool_results(host_factory):
+    host_factory()
+    calls = []
+    values = iter([blocks(tool_call("read_file", path="missing.txt")), blocks(text_block("done"))])
+    work = ["Plan status: required"]
+    child = SubagentSession("child", SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kwargs: calls.append(kwargs) or next(values))), "test", "Child rules",
+        mode="persistent", tools=["read_file"], work_context=lambda: work[0])
+    child.begin_work("Inspect")
+
+    def coordinate():
+        if child.rounds:
+            work[0] = "Plan status: approved"
+
+    child.run([{"role": "user", "content": "Inspect"}], before_iteration=coordinate)
+    assert len(calls) == 2 and calls[0]["system"] == calls[1]["system"]
+    messages = calls[1]["messages"]
+    assert messages[-2]["content"][0]["type"] == "tool_result"
+    assert "Plan status: approved" in messages[-1]["content"]
+    assert "Current delegation:" not in messages[-1]["content"]

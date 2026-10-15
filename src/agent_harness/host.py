@@ -21,6 +21,7 @@ from .workspace import tasks
 from .workspace import worktrees
 from .workspace import task_worktrees
 from .context import skills
+from .context import prompts
 from .tools import file_tools
 from .providers.llm_client import StreamStopped, stream_message
 from .agents import subagent
@@ -34,6 +35,7 @@ from . import runtime_context
 from .agents import goal as goal_module
 from .agents.goal_evaluator import JevGoalEvaluator, PromptGoalEvaluator
 from .agents.turn_engine import PreparedRequest, TurnCallbacks, TurnEngine, TurnRequest
+from .agents.lead_turn import LeadTurn
 from .workflows import workflow_runtime
 from .workflows import workflow_demo
 from .runtime import interaction, permissions
@@ -241,17 +243,23 @@ def evaluate_goal(messages: list):
 def agent_loop(history: list, active_request: str, save_context=None, on_usage=None, *, prompt_state=None):
     """兼容入口：装配宿主回调并执行一轮 TurnEngine。
 
-    保留历史调用方使用的参数和返回值；具体的上下文准备、模型重试/续写、工具
-    批次、Goal/memory 收尾和停止终态由 ``TurnEngine`` 负责。
+    保留历史调用方使用的参数和返回值；共享 ``TurnEngine`` 负责循环与历史顺序，
+    ``LeadTurn`` 提供 Lead 的模型恢复、Goal/memory 和定时任务收尾策略。
     """
-    callbacks = TurnCallbacks(
-        assemble_tool_pool=assemble_tool_pool,
-        build_context=runtime_context.build_context,
-        call_llm=call_llm,
-        build_user_content=build_user_content,
+    turn = LeadTurn(
+        history, save_context, prompt_state,
         evaluate_goal=evaluate_goal,
         remember_after_turn=remember_after_turn,
         goal_condition=lambda: GOAL.active.condition if GOAL is not None and GOAL.active else "",
+    )
+    callbacks = TurnCallbacks(
+        turn=turn,
+        assemble_tool_pool=assemble_tool_pool,
+        build_context=lambda history, request: (runtime_context.build_context(history).prompt_values(), request),
+        system_factory=prompts.assemble_system_prompt,
+        call_llm=lambda prepared: call_llm(prepared, turn.recovery),
+        execute_tool=turn.execute_tool,
+        build_user_content=build_user_content,
     )
     return TurnEngine(callbacks).run(TurnRequest(
         history=history,

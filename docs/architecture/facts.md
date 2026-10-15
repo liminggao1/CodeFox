@@ -41,7 +41,7 @@
   （入队前落盘，模型调用被接受后才确认，确认前崩溃允许重投）。
 - 调度器独占后台任务、cron 队列与锁。调用方只查询待交付状态或进入操作作用域；会话激活前重新检查 cron，
   检查到激活完成期间阻止新任务入队；工作树移除从后台占用检查到目录移除与任务解绑保持同一互斥范围。
-- Lead 与子 agent 保持独立循环、独立工具集合与停止条件；只共用底层文件工具实现、handler 调用和 hook 规则。
+- Lead 与子 agent 共用完整执行循环；各自的工具集合、预算、停止与恢复策略保持独立，循环职责见第 8 节。
 
 ## 3. 两轮架构深化（2026-10-08）
 
@@ -52,7 +52,7 @@
   Lead 在准备新请求时刷新，重试复用已准备的请求；CLI 与后台循环不持有共享 context。
 - `tools/tool_registry.py` 统一装配工具 schema、handler 与 policy 快照，来源由宿主显式接线；
   `ToolDefinition` 是内置工具的权威目录；MCP 只提供动态定义。
-- `agents/subagent_session.py` 的 `SubagentSession` 拥有工具 schema、cwd 绑定、hooks 和一轮模型执行；
+- `agents/subagent_session.py` 的 `SubagentSession` 拥有工具 schema、cwd 绑定、hooks、工作预算与恢复策略；
   目录在工具调用时查询当前 assignment，不保存会过期的任务目录。
 - `workflows/workflow_runtime.py` 与 `workflows/workflow_demo.py` 分离：核心拥有 runner interface、journal、
   预算、恢复、并发与工具入口；示例拥有 schema、样例编排、`DemoModelClient` 与 demo CLI。
@@ -79,7 +79,10 @@
   `role` / `mode` / `status` / `text` / `error` / `reason`、两种预算的计数与上限，以及 `usage`。
   usage 包含累计 `model_calls`、`input_tokens`、`output_tokens` 和总 `tokens`；校验失败不创建身份。
 - `agents/subagent.py` 拥有创建、生命周期、活跃登记、进程内结果、信箱与协议投递；
-  `agents/subagent_session.py` 提供两种模式共用的模型回合。
+  `SubagentSession.run(messages, before_iteration=..., before_complete=...)` 通过第 8 节的共享循环执行完整委派并返回最终响应。
+  persistent 每轮准备前接收工作消息，检查预算后等待计划审批，恢复后再次检查；空闲等待留在生命周期外层。
+- persistent 接受最终回答前会再收一次信：完成边界前到达的消息写入当前历史并续用当前预算，边界后到达的消息排入下一项工作。
+  结果只在整个当前工作结束后通知一次；下一项工作启动时才重置工作预算。
 - 管理工具：`list_subagents`、`get_subagent_output`、`send_message`、`request_shutdown`、`request_plan`、`review_plan`、
   `remove_worktree`（仅 Lead）。任何子 agent 都不提供 `spawn_subagent`、依赖修改或 worktree 创建/移除，
   保持不可递归。
@@ -106,7 +109,8 @@
   计划请求在接收时按当前分配版本更新门禁，旧工作收尾不会解除新工作的审批要求。
 - 子 agent 的通用 `read_file` 在权限审批前拒绝会话内部 `tool-results` 归档，
   按当前任务目录解析相对路径并解析符号链接；提示改读原始文件行范围。Lead 的目录外权限规则保持原状。
-  连接失败独立返回 `network_error` 并回滚该次模型预算；本地文件或清理错误归入 `failed`。
+  执行或摘要请求的连接失败独立返回 `network_error` 并回滚该次模型预算；不因摘要失败继续请求执行模型。
+  本地文件或清理错误归入 `failed`。
 - 状态事件和 `list_subagents` 带身份、预算、累计用量及最后终止原因，保留原 `name` / `mode` / `status` 字段。
   列表与状态事件共用无正文的结果快照。同步 once 随用户停止结束；persistent 使用既有关闭协议，
   不因 Lead 单轮停止而批量终止。
@@ -260,10 +264,17 @@
 - `InteractiveRuntime` 负责生命周期、线程启动与关闭，以及展示事实的保存和交付；提交排队与回合状态归 `TurnRunner`。
 - 子 agent 操作成为 Lead interface，模块级全局降为私有；锁序由单一私有 `_team_lock()` 上下文管理器强制，
   嵌套点统一经它进入；提供 `has_pending_inbox()` 与 `active_names()` 只读 interface。
-- 回合由 `agents/lead_turn.py` 的 `LeadTurn` 唯一拥有：会话历史、展示发布、checkpoint、`model_call_id`、
-  cron 待交付；interface 含 `history` 与 `inject_background_notes` / `after_compaction` /
-  `after_manual_compaction` / `after_goal_evaluation`。`agents/turn_engine.py` 的 `TurnEngine` 拥有一轮
-  模型-工具循环的顺序、合法 `TurnPhase` 转换和终态；每次上下文准备生成脱离可变会话历史的 API 请求快照，重试复用该快照，压缩或工具结果更新历史后重新准备；审批等待通过 `ExecutionContext.phase_observer` 进入 `waiting_approval`，不新增前端事件或会话字段；`host.agent_loop(history, ...)` 仅装配回调并保持兼容入口。
+- `agents/turn_engine.py` 的 `TurnEngine` 是 Lead、once 和 persistent 工作单元共用的完整模型—工具循环。
+  引擎负责 `PromptState.prepare()`、`PreparedRequest` 快照、响应处理顺序、历史追加、消息与结果事件、
+  工具批次配对、合法 `TurnPhase` 转换及终态；每个执行实例独立持有调用关联与阶段观察器。
+  重试复用脱离可变历史的请求快照，压缩或工具结果更新历史后重新准备。
+  `TurnCallbacks` 装配客户端所在的现有策略对象、上下文、system、工具池、模型请求、迭代前和完成前协调及单工具入口；
+  单工具统一返回 `ToolExecution`，致命 Hook 错误先保存真实结果、补齐剩余 stopped 结果，再向外传播。
+- `LeadTurn` 持有 Lead 恢复状态、cron 待交付和 Goal/memory 收尾；`SubagentSession` 持有子 agent 的
+  注入配置、白名单、预算、提示词状态和单次上下文恢复。Lead 保留流式请求、重试、备用模型、额度升级与续写，
+  子 agent 不采用 Lead 的输出恢复策略；`host.agent_loop(history, ...)` 仅装配现有入口，参数和 `TurnOutcome` 不变。
+  普通工具审批与轮次间计划等待均进入 `waiting_approval`；嵌套 once 退出后恢复父 `phase_observer`。
+  这些内部阶段不增加前端事件或会话字段。
 - 工具结果契约在 `tools/tool_result.py`：`ToolResult` 携带不可变正文与状态
   （`returned`/`success`/`failed`/`denied`/`stopped`/`started`），状态不靠正文猜测。
 - `frontends/conversation.py` 的 `ConversationProjection` 是共用展示投影：记录去重、工具关联、正文确认与作废；

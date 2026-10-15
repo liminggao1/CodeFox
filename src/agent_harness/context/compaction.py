@@ -24,13 +24,14 @@ from ..providers.llm_client import (count_input_tokens,
 class CompactionResult:
     applied: bool
     reason: str | None = None
+    error: Exception | None = None
 
 
 def _history_transaction(messages: list, transform) -> CompactionResult:
     """在副本上完成历史转换，成功后一次性替换原列表内容。
 
     输入：messages 为调用方持有的历史；transform 接收深拷贝并返回候选历史。
-    返回：CompactionResult，记录是否替换和失败原因；异常时原历史不变。
+    返回：CompactionResult，记录是否替换、失败原因和原异常；异常时原历史不变。
         列表对象身份保持不变，转换过程中已经产生的归档文件不回滚。
     """
     try:
@@ -40,7 +41,8 @@ def _history_transaction(messages: list, transform) -> CompactionResult:
         messages[:] = candidate
         return CompactionResult(True)
     except Exception as exc:
-        return CompactionResult(False, f"{type(exc).__name__}: {exc}")
+        # 保留原异常，调用方可以区分网络/预算与普通压缩失败。
+        return CompactionResult(False, f"{type(exc).__name__}: {exc}", exc)
 
 
 def prepare_history(messages: list, active_request: str, *, enabled=True,
@@ -723,6 +725,11 @@ class ManualCompaction:
         """
         if self.pending:
             self.pending = False
+            # 共享执行机统一生成协议结果；失败修正必须更新已经回填历史的那一项。
+            call_id = self._result["tool_use_id"]
+            self._result = next(item for item in messages[-1]["content"]
+                                if item.get("type") == "tool_result"
+                                and item.get("tool_use_id") == call_id)
             result = _history_transaction(messages, lambda candidate: compact_history(candidate, active_request))
             if result.reason:
                 self._result["content"] = f"[Compaction failed: {result.reason}]"

@@ -1,6 +1,6 @@
 # agent_harness 源码结构
 
-本包按职责分成 8 个子包。模块保留具体实现，包根目录保留共享配置、Lead 主循环和装配代码。
+本包按职责分成 8 个子包。模块保留具体实现，包根目录保留共享配置、Lead 入口和装配代码。
 运行命令、环境和验证步骤见 [项目 README](../../README.md)。
 
 ## 从哪里开始读
@@ -9,7 +9,7 @@
 | --- | --- |
 | [frontends/](frontends/README.md) | CLI 和 Textual 输入、显示及交互适配 |
 | [runtime/](runtime/README.md) | 交互驱动、事件与审批、命令、会话存储、调度和 hooks |
-| [agents/](agents/README.md) | Lead 回合记录与工具批次、子 agent 生命周期、共享执行回合、goal 和错误恢复 |
+| [agents/](agents/README.md) | Lead 与子 agent 的共享完整循环、执行策略、子 agent 生命周期、goal 和错误恢复 |
 | [context/](context/README.md) | 提示词、历史压缩、memory 和技能加载 |
 | [providers/](providers/README.md) | 模型 API 协议适配与消息内容读取 |
 | [tools/](tools/README.md) | 基础工具、MCP 与工具注册机制 |
@@ -24,7 +24,7 @@
 | [__init__.py](__init__.py) | 标识 Python 包，不执行装配 |
 | [__main__.py](__main__.py) | `python -m agent_harness` 入口，交给 `frontends.cli.main` |
 | [core.py](core.py) | 启动目录、配置、模型客户端、常量、控制台协调器及技能资源路径 |
-| [host.py](host.py) | Lead 的 `agent_loop` 与显式 `initialize_runtime`；编排上下文、模型恢复、goal 和工具迭代，回合记录与工具批次委托 agents |
+| [host.py](host.py) | Lead 的 `agent_loop` 与显式 `initialize_runtime`；装配共享引擎与 Lead 策略，提供流式请求、goal 和记忆入口 |
 | [registrations.py](registrations.py) | 组合 Lead 工具清单与专有定义，共用工具定义委托 `tools/shared_tools.py` |
 | [runtime_context.py](runtime_context.py) | 每次模型调用前，从 memory、MCP 和子 agent 状态构造上下文快照 |
 
@@ -44,6 +44,8 @@ flowchart TD
     Demo --> Workflow[workflows.workflow_runtime]
     Lead --> Workflow
     Workflow --> Child[agents.subagent / SubagentSession]
+    Lead --> Engine[agents.TurnEngine]
+    Child --> Engine
 ```
 
 这张图表示主要入口，不表示全部依赖。各目录是职责分组，不是严格的单向依赖层。

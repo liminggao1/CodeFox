@@ -1,6 +1,6 @@
 # 子 agent 能力与任务边界改造验收（2026-10-14）
 
-日期：2026-10-14。状态：改造与复核修正已实施；初版真实 Responses API 的 once 只读审计通过。
+日期：2026-10-14。状态：能力边界改造和 Lead/子 agent 共享循环已实施；离线验收通过。
 恢复会话：`01a119fd-4a90-79d3-afe3-5020b0fb18e1`。
 
 ## 问题与结果
@@ -29,7 +29,7 @@ ID 通信与协议、查询等待及深拷贝、停止通知、归档路径拦�
 列表与事件的状态字段改为共用结果快照。
 
 - 复核修正新增 10 个回归场景；定向子 agent 与工作流回归：180 项通过。
-- 最终全量 pytest：728 项通过，耗时 67.17 秒。
+- 能力边界改造时全量 pytest：728 项通过，耗时 67.17 秒；共享循环的最终验证见下节。
 - `scripts/debug_pass.py`：10/10 通过，包含工具、goal、任务、两种子 agent 生命周期、工作流、worktree 和架构图刷新。架构图产物无新增差异。
 - `git diff --check` 通过；改动文本均为 UTF-8 无 BOM、LF。
 
@@ -38,7 +38,29 @@ ID 通信与协议、查询等待及深拷贝、停止通知、归档路径拦�
 /home/gaogao/miniconda3/envs/learncc/bin/python scripts/debug_pass.py
 ```
 
+## 共享完整循环的实施与验收
+
+在现有 `TurnEngine` 内统一 Lead、once 和 persistent 工作单元的模型—工具循环。
+`LeadTurn` 提供 Lead 恢复、cron、Goal/memory 和收尾策略；`SubagentSession` 提供独立配置、
+预算、白名单、计划门禁和上下文恢复，`run()` 执行完整委派。persistent 的信箱、空闲与交付仍在生命周期外层。
+模块职责以 [源码 agents 说明](../../src/agent_harness/agents/README.md) 为准，跨模块规则见
+[仓库事实第 8 节](../architecture/facts.md#8-运行期职责深化2026-10-10)。
+
+新增回归覆盖三类 agent 的历史顺序、拒绝和工具 Hook 异常配对、结果事件只发布一次、
+请求快照隔离、模型与提示词状态隔离、工作预算重置、计划通知在工具配对后追加、
+轮次间计划等待和关闭，以及嵌套 once 审批恢复父阶段观察器。用量回调在接受响应时只调用一次。
+压缩结果保留原异常，子 agent 的自动/响应式摘要网络故障返回 `network_error` 并回滚失败请求计数，
+不追加执行模型请求；Lead 继续使用原有压缩失败处理。
+
+最终 WSL `learncc` 验证：
+
+- 全量 `python -m pytest -q`：750 项通过，耗时 72.36 秒。
+- `python scripts/debug_pass.py`：10/10 通过；架构图刷新无额外差异。
+- 12/40 默认预算、摘要消耗最后一次请求、批次越界配对、旧审批、新委派、关闭和普通权限均通过。
+
 ## 真实 API 验收
+
+### 初版能力边界改造
 
 用户开启本机代理后，在 WSL 显式设置该进程的 `HTTP_PROXY` 与 `HTTPS_PROXY`，
 使用当前 `.env` 的 `deepseek-v4.1-flash` 模型和 Responses 端点。
@@ -70,8 +92,7 @@ LIVE_API=1 /home/gaogao/miniconda3/envs/learncc/bin/python -m pytest -q -s \
 tests/live/test_real_api.py::test_streaming_bounded_read_only_subagent_audit
 ```
 
-此结果来自复核修正前，验证 once 的真实委派、能力白名单、范围读取、预算内完成、零审批、结果查询与清理。
-本轮复核修正使用离线模型与真实线程验证，未新增真实 API 请求。
+此初版结果来自能力边界复核修正前。
 persistent 的真实通信和关闭、真实预算耗尽、TUI 人工交互及 memory 抽取仍未覆盖，
 见 [待验证事项](../plans/2026-10-11-01待验证事项.md)。
 

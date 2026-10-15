@@ -1,4 +1,4 @@
-"""Execute one subagent model round without owning its mailbox or lifecycle."""
+"""子 agent 的工具、预算和恢复策略；完整委派通过共享 TurnEngine 执行。"""
 
 from .. import core
 from ..tools import shared_tools
@@ -8,9 +8,9 @@ from ..runtime import hooks
 from ..workspace import tasks
 from ..context import compaction
 from ..context.prompt_state import PromptState
-from . import recovery
+from .turn_engine import TurnCallbacks, TurnEngine, TurnRequest
 from ..providers import message_content
-from ..providers.llm_client import APIConnectionError, model_messages
+from ..providers.llm_client import APIConnectionError, StreamStopped
 from ..runtime import interaction
 import uuid
 
@@ -83,6 +83,9 @@ class SubagentBudgetExceeded(RuntimeError):
 
 
 class SubagentSession:
+    publish_text = False
+    preserve_tail = True
+
     def __init__(self, name, client, model, system, authorize_tool=None,
                  send_message=None, submit_plan=None, *, mode="persistent",
                  task_tools=True, work_context=None, tools=None, max_tokens=None,
@@ -117,6 +120,8 @@ class SubagentSession:
         self.last_text = ""
         self._reactive_claimed = False
         self.prompt_state = PromptState()
+        self.automatic_compaction_enabled = True
+        self.engine = None
         send_handler = (lambda to, content: send_message(to, content)
                         if send_message is not None else ToolResult(
                             "Error: child messaging is unavailable", "failed"))
@@ -141,6 +146,7 @@ class SubagentSession:
         """Set the current delegation and reset its single context recovery."""
         self.active_request = prompt
         self._reactive_claimed = False
+        self.automatic_compaction_enabled = True
         self.rounds = 0
         self.tool_calls = 0
         self.client.work_calls = 0
@@ -155,7 +161,7 @@ class SubagentSession:
         self.rounds = self.client.work_calls
         self._progress()
 
-    def _stopped(self):
+    def stopped(self):
         # Persistent work has its own shutdown protocol; Lead's turn stop only
         # interrupts synchronous once execution.
         return self.mode == "once" and interaction.stopped()
@@ -166,7 +172,7 @@ class SubagentSession:
         输入为原模型请求；拒绝不运行处理器或后置 Hook。
         返回真实工具结果和单独的后置错误，由回合先记录再结束执行。
         """
-        if self._stopped():
+        if self.stopped():
             return ToolExecution(ToolResult("Interrupted before execution", "stopped"))
         if self.tool_calls >= self.max_tool_calls:
             return ToolExecution(ToolResult(
@@ -183,141 +189,127 @@ class SubagentSession:
                 "Error: session tool-result archives are not readable through the generic child read_file tool; "
                 "read the original project file with offset/limit. Lead can query task results.", "failed"))
         check = hooks.check_tool_use(block, authorize=self.authorize_tool,
-                                     stopped=self._stopped,
+                                     stopped=self.stopped,
                                      cwd=lambda: tasks.assignment_cwd(self.name))
         if check.status != "allowed":
             return ToolExecution(ToolResult(check.text, check.status))
         return execute_tool(block, self.handlers[block.name])
 
-    def run(self, messages: list):
-        """发起一轮模型请求，并追加配套的工具执行结果。
-        入参：当前子代理会话的可变对话消息列表。
-        返回：完整的模型响应。单次委托任务最多尝试一次上下文恢复；
-              被截断的模型响应不会产生任何工具执行效果。
+    def run(self, messages: list, *, before_iteration=None, before_complete=None):
+        """执行完整委派，返回最终模型响应；不拥有信箱或 persistent 生命周期。
+
+        模型、工具、历史追加和结果配对由共享 TurnEngine 管理。单次委派最多
+        尝试一次上下文恢复；被截断的响应不会写入历史或产生工具执行效果。
         """
-        # 检查预算/调用次数限额
+        # 获取当前用户请求文本，优先使用 active_request，为空则取第一条消息内容。
+        request = self.active_request or (str(messages[0].get("content", "")) if messages else "")
+        callbacks = TurnCallbacks(
+            turn=self,
+            assemble_tool_pool=lambda: (self.tools, self.handlers),
+            build_context=self._build_context,
+            system_factory=lambda: self.system,
+            call_llm=self._request,
+            execute_tool=lambda block, handlers: self.execute_tool(block),
+            before_iteration=before_iteration,
+            before_complete=before_complete,
+        )
+        context = interaction.current_context()
+        self.engine = TurnEngine(callbacks)
+        return self.engine.run(TurnRequest(
+            messages, request,
+            save_context=context.checkpoint if context is not None else None,
+            prompt_state=self.prompt_state,
+        ))
+
+    def before_iteration(self, active_request):
+        # 接收协调消息后、准备上下文前检查预算/调用次数限额。
         self.check_budget()
-        # 获取当前用户请求文本，优先使用active_request，为空则取第一条消息内容
-        request = self.active_request or str(messages[0].get("content", ""))
-        # 切换到当前任务分配对应的工作目录
+        return active_request
+
+    def _build_context(self, messages, request):
+        # 解析当前任务分配的工作目录；工具本身使用同一分配目录。
         tasks.assignment_cwd(self.name)
         assignment = tasks.assignments.get(self.name)
-        # 默认上下文：无分配任务，工作目录为程序启动目录
+        # 默认上下文：无分配任务，工作目录为程序启动目录。
         context = "No assigned Task; workspace is the startup directory."
         if assignment:
-            # 加载任务信息，获取任务工作目录
+            # 加载任务信息，获取任务工作目录。
             task = tasks.load_task(str(assignment["task_id"]))
             cwd = tasks.assignment_cwd(self.name)
             context = (f"Current Task: {task.id} [{task.status}] {task.subject}\n"
                        f"Task description: {task.description}\nWork directory: {cwd}")
-        # 追加当前运行环境上下文
+        # 追加当前运行环境上下文，作为增量通知的字段，而不是重写 system。
         context += f"\n{self.work_context()}"
-        # 模板变量，用于填充prompt
         values = {"current_delegation": request, "current_work": context}
-        # 拼接用户请求与任务上下文
-        request = f"{request}\n\n[Current work]\n{context}"
-        # 准备系统提示词，执行prompt状态预处理（上下文压缩预处理）
-        system, result = self.prompt_state.prepare(
-            messages, values, lambda: self.system, request, client=self.client,
-            model=self.model, tools=self.tools, preserve_tail=True)
-        # 如果发生上下文压缩，打印压缩日志
+        # 压缩摘要保留用户请求与当前任务上下文。
+        return values, f"{request}\n\n[Current work]\n{context}"
+
+    def after_preparation(self, result):
+        if isinstance(result.error, (APIConnectionError, ConnectionError, TimeoutError,
+                                     SubagentBudgetExceeded, StreamStopped)):
+            raise result.error
+        # 如果发生上下文压缩错误，打印日志，然后再次校验执行预算。
         if result.reason:
             core.terminal_print(f"[subagent compact] {result.reason}")
-        # 再次校验预算限额
         self.check_budget()
-        try:
-            # 调用模型，获取模型返回响应
-            response = self._request(messages, system)
-        except Exception as exc:
-            # 如果不是prompt超长错误，或者已经执行过一次上下文恢复，则直接抛出异常
-            if not recovery.is_prompt_too_long_error(exc) or self._reactive_claimed:
-                raise
-            # 标记已经执行过上下文恢复，防止重复触发
-            self._reactive_claimed = True
-            # 执行响应式上下文压缩，对消息做摘要缩减长度
-            result = compaction.reactive_compact(
-                messages, request, client=self.client, model=self.model,
-                strict_summary=True)
-            self.check_budget()
-            # 压缩失败或者未生效，抛出子代理上下文恢复失败异常
-            if result.reason or not result.applied:
-                raise RuntimeError(f"Subagent context recovery failed: {result.reason}") from exc
-            # 重置prompt状态，重新生成系统提示词
-            self.prompt_state.reset()
-            system, _ = self.prompt_state.prepare(
-                messages, values, lambda: self.system, request, client=self.client,
-                model=self.model, tools=self.tools, enabled=False, preserve_tail=True)
-            # 使用压缩后的消息再次调用模型
-            response = self._request(messages, system)
-        # 模型因max_tokens截断输出，抛出异常
+        # 响应式恢复后的一次重建不重复摘要，后续正常轮次恢复自动压缩。
+        self.automatic_compaction_enabled = True
+
+    def recover_context(self, request):
+        # 已执行过一次上下文恢复，保持原始模型错误，不再次请求摘要。
+        if self._reactive_claimed:
+            return False
+        self._reactive_claimed = True
+        # 摘要也使用计量客户端，预算耗尽不能多请求一次模型。
+        self.check_budget()
+        result = compaction.reactive_compact(
+            self.history, request, client=self.client, model=self.model,
+            strict_summary=True)
+        if isinstance(result.error, (APIConnectionError, ConnectionError, TimeoutError,
+                                     SubagentBudgetExceeded, StreamStopped)):
+            raise result.error
+        self.check_budget()
+        # 压缩失败或未生效保留原历史，向生命周期管理层传播恢复失败。
+        if result.reason or not result.applied:
+            raise RuntimeError(f"Subagent context recovery failed: {result.reason}")
+        # 成功后重置 prompt 状态并重新补齐完整上下文。
+        self.prompt_state.reset()
+        self.automatic_compaction_enabled = False
+        self.engine.checkpoint()
+        return True
+
+    def accept_response(self, response, on_usage=None):
+        # 模型因 max_tokens 截断输出，不追加响应或执行其中的工具。
         if getattr(response, "stop_reason", None) == "max_tokens":
             raise RuntimeError("Subagent response was truncated (max_tokens)")
-        # 提取模型返回的纯文本内容
         text = message_content.extract_text(response.content)
         if text:
             self.last_text = text
-        # 更新进度状态
         self._progress()
-        # 将助手（模型）这一轮输出追加到消息列表
-        messages.append({"role": "assistant", "content": response.content})
-        # 筛选出本次模型返回的全部工具调用块
-        calls = [block for block in response.content if block.type == "tool_use"]
-        if calls:
-            results = []
-            post_error = None
-            # 开启交互操作上下文，用于事件发布、断点保存
-            with interaction.operation_context(model_call_id=self._model_call_id):
-                # 发布工具调用开始事件，保存断点
-                for block in calls:
-                    interaction.publish("tool_call", id=block.id, name=block.name, input=block.input)
-                    context = interaction.current_context()
-                    if context is not None and context.checkpoint is not None:
-                        context.checkpoint()
-                # 逐个执行这批工具调用
-                for index, block in enumerate(calls):
-                    try:
-                        # 执行单个工具
-                        execution = self.execute_tool(block)
-                    except Exception as exc:
-                        # 前置Hook或目录解析异常，也必须补齐整批模型提交工具对应的返回结果
-                        execution = ToolExecution(ToolResult(
-                            f"Error: {type(exc).__name__}: {exc}", "failed"), exc)
-                    # 把工具执行结果包装成符合消息schema的结构
-                    result = execution.result.model_result(block.id)
-                    results.append(result)
-                    # 发布工具结果事件，推送给前端/SSE
-                    interaction.publish("tool_result", **result, status=execution.result.status)
-                    # 如果工具执行后出现致命错误
-                    if execution.post_error is not None:
-                        # 当前工具执行失败，后续未执行工具全部标记为中断，补齐结果
-                        for pending in calls[index + 1:]:
-                            stopped = ToolResult("Interrupted before execution", "stopped").model_result(pending.id)
-                            results.append(stopped)
-                            interaction.publish("tool_result", **stopped, status="stopped")
-                        post_error = execution.post_error
-                    # 每执行完一个工具，保存会话断点
-                    if context is not None and context.checkpoint is not None:
-                        context.checkpoint()
-                    # 出现致命错误，终止后续工具循环
-                    if execution.post_error is not None:
-                        break
-            # 将本轮所有工具结果作为user消息追加进对话历史
-            messages.append({"role": "user", "content": results})
-            if not text:
-                # 如果模型本轮没有输出文本，把工具返回内容合并作为本轮输出文本
-                self.last_text = "\n".join(
-                    str(item.get("content", "")) for item in results
-                    if item.get("content")
-                )
-            self._progress()
-            # 工具执行出现致命错误，向上抛出
-            if post_error is not None:
-                raise post_error
-            # 工具调用次数超出上限，抛出子代理预算超限异常
-            if self.tool_calls >= self.max_tool_calls and not self._stopped():
-                raise SubagentBudgetExceeded("tool-call", self.max_tool_calls)
-        return response
+        return "accept"
 
+    def after_tools(self, response, results, active_request, *, error=None):
+        if not message_content.extract_text(response.content):
+            # 本轮没有正文时，用最新工具批次替换旧证据，作为部分任务输出。
+            self.last_text = "\n".join(str(item.get("content", "")) for item in results
+                                       if item.get("content"))
+        self._progress()
+        # 致命 Hook 错误优先向上传播；预算终态在整批配对结果写回后处理。
+        if error is None and self.tool_calls >= self.max_tool_calls and not self.stopped():
+            raise SubagentBudgetExceeded("tool-call", self.max_tool_calls)
+
+    def complete(self):
+        return None
+
+    def finish(self, status, reason="", *, response=None, error=None):
+        # 生命周期管理层负责区分预算、网络和执行失败，保持原异常类型。
+        if error is not None:
+            raise error
+        if status == "stopped":
+            raise StreamStopped("Interrupted by user")
+        if status != "completed":
+            raise RuntimeError(reason or "Subagent execution failed")
+        return response
 
     def check_budget(self):
         """在请求模型或等待审批前确认当前工作还有执行预算。"""
@@ -326,19 +318,17 @@ class SubagentSession:
         if self.client.work_calls >= self.max_rounds:
             raise SubagentBudgetExceeded("model-call", self.max_rounds)
 
-    def _request(self, messages, system):
-        self._model_call_id = uuid.uuid4().hex
-        with interaction.operation_context(model_call_id=self._model_call_id):
+    def _request(self, prepared):
+        # 请求使用脱离可变历史的快照，工具白名单与计量准备使用同一清单。
+        call_id = uuid.uuid4().hex
+        with interaction.operation_context(model_call_id=call_id):
             operation = interaction.operation_status("model", "请求模型", "running")
             try:
                 response = self.client.messages.create(
-                    model=self.model, system=system,
-                    messages=model_messages(messages),
-                    **({"tools": self.tools} if self.tools else {}), max_tokens=self.max_tokens)
+                    model=self.model, system=prepared.system, messages=prepared.messages,
+                    **({"tools": prepared.tools} if prepared.tools else {}), max_tokens=self.max_tokens)
             except Exception as exc:
                 interaction.operation_status("model", "请求模型", "failed", operation_id=operation,
                                              reason=f"{type(exc).__name__}: {exc}")
                 raise
-            interaction.operation_status("model", "请求模型", "truncated" if getattr(response, "stop_reason", None) == "max_tokens" else "completed",
-                                         operation_id=operation)
-            return response
+            return response, call_id, operation
