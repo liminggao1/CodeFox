@@ -67,7 +67,7 @@ class ChatMessages(FakeMessages):
 
 
 def main() -> None:
-    # 将项目上层的src目录加入Python模块搜索路径，这样才能import agent_harness下的代码
+    # 将项目上层的src目录加入Python模块搜索路径，这样才能import codefox下的代码
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     # 保存脚本启动时的原始工作目录，最后需要切回去恢复环境
     original_cwd = Path.cwd()
@@ -78,10 +78,10 @@ def main() -> None:
         os.chdir(directory)
         try:
             # 延迟导入：必须在切换目录之后才导入core，core内部会读取当前工作目录
-            from agent_harness import core
-            from agent_harness.frontends.cli import CLIAdapter
-            from agent_harness.runtime.interactive_runtime import InteractiveRuntime
-            from agent_harness.runtime.session_store import SessionStore
+            from codefox import core
+            from codefox.frontends.cli import CLIAdapter
+            from codefox.runtime.interactive_runtime import InteractiveRuntime
+            from codefox.runtime.session_store import SessionStore
 
             # 构造一个假的模型客户端，用于离线模拟，不调用真实大模型API
             client = FakeClient([])

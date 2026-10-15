@@ -21,9 +21,9 @@
 
 ```
 agent-harness/
-  src/agent_harness/
+  src/codefox/
     cli.py                 入口：交互 + `/goal` + `workflow demo|resume`（97 行）
-    __main__.py            `python -m agent_harness` 入口
+    __main__.py            `python -m codefox` 入口
     host.py                s15 主体（3349 行）
     memory_runtime.py      s09 整份拷贝（785 行）
     workflow.py            s16 主体（824 行）
@@ -40,44 +40,44 @@ agent-harness/
 
 ### 1. memory 改为正常导入
 
-s15 原先按路径 `importlib` 加载 `s09_memory/code.py`。现在整份拷为 [src/agent_harness/context/memory_runtime.py](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/context/memory_runtime.py)，host 直接导入并共享 client / model / workspace：
+s15 原先按路径 `importlib` 加载 `s09_memory/code.py`。现在整份拷为 [src/codefox/context/memory_runtime.py](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/context/memory_runtime.py)，host 直接导入并共享 client / model / workspace：
 
-- [host.py:88](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/host.py:88) `from . import memory_runtime as MEMORY_RUNTIME`
+- [host.py:88](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/host.py:88) `from . import memory_runtime as MEMORY_RUNTIME`
 - 随后设 `WORKDIR` / `MEMORY_DIR` / `MEMORY_INDEX` / `client` / `MODEL`，等价于原先 [:92-110](/D:/01dpan/01project/life/learncc/learn-claude-code/s15_integrated_harness/code.py:92) 的行为。
 
 ### 2. workflow 原生化
 
 删掉 `install_workflow_tool` / `load_integrated_host` 的 monkeypatch 方案，让 `Workflow` 直接进工具池：
 
-- [host.py:2814](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/host.py:2814) 在 `assemble_tool_pool()` 内追加 `WORKFLOW_TOOL`
-- [host.py:2815](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/host.py:2815) 注册 `run_workflow_sync`
+- [host.py:2814](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/host.py:2814) 在 `assemble_tool_pool()` 内追加 `WORKFLOW_TOOL`
+- [host.py:2815](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/host.py:2815) 注册 `run_workflow_sync`
 - `run_workflow_sync` 继续用 `asyncio.run` 桥接同步宿主与异步运行时
 
 ### 3. goal 接入 Stop 边界
 
 只改「模型不再请求工具」的收尾分支（原 [code.py:3210](/D:/01dpan/01project/life/learncc/learn-claude-code/s15_integrated_harness/code.py:3210)）：
 
-- [host.py:3160](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/host.py:3160) `evaluate_goal()` 调 `GoalController.evaluate_after_turn()`
-- [host.py:3241](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/host.py:3241) `block` → 补一条 `[Goal still active]` 消息后 `continue`，不落 memory、不释放 assignment
-- [host.py:3252](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/host.py:3252) 其余终态打印 `[goal] <status>` 后走原收尾路径
+- [host.py:3160](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/host.py:3160) `evaluate_goal()` 调 `GoalController.evaluate_after_turn()`
+- [host.py:3241](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/host.py:3241) `block` → 补一条 `[Goal still active]` 消息后 `continue`，不落 memory、不释放 assignment
+- [host.py:3252](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/host.py:3252) 其余终态打印 `[goal] <status>` 后走原收尾路径
 - 评估器模型顺序：`GOAL_EVALUATOR_MODEL_ID` → `ANTHROPIC_DEFAULT_HAIKU_MODEL` → `MODEL`
 - 沿用 s17 默认：`block_cap=8`、`MAX_GOAL_LENGTH=4000`；goal 状态只在内存
 
 ### 4. 资源归属规则
 
 - 运行时状态跟随**启动目录**：`.tasks` / `.memory` / `.mailboxes` / `.worktrees` / `.runtime` / `.scheduled_tasks.json` / `.transcripts` / `.task_outputs`
-  - 含把 `workflow.STORE` 从代码目录改为 [workflow.py:47](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/workflow.py:47) 的 `WORKDIR / ".runtime"`
-- 资产随包分发：[host.py:67](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/host.py:67) 的 `SKILLS_DIR = PACKAGE_DIR / "skills"`
+  - 含把 `workflow.STORE` 从代码目录改为 [workflow.py:47](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/workflow.py:47) 的 `WORKDIR / ".runtime"`
+- 资产随包分发：[host.py:67](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/host.py:67) 的 `SKILLS_DIR = PACKAGE_DIR / "skills"`
 
 ### 5. CLI
 
-- `/goal` 在写入 history 前本地拦截（[src/agent_harness/frontends/cli.py](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/frontends/cli.py)），支持 `/goal`、`/goal <条件>`、`/goal clear|stop|off|reset|none|cancel`
+- `/goal` 在写入 history 前本地拦截（[src/codefox/frontends/cli.py](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/frontends/cli.py)），支持 `/goal`、`/goal <条件>`、`/goal clear|stop|off|reset|none|cancel`
 - 提示符改为 `agent-harness >> `
 - `agent-harness workflow demo|resume` 走 s16 原 `run_demo`
 
 ### 6. 跨平台
 
-[workflow.py:31](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/workflow.py:31) 用 try/except 包 `fcntl`；无 fcntl 时 [workflow.py:97](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/workflow.py:97) 打印一次提示并退化为进程内锁。
+[workflow.py:31](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/workflow.py:31) 用 try/except 包 `fcntl`；无 fcntl 时 [workflow.py:97](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/workflow.py:97) 打印一次提示并退化为进程内锁。
 
 ### 7. 单文件生成
 
@@ -111,8 +111,8 @@ python -m pytest -q
 
 1. **拼接顺序**改为 `memory → goal → workflow → host`（原写「内存/常量 → memory → host → workflow → goal」）。
    原因：host 在模块级就配置 `RUNNER_FACTORY` 和 `GOAL`，必须最后执行，否则被覆盖。
-2. **demo 用 mock runner**：`cli.py` 显式设 `workflow.RUNNER_FACTORY = MockAgentRunner`（[cli.py:90](/D:/01dpan/01project/life/learncc/agent-harness/src/agent_harness/frontends/cli.py:90)）。
-   原因：`import agent_harness.host` 会把 runner 永久改成真实 API 版本，导致 demo 与测试走网络；实测发现后修正。
+2. **demo 用 mock runner**：`cli.py` 显式设 `workflow.RUNNER_FACTORY = MockAgentRunner`（[cli.py:90](/D:/01dpan/01project/life/learncc/agent-harness/src/codefox/frontends/cli.py:90)）。
+   原因：`import codefox.host` 会把 runner 永久改成真实 API 版本，导致 demo 与测试走网络；实测发现后修正。
 
 ## 七、未验证项
 
@@ -133,7 +133,7 @@ python -m pytest -q
 
 ## 九、维护提示
 
-- 改 `src/agent_harness/` 下任一模块后要重跑 `python scripts/build_flat.py`；
+- 改 `src/codefox/` 下任一模块后要重跑 `python scripts/build_flat.py`；
   `tests/test_flat_build.py::test_committed_flat_file_is_current` 会在生成物过期时报错。
 - `flat/agent_full.py` 是生成物，不要直接编辑。
 
@@ -145,7 +145,7 @@ python -m pytest -q
 - 新增 `pyproject.toml`：项目元数据、运行时依赖、`pytest` 配置。删除 `requirements.txt`，
   依赖以 `pyproject.toml` 为唯一来源，安装改为 `pip install -e ".[dev]"`。
 - 新增 `.editorconfig`（UTF-8 / LF / Python 4 空格）与 `.gitattributes`（统一 LF、标记生成物）。
-- 未引入 linter/formatter：`src/agent_harness/` 是课程原样代码，`black --check` 会重排 13 个文件，
+- 未引入 linter/formatter：`src/codefox/` 是课程原样代码，`black --check` 会重排 13 个文件，
   与「近原样搬运」定位冲突。
 - 目录布局以 [README.md](/D:/01dpan/01project/life/learncc/agent-harness/README.md) 的「目录」表为准，本节不重复维护。
 
@@ -153,19 +153,19 @@ python -m pytest -q
 
 项目定位从「教学复刻」转为「自有的 code agent 项目」，因此按 Python 打包惯例重构：
 
-- 代码移入 `src/agent_harness/`：`cli.py`、`host.py`、`goal.py`、`workflow.py`、
+- 代码移入 `src/codefox/`：`cli.py`、`host.py`、`goal.py`、`workflow.py`、
   `memory_runtime.py`、`llm_client.py`、`skills/`；`llm_client.py` 从顶层模块变为包内模块。
 - 包内改用相对导入：`from .llm_client import Anthropic`、`from . import host, workflow`；
   删掉 `sys.path` 自举补丁（原 `_repo_root` hack）。
 - `skills/` 从项目根移入包内并声明为包数据；`SKILLS_DIR` 改为
   `Path(__file__).resolve().parent / "skills"`，editable 与 wheel 安装都能解析。
-- 新增 `src/agent_harness/__main__.py`；`pyproject.toml` 增加
-  `[project.scripts] agent-harness = "agent_harness.frontends.cli:main"` 和
+- 新增 `src/codefox/__main__.py`；`pyproject.toml` 增加
+  `[project.scripts] agent-harness = "codefox.frontends.cli:main"` 和
   `[tool.setuptools.packages.find] where = ["src"]`；`main(argv=None)` 兼容无参调用。
-- 入口改为 `agent-harness` 或 `python -m agent_harness`；`python cli.py` 不再可用。
+- 入口改为 `agent-harness` 或 `python -m codefox`；`python cli.py` 不再可用。
 - 单文件版自举路径改指 `<repo>/src`，其 `llm_client` 导入改为
-  `from agent_harness.providers.llm_client import Anthropic`。
-- 验证：`PYTHONPATH=src python -m agent_harness workflow demo|resume` 通过；
+  `from codefox.providers.llm_client import Anthropic`。
+- 验证：`PYTHONPATH=src python -m codefox workflow demo|resume` 通过；
   `scan_skills()` 从包内解析出 4 个技能；56 个离线测试全绿。
 
 ## 十二、项目约定与文档
@@ -204,7 +204,7 @@ python -m pytest -q
 ## 十五、README 面向读者与 tmp 目录
 
 - `README.md` 从"本机口吻"改为**面向使用者**：运行段以"已安装"为主路径
-  （`agent-harness`），源码运行（`PYTHONPATH=src` + `python -m agent_harness`）作为替代。
+  （`agent-harness`），源码运行（`PYTHONPATH=src` + `python -m codefox`）作为替代。
 - **从 README 移除来源事实**：不再提"教学仓库""原课程""移植"，以及 s07/s09/s15/s16/s17
   这类章节编号。原「相对原课程的改动」一节删除：其中属来源历史的（memory 改导入、
   workflow 原生化）不再出现；属运行时行为的（资源归属、Stop 边界、goal 仅内存、跨平台）

@@ -7,10 +7,13 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 
-def response(text="Done", *, tools=(), stop="end_turn"):
-    """构造一次完整模型响应，带 usage 和可选工具块。"""
-    return SimpleNamespace(stop_reason=stop, content=[SimpleNamespace(type="text", text=text), *tools],
-                           usage=SimpleNamespace(input_tokens=10, output_tokens=3))
+def response(text="Done", *, tools=(), stop="end_turn", usage=(10, 3)):
+    """构造文本和工具响应；text=None 只含工具，usage 为 (input, output) 或 None。"""
+    content = [] if text is None else [text_block(text)]
+    value = blocks(*content, *tools, stop_reason=stop)
+    if usage is not None:
+        value.usage = SimpleNamespace(input_tokens=usage[0], output_tokens=usage[1])
+    return value
 
 
 def tool(tool_name, call_id="call", **arguments):
@@ -20,8 +23,7 @@ def tool(tool_name, call_id="call", **arguments):
 
 def tool_call(name, **arguments):
     """构造带唯一 id 的工具调用块，同一响应包含多个调用时使用。"""
-    return SimpleNamespace(type="tool_use", id=f"{name}-{time.monotonic_ns()}",
-                           name=name, input=arguments)
+    return tool(name, f"{name}-{time.monotonic_ns()}", **arguments)
 
 
 def text_block(text):

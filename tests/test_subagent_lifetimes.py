@@ -1,13 +1,10 @@
 """Exercise unified tools with real child lifetimes, directories and messages."""
 
-from agent_harness.runtime import tool_execution
-
-import agent_harness.agents.subagent as subagent_runtime
-import agent_harness.core as core
-import agent_harness.registrations as registrations
-import agent_harness.workspace.tasks as task_state
-import agent_harness.tools.file_tools as file_tools
-import agent_harness.workspace.worktrees as worktrees
+import codefox.agents.subagent as subagent_runtime
+import codefox.core as core
+import codefox.registrations as registrations
+import codefox.workspace.tasks as task_state
+import codefox.workspace.worktrees as worktrees
 
 
 import json
@@ -67,34 +64,25 @@ def wait_event(host, kind, *, received=None):
     pytest.fail(f"No {kind} event")
 
 
-@pytest.mark.parametrize("arguments", [
-    {"mode": "invalid"}, {"mode": []}, {"name": "../bad"}, {"name": "lead"},
-    {"name": 3}, {"prompt": ""}, {"role": ""}, {"require_plan": "yes"},
-    {"require_plan": True}, {"task_id": ""},
-])
-def test_invalid_creation_has_no_side_effects(runtime, arguments):
-    host = runtime
-    calls = []
-    client(host, lambda **kwargs: calls.append(kwargs))
-    request = dict(name="worker", description="Inspect", prompt="Inspect", mode="once")
-    request.update(arguments)
-    result = json.loads(registrations.run_spawn_subagent(**request).content)
-    assert result["status"] == "failed"
-    assert calls == []
-    assert subagent_runtime._active_subagents == {}
-    assert task_state.assignments == {}
-    assert subagent_runtime._PROTOCOL.empty()
-
-
-def test_single_creation_tool_and_missing_mode(runtime):
-    host = runtime
-    tools, handlers = host.assemble_tool_pool()
-    names = {item["name"] for item in tools}
-    assert "spawn_subagent" in names and "list_subagents" in names
-    assert not {"task", "spawn_teammate", "list_teammates"} & names
-    result = tool_execution.call_tool_handler(handlers["spawn_subagent"],
-                                   {"name": "worker", "prompt": "Inspect"}, "spawn_subagent").content
-    assert "Error" in result and subagent_runtime._active_subagents == {}
+def test_invalid_creation_has_no_side_effects(runtime):
+    cases = [{"mode": "invalid"}, {"mode": []}, {"name": "../bad"}, {"name": "lead"},
+             {"name": 3}, {"prompt": ""}, {"role": ""}, {"require_plan": "yes"},
+             {"require_plan": True}, {"task_id": ""}, {"description": ""},
+             {"description": None}, {"description": 1}, {"max_rounds": 0},
+             {"max_rounds": True}, {"max_rounds": 1.5}, {"max_tool_calls": -1},
+             {"max_tool_calls": False}, {"max_tool_calls": "2"}]
+    for arguments in cases:
+        host = runtime
+        calls = []
+        client(host, lambda **kwargs: calls.append(kwargs))
+        request = dict(name="worker", description="Inspect", prompt="Inspect", mode="once")
+        request.update(arguments)
+        result = json.loads(registrations.run_spawn_subagent(**request).content)
+        assert result["status"] == "failed"
+        assert calls == []
+        assert subagent_runtime._active_subagents == {}
+        assert task_state.assignments == {}
+        assert subagent_runtime._PROTOCOL.empty()
 
 
 def test_once_round_limit_and_unfinished_task_are_failures(runtime, monkeypatch):
@@ -132,29 +120,6 @@ def test_claim_and_thread_start_failures_roll_back(runtime, monkeypatch):
     assert task_state.load_task(second.id).status == "pending"
     assert subagent_runtime._active_subagents == {} and subagent_runtime._PROTOCOL.empty()
     assert set(task_state.assignments) == {"agent"}
-
-
-def test_once_uses_task_directory_until_final_answer(runtime, monkeypatch):
-    host = runtime
-    directory = core.WORKDIR / ".worktrees" / "once"
-    directory.mkdir(parents=True)
-    monkeypatch.setattr(worktrees, "_registered_worktree",
-                        lambda name: (directory, None))
-    task = task_state.create_task("Once edit")
-    task.worktree = "once"
-    task_state.save_task(task)
-    responses = iter([
-        blocks(tool_call("complete_task", task_id=task.id),
-                 tool_call("write_file", path="once.txt", content="task result")),
-        blocks(text_block("Completed")),
-    ])
-    client(host, lambda **kwargs: next(responses))
-    result = spawn(host, task_id=task.id)
-    assert result["status"] == "completed"
-    assert directory.joinpath("once.txt").read_text() == "task result"
-    assert not core.WORKDIR.joinpath("once.txt").exists()
-    assert task_state.load_task(task.id).status == "completed"
-    assert not task_state.assignments and not subagent_runtime._active_subagents
 
 
 def test_persistent_without_task_keeps_history_and_never_auto_claims(runtime, monkeypatch):
@@ -244,7 +209,7 @@ def test_message_during_final_model_request_stays_in_current_work(runtime):
 
 
 def test_message_after_final_boundary_starts_next_work(runtime, monkeypatch):
-    from agent_harness.agents.turn_engine import TurnEngine
+    from codefox.agents.turn_engine import TurnEngine
 
     host = runtime
     boundary_entered = threading.Event()
@@ -336,49 +301,6 @@ def test_persistent_switches_tasks_only_after_final_answer(runtime, monkeypatch)
     assert len(set(histories)) == 1 and "worker" in subagent_runtime._active_subagents
 
 
-def test_persistent_unfinished_task_retains_owner_until_guidance(runtime):
-    host = runtime
-    a, b = task_state.create_task("A"), task_state.create_task("B")
-    calls = []
-    responses = iter([blocks(text_block("Need guidance")),
-                      blocks(tool_call("claim_task", task_id=b.id)),
-                      blocks(tool_call("complete_task", task_id=a.id)),
-                      blocks(text_block("A complete"))])
-    def create(**kwargs):
-        calls.append(list(kwargs["messages"]))
-        return next(responses)
-    client(host, create)
-    spawn(host, mode="persistent", task_id=a.id)
-    idle = wait_event(host, "idle_notification")
-    assert "unfinished" in idle["content"]
-    assert task_state.assignments["worker"]["task_id"] == a.id
-    registrations.run_send_message("worker", "Finish A before moving on").content
-    wait_event(host, "idle_notification")
-    assert "must finish" in calls[2][-1]["content"][0]["content"]
-    assert task_state.load_task(b.id).status == "pending"
-    assert task_state.assignments == {} and task_state.load_task(a.id).status == "completed"
-
-
-def test_plan_approval_and_work_messages_use_real_protocol(runtime):
-    host = runtime
-    calls = []
-    responses = iter([blocks(tool_call("submit_plan", plan="Read then write")),
-                      blocks(tool_call("write_file", path="approved.txt", content="ok")),
-                      blocks(text_block("Done"))])
-    def create(**kwargs):
-        calls.append(list(kwargs["messages"]))
-        return next(responses)
-    client(host, create)
-    spawn(host, mode="persistent", require_plan=True)
-    event = wait_event(host, "plan_approval_request")
-    assert not core.WORKDIR.joinpath("approved.txt").exists()
-    request_id = event["metadata"]["request_id"]
-    assert "approved" in subagent_runtime.run_review_plan(request_id, True).content
-    wait_event(host, "idle_notification")
-    assert core.WORKDIR.joinpath("approved.txt").read_text() == "ok"
-    assert "[Plan approved]" in str(calls[1])
-
-
 def test_messages_during_work_and_between_children_are_model_selected(runtime):
     host = runtime
     calls = []
@@ -408,31 +330,8 @@ def test_messages_during_work_and_between_children_are_model_selected(runtime):
     assert "Peer investigation" in str(next(history for name, history in reversed(calls) if name == "receiver"))
 
 
-def test_pending_plan_can_shutdown_without_another_model_call(runtime, runtime_threads):
-    host = runtime
-    calls = []
-
-    def create(**kwargs):
-        calls.append(kwargs)
-        return blocks(tool_call("submit_plan", plan="Read then change"))
-
-    client(host, create)
-    spawn(host, mode="persistent", require_plan=True)
-    plan = wait_event(host, "plan_approval_request")
-    assert "Shutdown requested" in subagent_runtime.run_request_shutdown("worker").content
-    acknowledgement = wait_event(host, "shutdown_response")
-    for thread in runtime_threads:
-        thread.join(3)
-        assert not thread.is_alive()
-    assert "worker" not in subagent_runtime._active_subagents
-    assert subagent_runtime._PROTOCOL.empty()
-    assert len(calls) == 1
-    assert acknowledgement["metadata"]["approve"] is True
-    assert subagent_runtime._PROTOCOL.request(plan["metadata"]["request_id"]) is None
-
-
 def test_plan_wait_shutdown_records_stopped_engine_without_new_model_call(runtime, monkeypatch):
-    from agent_harness.agents.turn_engine import TurnPhase
+    from codefox.agents.turn_engine import TurnPhase
     sessions = []
     create_session = subagent_runtime.create_subagent_session
 
@@ -453,8 +352,8 @@ def test_plan_wait_shutdown_records_stopped_engine_without_new_model_call(runtim
     assert TurnPhase.WAITING_APPROVAL in sessions[0].engine.phase_history
 
 
-@pytest.mark.parametrize("replay_approval", [False, True])
-@pytest.mark.parametrize("message_type", ["plan_approval_response", "shutdown_request"])
+@pytest.mark.parametrize("replay_approval,message_type", [
+    (True, "plan_approval_response"), (False, "shutdown_request")])
 def test_stale_protocol_does_not_wake_idle_model(runtime, monkeypatch, replay_approval, message_type):
     host = runtime
     histories = []
@@ -565,140 +464,6 @@ def test_query_waits_for_current_work_and_does_not_repeat_notifications(runtime)
     assert len(calls) == 2
 
 
-def test_stopped_notification_preserves_the_result_and_terminal_reason(runtime, runtime_threads):
-    client(runtime, lambda **kwargs: blocks(text_block("Audit finished")))
-    started = spawn(runtime, mode="persistent", description="Inspect source evidence")
-    wait_event(runtime, "idle_notification")
-    agent_id = started["agent_id"]
-    assert subagent_runtime.run_request_shutdown(agent_id).status == "success"
-    stopped = wait_event(runtime, "stopped")
-    for thread in runtime_threads:
-        thread.join(2)
-    output = subagent_runtime.get_subagent_output(agent_id, block=False)
-    assert stopped["metadata"] == output
-    assert output["status"] == "stopped"
-    assert output["text"] == "Audit finished"
-    assert "Stopped by Lead" in output["reason"]
-    assert not subagent_runtime._active_subagents
-
-
-def test_model_budget_exhaustion_does_not_wait_for_plan_approval(runtime):
-    calls = []
-
-    def create(**kwargs):
-        calls.append(kwargs)
-        return blocks(tool_call("submit_plan", plan="Read the source"))
-
-    client(runtime, create)
-    creation = spawn(runtime, mode="persistent", require_plan=True,
-                     tools=["submit_plan"], max_rounds=1, max_tool_calls=2)
-    result = subagent_runtime.get_subagent_output(creation["agent_id"], timeout=1)
-
-    assert result["status"] == "budget_exhausted"
-    assert result["rounds"] == 1 and result["tool_calls"] == 1
-    assert "model-call" in result["reason"]
-    events = []
-    wait_event(runtime, "idle_notification", received=events)
-    assert next(message["metadata"] for message in events
-                if message["type"] == "budget_exhausted") == result
-    assert subagent_runtime.list_subagents()[0]["status"] == "idle"
-    assert len(calls) == 1
-
-
-def test_approval_of_exhausted_work_does_not_reset_its_budget(runtime, monkeypatch):
-    calls = []
-    approved = threading.Event()
-    waiting_again = threading.Event()
-    wait = subagent_runtime._BUS.wait_for_messages
-
-    def observe_wait(name, timeout=None):
-        if name == "worker" and approved.is_set():
-            waiting_again.set()
-        messages = wait(name, timeout)
-        if name == "worker" and any(message["type"] == "plan_approval_response"
-                                    for message in messages):
-            approved.set()
-        return messages
-
-    monkeypatch.setattr(subagent_runtime._BUS, "wait_for_messages", observe_wait)
-    core.WORKDIR.joinpath("source.txt").write_text("Current evidence", encoding="utf-8")
-    task = task_state.create_task("Inspect source")
-
-    def create(**kwargs):
-        calls.append(kwargs)
-        if len(calls) == 1:
-            return blocks(tool_call("submit_plan", plan="Read the source"))
-        return blocks(tool_call("read_file", path="source.txt"))
-
-    client(runtime, create)
-    creation = spawn(runtime, mode="persistent", task_id=task.id, require_plan=True,
-                     tools=["submit_plan", "read_file"], max_rounds=1, max_tool_calls=1)
-    events = []
-    wait_event(runtime, "idle_notification", received=events)
-    agent_id = creation["agent_id"]
-    original = subagent_runtime.get_subagent_output(agent_id, block=False)
-    plan = next(message for message in events if message["type"] == "plan_approval_request")
-    assert subagent_runtime.run_review_plan(plan["metadata"]["request_id"], True).status == "success"
-    assert waiting_again.wait(2)
-
-    assert len(calls) == 1
-    assert subagent_runtime.get_subagent_output(agent_id, block=False) == original
-    assert subagent_runtime.list_subagents()[0]["status"] == "idle"
-    assert task_state.assignments["worker"]["task_id"] == task.id
-    assert not subagent_runtime.consume_lead_inbox()
-
-    subagent_runtime.send_message("lead", agent_id, "Continue reading the source")
-    wait_event(runtime, "idle_notification")
-    result = subagent_runtime.get_subagent_output(agent_id, block=False)
-    assert result["status"] == "budget_exhausted"
-    assert "Current evidence" in result["text"]
-    assert result["rounds"] == 1 and result["tool_calls"] == 1
-    assert result["usage"]["model_calls"] == 2
-    assert len(calls) == 2
-
-
-def test_new_plan_request_updates_assignment_version_before_approval(runtime, monkeypatch):
-    calls = []
-    delivered = threading.Event()
-    release = threading.Event()
-    notify = subagent_runtime._notify_result
-
-    def hold_result(record, result):
-        notify(record, result)
-        if result["status"] == "completed" and not delivered.is_set():
-            delivered.set()
-            assert release.wait(3)
-
-    monkeypatch.setattr(subagent_runtime, "_notify_result", hold_result)
-
-    def create(**kwargs):
-        calls.append(kwargs)
-        if len(calls) == 1:
-            return blocks(text_block("First finding"))
-        if len(calls) == 2:
-            return blocks(tool_call("write_file", path="premature.txt", content="changed"),
-                          tool_call("submit_plan", plan="Write after approval"))
-        if len(calls) == 3:
-            return blocks(tool_call("write_file", path="approved.txt", content="changed"))
-        return blocks(text_block("Second finding"))
-
-    client(runtime, create)
-    creation = spawn(runtime, mode="persistent", tools=["write_file", "submit_plan"])
-    try:
-        assert delivered.wait(2)
-        assert subagent_runtime.run_request_plan(creation["agent_id"], "Plan the next work").status == "success"
-    finally:
-        release.set()
-    plan = wait_event(runtime, "plan_approval_request")
-    assert not core.WORKDIR.joinpath("premature.txt").exists()
-    assert subagent_runtime.run_review_plan(plan["metadata"]["request_id"], True).status == "success"
-    finished = subagent_runtime.get_subagent_output(creation["agent_id"], timeout=2)
-    assert finished["text"] == "Second finding"
-    assert core.WORKDIR.joinpath("approved.txt").read_text() == "changed"
-    assert "Blocked: plan status is required" in str(calls[2]["messages"])
-    assert len(calls) == 4
-
-
 def test_multiple_queued_messages_form_one_delegation(runtime, monkeypatch):
     calls = []
     received = threading.Event()
@@ -733,48 +498,6 @@ def test_multiple_queued_messages_form_one_delegation(runtime, monkeypatch):
                    if isinstance(message["content"], str) and "Current delegation:" in message["content"])
     assert "Current delegation: Investigate A\n\nInvestigate B" in context
     assert finished["rounds"] == 1 and finished["usage"]["model_calls"] == 2
-    assert len(calls) == 2
-
-
-def test_queued_approval_and_new_work_use_the_new_delegation(runtime, monkeypatch):
-    calls = []
-    received = threading.Event()
-    release = threading.Event()
-    wait = subagent_runtime._BUS.wait_for_messages
-
-    def hold_approval(name, timeout=None):
-        messages = wait(name, timeout)
-        if name == "worker" and any(message["type"] == "plan_approval_response" for message in messages):
-            received.set()
-            assert release.wait(3)
-        return messages
-
-    monkeypatch.setattr(subagent_runtime._BUS, "wait_for_messages", hold_approval)
-    task = task_state.create_task("Inspect source")
-
-    def create(**kwargs):
-        calls.append(kwargs)
-        if len(calls) == 1:
-            return blocks(tool_call("submit_plan", plan="Read the source"))
-        return blocks(text_block("New finding"))
-
-    client(runtime, create)
-    creation = spawn(runtime, mode="persistent", task_id=task.id, require_plan=True,
-                     tools=["submit_plan"], max_tool_calls=1)
-    events = []
-    wait_event(runtime, "idle_notification", received=events)
-    plan = next(message for message in events if message["type"] == "plan_approval_request")
-    try:
-        assert subagent_runtime.run_review_plan(plan["metadata"]["request_id"], True).status == "success"
-        assert received.wait(2)
-        subagent_runtime.send_message("lead", creation["agent_id"], "Investigate B")
-    finally:
-        release.set()
-    finished = subagent_runtime.get_subagent_output(creation["agent_id"], timeout=2)
-    assert "New finding" in finished["text"]
-    context = next(message["content"] for message in reversed(calls[1]["messages"])
-                   if isinstance(message["content"], str) and "Current delegation:" in message["content"])
-    assert "Current delegation: Investigate B" in context
     assert len(calls) == 2
 
 

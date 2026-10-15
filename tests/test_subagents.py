@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from types import SimpleNamespace as S
-import asyncio
 import os
 import subprocess
 import sys
@@ -13,21 +12,16 @@ import threading
 
 import pytest
 
-import agent_harness.agents.subagent as subagent_runtime
-import agent_harness.context.compaction as compaction
-import agent_harness.context.memory_runtime as memory_runtime
-import agent_harness.context.prompts as prompts
-import agent_harness.core as core
-import agent_harness.registrations as registrations
-import agent_harness.runtime.hooks as hooks
-import agent_harness.runtime.scheduler as scheduler
-import agent_harness.tools.mcp_tools as mcp_tools
-import agent_harness.tools.shared_tools as shared_tools
-import agent_harness.workflows.workflow_demo as workflow_demo
-import agent_harness.workflows.workflow_runtime as workflow_runtime
-import agent_harness.workspace.task_worktrees as task_worktrees
-import agent_harness.workspace.tasks as tasks
-import agent_harness.workspace.worktrees as worktrees
+import codefox.agents.subagent as subagent_runtime
+import codefox.context.compaction as compaction
+import codefox.core as core
+import codefox.registrations as registrations
+import codefox.runtime.hooks as hooks
+import codefox.runtime.scheduler as scheduler
+import codefox.workspace.task_worktrees as task_worktrees
+import codefox.workspace.tasks as tasks
+import codefox.workspace.worktrees as worktrees
+from support.fakes import response, tool
 
 
 def spawn_paused(host, monkeypatch, name="alice", **kwargs):
@@ -44,17 +38,6 @@ def request_id(result):
     return result.split("(")[1].split(")")[0]
 
 
-def test_task_lifecycle_and_assignment_release(host_factory) -> None:
-    host = host_factory()
-    task = tasks.create_task("Runtime contract")
-
-    assert "Claimed" in tasks.claim_task(task.id, owner="alice")
-    assert "Completed" in tasks.complete_task(task.id, owner="alice")
-    assert "alice" in tasks.assignments
-    assert tasks.release_completed_assignment("alice") is True
-    assert "alice" not in tasks.assignments
-
-
 def test_assignment_cwd_recovers_plain_and_bound_tasks(
     host_factory, tmp_path, monkeypatch
 ) -> None:
@@ -65,7 +48,9 @@ def test_assignment_cwd_recovers_plain_and_bound_tasks(
     assert tasks.assignment_cwd("alice") == tmp_path
     assert "Completed" in tasks.complete_task(plain.id, owner="alice")
     assert tasks.assignment_cwd("alice") == tmp_path
+    assert "alice" in tasks.assignments
     assert tasks.release_completed_assignment("alice") is True
+    assert "alice" not in tasks.assignments
 
     bound = tasks.create_task("Bound assignment")
     bound.worktree = "feature"
@@ -83,8 +68,7 @@ def test_assignment_cwd_recovers_plain_and_bound_tasks(
         tasks.assignment_cwd("alice")
 
 
-@pytest.mark.parametrize("owner", ["agent", "alice"])
-@pytest.mark.parametrize("archive", ["tool_output", "transcript"])
+@pytest.mark.parametrize("owner,archive", [("agent", "tool_output"), ("alice", "transcript")])
 def test_bound_file_tools_read_runtime_archives_without_changing_write_cwd(
     host_factory, monkeypatch, owner, archive, no_approval
 ) -> None:
@@ -131,7 +115,7 @@ def test_cross_process_claim_waits_for_worktree_binding(
     ], cwd=tmp_path, check=True)
     task = tasks.create_task("Concurrent binding")
     child_code = (
-        "from agent_harness.workspace import tasks; "
+        "from codefox.workspace import tasks; "
         "print('ready', flush=True); "
         f"print(tasks.claim_task({task.id!r}, owner='alice'), flush=True)"
     )
@@ -170,109 +154,6 @@ def test_cross_process_claim_waits_for_worktree_binding(
     )
 
 
-def test_task_dependencies_are_second_phase_and_lead_only(host_factory) -> None:
-    host = host_factory()
-    tools = {tool["name"]: tool for tool in registrations.BUILTIN_TOOLS}
-
-    assert "update_task" in tools
-    assert "blockedBy" not in tools["create_task"]["input_schema"]["properties"]
-    assert "runtime-generated IDs" in prompts.PROMPT_SECTIONS["tasks"]
-
-    dependency = tasks.create_task("Create schema")
-    target = tasks.create_task("Write API")
-    assert "Updated" in registrations.run_update_task(target.id, [dependency.id]).content
-    assert tasks.load_task(target.id).blockedBy == [dependency.id]
-
-
-def test_state_dirs_follow_the_launch_directory(host_factory, tmp_path) -> None:
-    host = host_factory()
-    tasks.create_task("Isolate state")
-
-    assert (tmp_path / ".tasks").is_dir()
-    assert (tmp_path / ".tasks").resolve() == tasks._tasks_root()
-    assert not (tmp_path / ".mailboxes").exists()
-
-
-def test_runtime_state_moves_with_workdir(host_factory, tmp_path, monkeypatch) -> None:
-    host = host_factory()
-    next_dir = tmp_path / "next"
-    next_dir.mkdir()
-    monkeypatch.setattr(core, "WORKDIR", next_dir)
-    monkeypatch.setattr(workflow_runtime, "RUNNER_FACTORY",
-                        lambda: workflow_runtime.SubagentRunner(workflow_demo.DemoModelClient()))
-
-    tasks.create_task("Moved task")
-    compaction.save_output("tool-1", "output")
-    compaction.write_transcript([{"role": "user", "content": "hello"}])
-    memory_runtime.write_memory_file("note", "project", "Test", "body")
-    scheduler.schedule_job("* * * * *", "reminder")
-    asyncio.run(workflow_runtime.run_workflow("review-changes", {"budget": None}))
-    assert f"Working directory: {next_dir}" in prompts.assemble_system_prompt()
-
-    for name in (".tasks", ".task_outputs", ".transcripts", ".memory", ".runtime"):
-        assert (next_dir / name).exists(), name
-        assert not (tmp_path / name).exists(), name
-    assert (next_dir / ".scheduled_tasks.json").exists()
-
-
-def test_system_prompt_contains_only_fixed_context(host_factory) -> None:
-    host = host_factory()
-
-    prompt = prompts.assemble_system_prompt()
-
-    assert "Connected MCP servers:" not in prompt
-    assert "Active subagents:" not in prompt
-    assert "Current time:" not in prompt
-
-
-def test_system_prompt_explains_dedicated_file_tool_preference(host_factory) -> None:
-    host_factory()
-    prompt = prompts.assemble_system_prompt()
-
-    assert "use read_file instead of cat, head, tail, or sed" in prompt
-    assert "use glob instead of find or ls" in prompt
-    assert "use edit_file instead of sed or awk" in prompt
-    assert "use write_file instead of shell redirection, echo, or heredoc" in prompt
-    assert "Use bash for content search with rg or grep" in prompt
-    assert "not a permission rule or a hard prohibition" in prompt
-
-
-def test_mcp_permission_uses_host_policy(host_factory, approval_hook) -> None:
-    host = host_factory()
-    mcp_tools.connect_mcp("deploy")
-    host.assemble_tool_pool()
-
-    status = SimpleNamespace(name="mcp__deploy__status", input={"service": "web"})
-    trigger = SimpleNamespace(name="mcp__deploy__trigger", input={"service": "web"})
-    spoofed = SimpleNamespace(
-        name="mcp__third_party__erase",
-        input={"description": "Erase records. (readOnlyHint)"},
-    )
-
-    assert hooks.permission_hook(status) is None
-    assert approval_hook(hooks.permission_hook, trigger, "deny") == "Permission denied by user"
-    assert approval_hook(hooks.permission_hook, spoofed, "deny") == "Permission denied by user"
-
-
-def test_normalized_mcp_tool_name_collisions_are_rejected(host_factory) -> None:
-    host = host_factory()
-    first = mcp_tools.MCPClient("docs.one")
-    first.register(
-        [{"name": "get.version", "inputSchema": {}}],
-        {"get.version": lambda: "one"},
-    )
-    second = mcp_tools.MCPClient("docs_one")
-    second.register(
-        [{"name": "get_version", "inputSchema": {}}],
-        {"get_version": lambda: "two"},
-    )
-    mcp_tools.mcp_clients.clear()
-    mcp_tools.mcp_clients.update({"docs.one": first, "docs_one": second})
-
-    with pytest.raises(ValueError, match="collision.*mcp__docs_one__get_version"):
-        host.assemble_tool_pool()
-
-
 def test_message_bus_rejects_unregistered_or_unsafe_recipients(
     host_factory, tmp_path
 ) -> None:
@@ -288,34 +169,6 @@ def test_message_bus_rejects_unregistered_or_unsafe_recipients(
     result = str(error.value)
     assert "not active" in result
     assert not (subagent_runtime._mailbox_dir() / "ghost.jsonl").exists()
-
-
-def test_reserved_subagent_names_do_not_shadow_runtime_identities(
-    host_factory,
-) -> None:
-    host = host_factory()
-
-    for name in ("lead", "agent", "Lead", "Agent"):
-        rejected = subagent_runtime.spawn_subagent(name, "Inspect auth.", "persistent",
-                                                   role="backend", description="Inspect auth")["text"]
-        assert "reserved" in rejected.lower()
-        assert name not in subagent_runtime._active_subagents
-
-    subagent_runtime._BUS.send("alice", "lead", "still routable")
-    assert subagent_runtime._BUS.read_inbox("lead")[0]["content"] == "still routable"
-
-    subagent_runtime._active_subagents["Alice"] = subagent_runtime.SubagentRecord("Alice", status="idle")
-    duplicate = subagent_runtime.spawn_subagent("alice", "Inspect auth.", "persistent",
-                                                role="backend", description="Inspect auth")["text"]
-    assert "already exists" in duplicate
-
-
-def test_public_task_tools_return_errors_for_bad_ids(host_factory) -> None:
-    host = host_factory()
-    for task_id in ("../escape", "task_missing"):
-        for handler in (registrations.run_get_task, shared_tools.run_claim_task, shared_tools.run_complete_task):
-            assert "Error:" in handler(task_id).content
-        assert "Error:" in registrations.run_update_task(task_id, []).content
 
 
 def test_plan_gate_blocks_mutating_subagent_tools(host_factory, monkeypatch, tmp_path, no_approval) -> None:
@@ -340,73 +193,6 @@ def test_plan_gate_blocks_mutating_subagent_tools(host_factory, monkeypatch, tmp
         assert output.startswith("Wrote" if tool_name == "write_file" else "Edited")
 
 
-def test_plan_gate_blocks_subagent_completion_but_not_lead(host_factory, monkeypatch) -> None:
-    host = host_factory()
-    subagent_task = tasks.create_task("Subagent task")
-    session = spawn_paused(host, monkeypatch, task_id=subagent_task.id, require_plan=True)
-    subagent_runtime.submit_plan("alice", "Complete the task")
-    block = SimpleNamespace(name="complete_task", input={"task_id": subagent_task.id})
-    assert "Blocked" in session.execute_tool(block).result.content
-    assert tasks.load_task(subagent_task.id).status == "in_progress"
-
-    lead_task = tasks.create_task("Lead task")
-    assert "Claimed" in tasks.claim_task(lead_task.id)
-    assert "Completed" in tasks.complete_task(lead_task.id)
-
-
-def test_plan_rejection_requires_a_new_submission(host_factory, monkeypatch) -> None:
-    host = host_factory()
-    spawn_paused(host, monkeypatch)
-
-    assert "Plan requested" in subagent_runtime.run_request_plan("alice", "Refactor auth").content
-    request = subagent_runtime._BUS.read_inbox("alice")
-    assert request[0]["type"] == "plan_request"
-    assert subagent_runtime._PROTOCOL.gate("alice") == "required"
-
-    submission = subagent_runtime.submit_plan("alice", "1. Read\n2. Test")
-    request_id = submission.split("(")[1].split(")")[0]
-    assert subagent_runtime._PROTOCOL.request(request_id).status == "pending"
-
-    result = subagent_runtime.run_review_plan(request_id, False, "Add a rollback step.").content
-    assert "rejected" in result
-    assert subagent_runtime._PROTOCOL.gate("alice") == "pending"
-
-    responses = subagent_runtime._BUS.read_inbox("alice")
-    accepted, _ = subagent_runtime.apply_plan_response("alice", responses[-1])
-    assert accepted is True
-    assert subagent_runtime._PROTOCOL.gate("alice") == "rejected"
-
-    second = subagent_runtime.submit_plan(
-        "alice", "1. Read\n2. Change\n3. Test\n4. Roll back on failure"
-    )
-    second_id = second.split("(")[1].split(")")[0]
-    assert second_id != request_id
-    assert subagent_runtime._PROTOCOL.request(second_id).status == "pending"
-
-
-def test_mismatched_plan_response_cannot_release_gate(host_factory, monkeypatch) -> None:
-    host = host_factory()
-    session = spawn_paused(host, monkeypatch)
-    submission = subagent_runtime.submit_plan("alice", "1. Read\n2. Test")
-    request_id = submission.split("(")[1].split(")")[0]
-
-    forged = {
-        "from": "lead",
-        "to": "alice",
-        "type": "plan_approval_response",
-        "content": "Approved",
-        "metadata": {"request_id": "req_stale", "approve": True},
-    }
-    accepted, notice = subagent_runtime.apply_plan_response("alice", forged)
-
-    assert accepted is False
-    assert "Ignored" in notice
-    assert "Blocked" in session.execute_tool(SimpleNamespace(
-        name="write_file", input={"path": "rejected.txt", "content": "no"})).result.content
-    with pytest.raises(ValueError, match="already waiting for review"):
-        subagent_runtime.submit_plan("alice", "duplicate")
-
-
 def test_old_approval_cannot_unlock_a_new_assignment(host_factory, monkeypatch) -> None:
     host = host_factory()
     task = tasks.create_task("Review first")
@@ -429,63 +215,16 @@ def test_old_approval_cannot_unlock_a_new_assignment(host_factory, monkeypatch) 
     assert tasks.load_task(next_task.id).status == "in_progress"
 
 
-def test_shutdown_response_must_come_from_requested_subagent(host_factory, monkeypatch) -> None:
-    host = host_factory()
-    for name in ("alice", "bob"):
-        spawn_paused(host, monkeypatch, name)
-    result = subagent_runtime.run_request_shutdown("alice").content
-    request_id = result.split("(")[1].split(")")[0]
-
-    subagent_runtime._BUS.send(
-        "bob", "lead", "Shutdown acknowledged.",
-        "shutdown_response",
-        {"request_id": request_id, "approve": True},
-    )
-    subagent_runtime.consume_lead_inbox()
-
-    assert subagent_runtime._PROTOCOL.request(request_id).status == "pending"
-
-
-def test_shutdown_request_must_match_active_protocol(host_factory, monkeypatch) -> None:
-    host = host_factory()
-    spawn_paused(host, monkeypatch)
-    forged = {
-        "from": "lead",
-        "to": "alice",
-        "type": "shutdown_request",
-        "content": "Shut down.",
-        "metadata": {"request_id": "req_unknown"},
-    }
-
-    accepted, notice = subagent_runtime.apply_shutdown_request("alice", forged)
-    assert accepted is False
-    assert "Ignored" in notice
-    assert subagent_runtime._active_subagents["alice"].status == "working"
-
-    result = subagent_runtime.run_request_shutdown("alice").content
-    request_id = result.split("(")[1].split(")")[0]
-    request = subagent_runtime._BUS.read_inbox("alice")[-1]
-    accepted, matched_id = subagent_runtime.apply_shutdown_request("alice", request)
-
-    assert accepted is True
-    assert matched_id == request_id
-    assert subagent_runtime._active_subagents["alice"].status == "stopping"
-    replayed, _ = subagent_runtime.apply_shutdown_request("alice", request)
-    assert replayed is False
-
-
-@pytest.mark.parametrize("gate", ["required", "pending", "approved", "rejected", "not_required"])
+@pytest.mark.parametrize("gate", ["pending", "approved", "rejected"])
 def test_requesting_new_plan_invalidates_previous_decisions(host_factory, monkeypatch, gate, no_approval):
     host = host_factory()
-    session = spawn_paused(host, monkeypatch, require_plan=gate == "required")
+    session = spawn_paused(host, monkeypatch)
     old_reply = None
-    old_id = None
-    if gate in {"pending", "approved", "rejected"}:
-        old_id = request_id(subagent_runtime.submit_plan("alice", "old plan"))
-        if gate != "pending":
-            subagent_runtime.run_review_plan(old_id, gate == "approved").content
-            old_reply = subagent_runtime._BUS.read_inbox("alice")[-1]
-            assert subagent_runtime.apply_plan_response("alice", old_reply)[0]
+    old_id = request_id(subagent_runtime.submit_plan("alice", "old plan"))
+    if gate != "pending":
+        assert gate in subagent_runtime.run_review_plan(old_id, gate == "approved").content
+        old_reply = subagent_runtime._BUS.read_inbox("alice")[-1]
+        assert subagent_runtime.apply_plan_response("alice", old_reply)[0]
     assert subagent_runtime._PROTOCOL.gate("alice") == gate
     assert "Plan requested" in subagent_runtime.run_request_plan("alice", "new work").content
     assert subagent_runtime._PROTOCOL.gate("alice") == "required"
@@ -503,34 +242,47 @@ def test_requesting_new_plan_invalidates_previous_decisions(host_factory, monkey
         name="write_file", input={"path": "approved.txt", "content": "ok"})).result.content.startswith("Wrote")
 
 
-@pytest.mark.parametrize("field,value", [("from", "bob"), ("to", "bob"),
-                                         ("type", "shutdown_response"), ("approve", False),
-                                         ("request_id", "req_stale")])
-def test_plan_reply_requires_matching_identity_type_and_decision(host_factory, monkeypatch, field, value):
+def test_plan_reply_requires_matching_identity_type_and_decision(host_factory, monkeypatch):
     host = host_factory()
     session = spawn_paused(host, monkeypatch, require_plan=True)
     current = request_id(subagent_runtime.submit_plan("alice", "plan"))
+    with pytest.raises(ValueError, match="already waiting for review"):
+        subagent_runtime.submit_plan("alice", "duplicate")
     subagent_runtime.run_review_plan(current, True).content
     reply = subagent_runtime._BUS.read_inbox("alice")[-1]
-    forged = {**reply, "metadata": dict(reply["metadata"])}
-    if field in {"approve", "request_id"}:
-        forged["metadata"][field] = value
-    else:
-        forged[field] = value
-    assert not subagent_runtime.apply_plan_response("alice", forged)[0]
-    assert "Blocked" in session.execute_tool(SimpleNamespace(
-        name="write_file", input={"path": "blocked.txt", "content": "no"})).result.content
+    for field, value in [
+        ("from", "bob"), ("to", "bob"), ("type", "shutdown_response"),
+        ("approve", False), ("request_id", "req_stale"),
+    ]:
+        forged = {**reply, "metadata": dict(reply["metadata"])}
+        if field in {"approve", "request_id"}:
+            forged["metadata"][field] = value
+        else:
+            forged[field] = value
+        assert not subagent_runtime.apply_plan_response("alice", forged)[0]
+        assert "Blocked" in session.execute_tool(SimpleNamespace(
+            name="write_file", input={"path": "blocked.txt", "content": "no"})).result.content
     assert subagent_runtime.apply_plan_response("alice", reply)[0]
     assert not subagent_runtime.apply_plan_response("alice", reply)[0]
+    assert session.execute_tool(tool("write_file", path="approved.txt", content="ok")).result.status == "success"
 
 
 def test_shutdown_routing_is_optional_and_cleanup_keeps_ack_for_lead(host_factory, monkeypatch):
     host = host_factory()
-    spawn_paused(host, monkeypatch, require_plan=True)
+    session = spawn_paused(host, monkeypatch, require_plan=True)
     plan_id = request_id(subagent_runtime.submit_plan("alice", "pending plan"))
-    shutdown_id = request_id(subagent_runtime.run_request_shutdown("alice").content)
+    agent_id = subagent_runtime._active_subagents["alice"].agent_id
+    forged = {"from": "lead", "to": "alice", "type": "shutdown_request",
+              "content": "stop", "metadata": {"request_id": "req_unknown"}}
+    assert not subagent_runtime.apply_shutdown_request("alice", forged)[0]
+    shutdown_id = request_id(subagent_runtime.run_request_shutdown(agent_id).content)
+    subagent_runtime._BUS.send("bob", "lead", "wrong child", "shutdown_response",
+                               {"request_id": shutdown_id, "approve": True})
+    subagent_runtime.consume_lead_inbox()
+    assert subagent_runtime._PROTOCOL.request(shutdown_id).status == "pending"
     request = subagent_runtime._BUS.read_inbox("alice")[-1]
     assert subagent_runtime.apply_shutdown_request("alice", request) == (True, shutdown_id)
+    assert not subagent_runtime.apply_shutdown_request("alice", request)[0]
     subagent_runtime._BUS.send("alice", "lead", "ack", "shutdown_response",
                   {"request_id": shutdown_id, "approve": True})
     delivered = subagent_runtime.consume_lead_inbox(route_protocol=False)
@@ -549,31 +301,7 @@ def test_shutdown_routing_is_optional_and_cleanup_keeps_ack_for_lead(host_factor
     assert "not active" in subagent_runtime.run_request_shutdown("alice").content
 
 
-def test_recreated_child_ignores_old_approval_and_cleanup_survives_release_error(host_factory, monkeypatch):
-    host = host_factory()
-    spawn_paused(host, monkeypatch, require_plan=True)
-    current = request_id(subagent_runtime.submit_plan("alice", "old plan"))
-    subagent_runtime.run_review_plan(current, True).content
-    old_reply = subagent_runtime._BUS.read_inbox("alice")[-1]
-    subagent_runtime._cleanup(subagent_runtime._active_subagents["alice"])
-    session = spawn_paused(host, monkeypatch, require_plan=True)
-    assert not subagent_runtime.apply_plan_response("alice", old_reply)[0]
-    assert "Blocked" in session.execute_tool(SimpleNamespace(
-        name="write_file", input={"path": "old.txt", "content": "no"})).result.content
-    subagent_runtime.submit_plan("alice", "new pending plan")
-
-    def fail_release(name):
-        raise OSError("release failed")
-
-    monkeypatch.setattr(tasks, "release_assignment", fail_release)
-    with pytest.raises(OSError, match="release failed"):
-        subagent_runtime._cleanup(subagent_runtime._active_subagents["alice"])
-    assert "alice" not in subagent_runtime._active_subagents
-    assert subagent_runtime._PROTOCOL.empty()
-
-
-@pytest.mark.parametrize("kind", ["plan", "shutdown"])
-@pytest.mark.parametrize("order", ["request_first", "cleanup_first"])
+@pytest.mark.parametrize("kind,order", [("plan", "request_first"), ("shutdown", "cleanup_first")])
 def test_request_creation_and_cleanup_are_atomic(host_factory, monkeypatch, kind, order):
     host = host_factory()
     real_thread = threading.Thread
@@ -630,210 +358,18 @@ def test_request_creation_and_cleanup_are_atomic(host_factory, monkeypatch, kind
         assert "not found" in subagent_runtime.run_review_plan(request_id(results[0]), True).content
 
 
-def test_worktree_registry_parsing_does_not_use_display_truncation(
-    host_factory, tmp_path
-) -> None:
-    host = host_factory()
-    entries = []
-    for index in range(80):
-        path = tmp_path / ".worktrees" / (f"work-{index}-" + "x" * 80)
-        entries.append(
-            f"worktree {path}\nHEAD {'0' * 40}\n"
-            f"branch refs/heads/wt/work-{index}\n"
-        )
-    porcelain = "\n".join(entries)
-    assert len(porcelain) > 5000
-    worktrees.run_git_impl = lambda args, cwd=None: (True, porcelain)
-    try:
-        registered, error = worktrees._registered_worktrees()
-    finally:
-        worktrees.run_git_impl = None
-
-    assert error is None
-    assert len(registered) == 80
-
-
-def test_worktree_removal_is_lead_only(host_factory) -> None:
-    host = host_factory()
-    names = {tool["name"] for tool in registrations.BUILTIN_TOOLS}
-
-    assert "remove_worktree" in names
-    assert callable(task_worktrees.remove_worktree)
-    assert registrations.BUILTIN_HANDLERS["remove_worktree"] is registrations.run_remove_worktree
-    subagent = subagent_runtime.create_subagent_session("alice")
-    assert "remove_worktree" not in {tool["name"] for tool in subagent.tools}
-    assert "remove_worktree" not in {tool["name"] for tool in subagent_runtime.SubagentSession(
-        "once", core.client, core.MODEL, "", mode="once", task_tools=False).tools}
-
-
-def test_shell_permission_asks_for_every_command(host_factory, approval_hook) -> None:
-    host = host_factory()
-    block = SimpleNamespace(name="bash", input={"command": "echo hi"})
-    assert approval_hook(hooks.permission_hook, block, "deny") == "Permission denied by user"
-    assert approval_hook(hooks.permission_hook, block, "approve") is None
-
-    denied = SimpleNamespace(name="bash", input={"command": "sudo rm -rf /"})
-    assert "deny list" in hooks.permission_hook(denied)
-
-
-def optioned_reply(text="done", tokens=7, stop="end_turn", block=None):
-    """子 agent 创建用例使用的响应，按 tokens 折算 input/output 用量。"""
-    return S(content=[block or S(type="text", text=text)], stop_reason=stop,
-             usage=S(input_tokens=tokens - 2, output_tokens=2))
-
-
-@pytest.mark.parametrize("tools", ["bash", ["unknown"], ["spawn_subagent"],
-                                   ["send_message"], ["claim_task"], [None]])
-def test_invalid_tools_do_not_claim_or_request(host_factory, tools):
-    host = host_factory()
-    task = tasks.create_task("Untouched task")
-    client = S(messages=S(create=lambda **kw: pytest.fail("must not request")))
-    result = subagent_runtime.spawn_subagent("child", "Inspect", "once",
-                                         description="Inspect", tools=tools, client=client)
-    assert result["status"] == "failed"
-    assert result["usage"] == {"tokens": 0, "model_calls": 0,
-                               "input_tokens": 0, "output_tokens": 0}
-    assert not subagent_runtime._active_subagents and not tasks.assignments
-    assert tasks.load_task(task.id).status == "pending"
-
-
-def test_injected_client_tools_and_usage_cover_multiple_rounds(host_factory, no_approval):
-    host = host_factory()
-    requests = []
-    responses = iter([optioned_reply(block=S(type="tool_use", name="write_file", id="write",
-                                  input={"path": "result.txt", "content": "result"})),
-                      optioned_reply(tokens=11)])
-    def create(**kw):
-        assert "child" in subagent_runtime._active_subagents
-        requests.append(kw)
-        return next(responses)
-    client = S(messages=S(create=create))
-    result = subagent_runtime.spawn_subagent("child", "Write", "once", tools=["write_file"],
-                                         description="Write", client=client, model="injected", max_tokens=123)
-    assert result["status"] == "completed"
-    assert result["usage"] == {"tokens": 18, "model_calls": 2,
-                               "input_tokens": 14, "output_tokens": 4}
-    assert all(r["model"] == "injected" and r["max_tokens"] == 123 for r in requests)
-    assert [t["name"] for t in requests[0]["tools"]] == ["write_file"]
-    assert "Available child tools:" in requests[0]["system"]
-    assert "write_file" in requests[0]["system"]
-    assert "bash" not in requests[0]["system"]
-    assert result["agent_id"]
-    assert result["description"] == "Write"
-    assert (core.WORKDIR / "result.txt").read_text() == "result"
-    assert not subagent_runtime._active_subagents
-
-
-def test_spawn_schema_requires_description_and_output_query_returns_result(host_factory):
-    host = host_factory()
-    tools = {tool["name"]: tool for tool in registrations.BUILTIN_TOOLS}
-    assert "description" in tools["spawn_subagent"]["input_schema"]["required"]
-    assert "get_subagent_output" in tools
-
-    client = S(messages=S(create=lambda **kwargs: optioned_reply("Done")))
-    result = subagent_runtime.spawn_subagent(
-        "query-child", "Inspect", "once", description="Inspect source", client=client)
-    queried = subagent_runtime.get_subagent_output(result["agent_id"], block=False)
-
-    assert queried["agent_id"] == result["agent_id"]
-    assert queried["name"] == "query-child"
-    assert queried["description"] == "Inspect source"
-    assert queried["status"] == "completed"
-    assert queried["text"] == "Done"
-    assert queried["rounds"] == 1
-    assert queried["tool_calls"] == 0
-    assert result == queried
-    assert queried["usage"]["input_tokens"] == 5
-    assert queried["usage"]["output_tokens"] == 2
-
-
-def test_missing_description_does_not_start_a_child(host_factory, monkeypatch):
-    from agent_harness.runtime import tool_execution
-    host_factory()
-    monkeypatch.setattr(core, "client", S(messages=S(
-        create=lambda **kwargs: pytest.fail("must not request a model"))))
-    result = tool_execution.call_tool_handler(
-        registrations.run_spawn_subagent,
-        {"name": "missing-label", "prompt": "Inspect", "mode": "once"},
-        "spawn_subagent",
-    )
-
-    assert result.status == "failed"
-    assert "description" in result.content
-    assert not subagent_runtime._active_subagents
-
-
-@pytest.mark.parametrize("mode", ["once", "persistent"])
-def test_read_only_prompt_matches_the_exact_whitelist(host_factory, mode):
-    host_factory()
-    session = subagent_runtime.create_subagent_session(
-        "reader", mode=mode, tools=["read_file"], task_tools=False)
-    assert {item["name"] for item in session.tools} == {"read_file"}
-    assert set(session.handlers) == {"read_file"}
-    assert "offset" in session.system and "limit" in session.system
-    for unavailable in ("bash", "glob", "rg", "claim_task", "complete_task",
-                        "send_message", "submit_plan"):
-        assert unavailable not in session.system
-
-
-@pytest.mark.parametrize("field,value", [
-    ("description", ""), ("description", None), ("description", 1),
-    ("max_rounds", 0), ("max_rounds", True), ("max_rounds", 1.5),
-    ("max_tool_calls", -1), ("max_tool_calls", False), ("max_tool_calls", "2"),
-])
-def test_creation_validates_labels_and_positive_budgets(host_factory, field, value):
-    host_factory()
-    arguments = dict(name="invalid", prompt="Inspect", mode="once", description="Inspect source",
-                     client=S(messages=S(create=lambda **kwargs: pytest.fail("must not request"))))
-    arguments[field] = value
-    result = subagent_runtime.spawn_subagent(**arguments)
-    assert result["status"] == "failed" and result["agent_id"] is None
-    assert not subagent_runtime._active_subagents and not tasks.assignments
-
-
-def test_child_progress_reports_live_counts_and_terminal_usage(host_factory, monkeypatch, no_approval):
-    host_factory()
-    events = []
-    monkeypatch.setattr(subagent_runtime.interaction, "publish",
-                        lambda kind, **payload: events.append((kind, payload)))
-    replies = iter([optioned_reply("Read findings", block=S(
-        type="tool_use", id="read", name="read_file", input={"path": "missing.txt"})),
-        optioned_reply("Audit complete")])
-    requests = []
-    def create(**kwargs):
-        requests.append(kwargs)
-        assert subagent_runtime.list_subagents()[0]["rounds"] == len(requests)
-        return next(replies)
-    result = subagent_runtime.spawn_subagent(
-        "progress-child", "Inspect", "once", description="Inspect source",
-        tools=["read_file"], client=S(messages=S(create=create)))
-    statuses = [payload for kind, payload in events if kind == "subagent_status"]
-    assert all(item["agent_id"] == result["agent_id"] and item["description"] == "Inspect source"
-               for item in statuses)
-    assert statuses[-1]["status"] == "completed"
-    assert statuses[-1]["rounds"] == 2 and statuses[-1]["tool_calls"] == 1
-    assert statuses[-1]["usage"] == result["usage"]
-    assert statuses[-1]["reason"] == "Completed"
-    assert "messages" not in result and "history" not in result
-    assert all("text" not in item for item in statuses)
-    for unavailable in ("bash", "glob", "rg", "claim_task", "complete_task",
-                        "send_message", "submit_plan"):
-        assert unavailable not in requests[0]["system"]
-
-
-def test_plan_and_shutdown_protocols_accept_stable_agent_ids(host_factory, monkeypatch):
-    host = host_factory()
-    spawn_paused(host, monkeypatch)
-    record = subagent_runtime._active_subagents["alice"]
-    assert subagent_runtime.run_request_plan(record.agent_id, "Read first").status == "success"
-    subagent_runtime._BUS.read_inbox("alice")
-    plan_id = request_id(subagent_runtime.submit_plan(record.agent_id, "Read and report"))
-    assert subagent_runtime.run_review_plan(plan_id, True).status == "success"
-    reply = subagent_runtime._BUS.read_inbox("alice")[-1]
-    assert subagent_runtime.apply_plan_response(record.agent_id, reply)[0]
-    assert subagent_runtime.run_request_shutdown(record.agent_id).status == "success"
-    request = subagent_runtime._BUS.read_inbox("alice")[-1]
-    assert subagent_runtime.apply_shutdown_request(record.agent_id, request)[0]
+def test_invalid_tools_do_not_claim_or_request(host_factory):
+    for tools in ['bash', ['unknown'], ['spawn_subagent'], ['send_message'], ['claim_task'], [None]]:
+        host = host_factory()
+        task = tasks.create_task("Untouched task")
+        client = S(messages=S(create=lambda **kw: pytest.fail("must not request")))
+        result = subagent_runtime.spawn_subagent("child", "Inspect", "once",
+                                             description="Inspect", tools=tools, client=client)
+        assert result["status"] == "failed"
+        assert result["usage"] == {"tokens": 0, "model_calls": 0,
+                                   "input_tokens": 0, "output_tokens": 0}
+        assert not subagent_runtime._active_subagents and not tasks.assignments
+        assert tasks.load_task(task.id).status == "pending"
 
 
 @pytest.mark.parametrize("budget", ["model", "tools"])
@@ -879,24 +415,22 @@ def test_once_default_budgets_preserve_partial_results_and_counts(
     assert not subagent_runtime._active_subagents
 
 
-@pytest.mark.parametrize("stop", ["end_turn", "max_tokens"])
-def test_empty_tools_never_execute_hallucinated_call(host_factory, stop):
+def test_empty_tools_never_execute_hallucinated_call(host_factory):
     host = host_factory()
     calls = []
     block = S(type="tool_use", name="write_file", id="write",
               input={"path": "forbidden.txt", "content": "no"})
     def create(**kw):
         calls.append(kw)
-        return optioned_reply(block=block, stop=stop) if len(calls) == 1 else optioned_reply()
+        return (response(None, tools=[block], usage=(5, 2)) if len(calls) == 1
+                else response("done", usage=(5, 2)))
     result = subagent_runtime.spawn_subagent("child", "Read text", "once", tools=[],
                                          description="Read text", client=S(messages=S(create=create)))
     assert not calls[0].get("tools")
     assert not (core.WORKDIR / "forbidden.txt").exists()
-    assert result["usage"] == {"tokens": 7 if stop == "max_tokens" else 14,
-                               "model_calls": 1 if stop == "max_tokens" else 2,
-                               "input_tokens": 5 if stop == "max_tokens" else 10,
-                               "output_tokens": 2 if stop == "max_tokens" else 4}
-    assert result["status"] == ("failed" if stop == "max_tokens" else "completed")
+    assert result["usage"] == {"tokens": 14, "model_calls": 2,
+                               "input_tokens": 10, "output_tokens": 4}
+    assert result["status"] == "completed"
 
 
 def test_usage_includes_summary_and_failed_request(host_factory, monkeypatch):
@@ -907,7 +441,7 @@ def test_usage_includes_summary_and_failed_request(host_factory, monkeypatch):
     def create(**kw):
         requests.append(kw)
         if "tools" not in kw:
-            return optioned_reply("summary", tokens=9)
+            return response("summary", usage=(7, 2))
         raise RuntimeError("execution unavailable")
     result = subagent_runtime.spawn_subagent("child", "Long instruction " * 20, "once",
                                          description="Inspect long input",

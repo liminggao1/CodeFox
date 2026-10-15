@@ -1,10 +1,10 @@
 # 仓库事实
 
-本文记录 agent-harness 当前生效的架构与行为事实，按仓库演进里程碑组织。
+本文记录 codefox 当前生效的架构与行为事实，按仓库演进里程碑组织。
 只描述当前状态，不记录规划过程、实施顺序与当时的测试数；历史决策由 Git 保留。
 
 权威分工：运行方式与代码布局见 [README.md](../../README.md)，术语见 [GLOSSARY.md](../../GLOSSARY.md)，
-文件分工见 [源码结构说明](../../src/agent_harness/README.md) 与各子包 README，本机环境见 [AGENTS.md](../../AGENTS.md)。
+文件分工见 [源码结构说明](../../src/codefox/README.md) 与各子包 README，本机环境见 [AGENTS.md](../../AGENTS.md)。
 本文只维护跨模块的架构与行为规则；同一事实不在两处并列，本文与上述文件冲突时以代码为准。
 
 ## 1. 结构初始化（2026-10-04）
@@ -12,7 +12,8 @@
 项目由 s15 集成宿主、s16 workflow 运行时与 s17 goal 循环合并而来，现为自有的本地 code agent
 运行环境；不打包发布，不做多运行时实例隔离。
 
-- 布局为 `src/agent_harness/`，console 入口 `agent-harness` 与 `python -m agent_harness`；包内用相对导入。
+- 项目与分发名为 `codefox`，源码布局为 `src/codefox/`；启动入口为 `codefox` 或
+  `python -m codefox`，包内用相对导入。
 - 资产随包分发：`skills/` 位于包内，`SKILLS_DIR = PACKAGE_DIR / "skills"`，editable 与 wheel 安装都能解析。
 - 任务、记忆、工作流、后台任务等运行时状态跟随**当前会话的启动目录**：`.tasks`、`.memory`、
   `.mailboxes`、`.worktrees`、`.runtime`、`.scheduled_tasks.json` 与 `.task_outputs`；交互会话上下文、
@@ -21,7 +22,7 @@
 - memory 以正常导入接入并共享 client / model / workspace，不再按路径 `importlib` 加载。
 - workflow 直接进入工具池；`run_workflow_sync` 用 `asyncio.run` 桥接同步宿主与异步运行时。
 - goal 接在 Stop 边界：模型不再请求工具时先问 `GoalController`，`block` 则补 `[Goal still active]` 继续；
-  goal 状态只存在内存，默认 `block_cap=8`、`MAX_GOAL_LENGTH=4000`。
+  默认 `block_cap=8`、`MAX_GOAL_LENGTH=4000`。交互会话的 goal 保存与恢复见第 5 节，评估器见第 12 节。
 - 跨平台：`fcntl` 用 try/except 包裹，无 fcntl 时退化为进程内锁并打印一次提示。
 - 文档骨架：`docs/{adr,plans,research,handoff,guides,agents}/`、`note/`、`.scratch/`（本地议题）、`tmp/`（本地临时，不入库）。
 
@@ -31,12 +32,16 @@
 
 - 任务归属三分：`workspace/tasks.py` 负责任务持久化、认领、assignment 与目录查询；
   `workspace/worktrees.py` 只负责 Git 与目录；`workspace/task_worktrees.py` 负责两者的绑定与移除
-  （含占用检查、跨进程任务锁、部分成功后的报错）。
+  （含占用检查、跨进程任务锁、部分成功后的报错）。Lead 移除工作树时保留分支，不自动合并。
 - 依赖方向为 `agents` / `tools` → `workspace.tasks` → `workspace.worktrees`；`worktrees` 不反向导入任务。
 - 启动目录、配置、client 与 CLI 状态由 `core.py` 持有；任务、memory、workflow、transcript 与工具结果
   在调用时读取当前目录，`host` 不再维护 client 副本。提示词快照与动态状态见第 10 节。
 - workflow journal 记录每次新调用及累计 token 用量；相同 `prompt/label/schema` 的并发调用只执行一次；
-  缺 `tokens` 的旧格式记录在 resume 时明确报错（旧文件保留，重跑生成新格式）。
+  resume 命中 journal 时不再调用模型，预算包含整个 run 的历史 token；返回的 `usage` 是本次新增消费，
+  `cumulativeUsage` 是整个 run 的累计消费。缺 `tokens` 的旧格式记录明确报错并保留，重跑生成新记录。
+- workflow 普通失败先等待已登记的步骤与编排组结算；取消阻止新调用并等待已启动调用，保存 failed 后重抛原取消。
+  实际消费先计入预算，超额后禁止新调用并将本次运行记为 failed；格式修正和失败调用的已知消费也计入累计用量。
+  有效结果只在未超额、未取消时缓存。
 - cron：循环 cron 仅在本进程内按分钟去重，重启后同一分钟可再次触发；持久化的一次性任务采用至少一次交付
   （入队前落盘，模型调用被接受后才确认，确认前崩溃允许重投）。
 - 调度器独占后台任务、cron 队列与锁。调用方只查询待交付状态或进入操作作用域；会话激活前重新检查 cron，
@@ -48,6 +53,7 @@
 第一轮把浅 module 加深，第二轮修正协议与恢复行为。当前事实：
 
 - `context/memory_runtime.py` 只保留记忆能力（存储、索引、检索、抽取、整理）；旧 Agent runtime 已删除。
+  召回、回合结束提取和整理由 `AGENT_MEMORY_ENABLED` 控制，默认关闭；历史压缩独立于该开关。
 - `runtime_context.py` 以 frozen dataclass 和 tuple 持有上下文值，`build_context(messages)` 是唯一构造入口；
   Lead 在准备新请求时刷新，重试复用已准备的请求；CLI 与后台循环不持有共享 context。
 - `tools/tool_registry.py` 统一装配工具 schema、handler 与 policy 快照，来源由宿主显式接线；
@@ -61,10 +67,12 @@
   统一抛 `ProtocolResponseError`，不自动补括号、字段或参数值。
 - `context/compaction.py` 的 `prepare_history` 拥有完整分层策略（瘦身、裁剪、摘要、手动/自动压缩、被动恢复）；
   自动、手动与被动入口都用 deepcopy 候选历史和切片提交，返回只读 `CompactionResult`。
+  失败保留原历史；自动或手动压缩失败后继续主请求，真正超限时每回合只尝试一次被动恢复。
 - 后台结果领取先保存所有超过 200 字符的全文到 `.task_outputs/tool-results/background/`，再生成通知，
   最后移除整批记录；长通知包含全文路径，已保存路径在重试时复用。
+  绑定工作树的任务仍能用 `read_file` 读取运行时归档；保存失败时保留整批结果等待重试。
 - `agents/recovery.py` 的 `RecoveryState` 提供只读模型/额度/计数和固定转换方法，集中 Lead 的重试与恢复状态；
-  429 与成功调用都打断连续 529 计数。
+  每回合独立管理输出升级、续写和一次被动压缩；429 与成功调用都打断连续 529 计数。
 
 ## 4. 统一子 agent（2026-10-14）
 
@@ -124,24 +132,29 @@
 - 每个会话一个权威文件：`~/.agent-harness/sessions/<session_id>.json`，固定位置使任意启动目录都能按 ID 查找，
   不维护索引。只维护一种 JSON 格式，不保存版本号。
 - 内容包含会话 ID、创建/更新时间、对话消息、交互事件、目标状态与目标事件；读取时校验必要字段。
-  缺少必要字段、目录移动后恢复或结构不符时报错并保留原文件，不转换旧文件。
+  缺少必要字段、目录移动后恢复或结构不符时报错并保留原文件，不转换旧文件；不扫描启动目录的 `.transcripts/sessions/`。
 - 保存用同目录临时文件加 `os.replace` 原子替换；所有历史追加、原地替换和压缩替换都经过统一保存入口。
   保存失败时显示原因、当前交互继续，并在后续保存边界重试（dirty 重试）。
 - 每次 Lead 模型响应的 API `input_tokens` 保存为 `model_usage` 摘要事件，不写入模型消息历史。
   底部读取当前会话最近一次测量，恢复后仍显示该数值；回合累计用量与单次上下文占用分开。
   有历史但无单次测量时显示 `暂无`，不把累计输入量或字符估算当成已用值；新的空会话显示 0。
 - `/resume` 无参数时扫描 `sessions/` 按最近更新时间倒序列出有限条目；`/resume <id>` 读取并验证文件后，
-  确认当前回合与后台任务已结束，保存当前上下文、切回原启动目录、恢复目标历史/目标状态/目标事件并设为当前会话。
+  确认当前回合已结束，且无活跃或待交付的后台任务、子 agent、Lead 信箱事件或定时任务结果，
+  再保存当前上下文、切回原启动目录、恢复目标历史/目标状态/目标事件并设为当前会话。
+  目标校验不改变当前目录；校验、保存当前上下文或切目录失败时不切换。目标激活后保存失败则保留目标上下文，
+  在下次交互重试。切换后的信箱等处理失败时保留目标上下文并暂停后台输入消费，仍交付会话切换与命令结束通知。
+  跨目录切换会停止旧目录调度并加载目标目录的持久化定时任务，旧目录的非持久化定时任务不保留。
 - 恢复不请求模型；旧子 agent 线程、后台线程与 MCP 连接不恢复或重启。
 - `/delete <id>` 删除指定的非活动会话；活动会话不能删除。读不出来的文件也在 `/resume` 列表中，可直接删除。
 - 会话文件保存规范化启动目录绝对路径、Lead 活动任务 ID、会话工作树名称（无则 `null`）与 Todo；
   恢复时在原启动目录校验任务归属、状态、工作树绑定与目录有效性，失效则拒绝切换且当前上下文不变。
 - 任务完成后清除任务分配但保留会话工作树；只有未关联工作树的会话使用启动目录。
+  Lead 任务按会话隔离，切换和退出保留未完成任务；成功移除会话工作树后回到启动目录。
 - goal 状态恢复：当前活动条件、设置时间、评估次数、最近原因、连续阻止次数与最近状态；不恢复 token 起点或消耗。
 
 ## 6. Textual 界面（2026-10-09）
 
-默认入口保持 CLI，新增 `agent-harness tui` 与源码入口；Textual 只作为可选依赖（`tui` extra，
+默认入口保持 CLI，新增 `codefox tui` 与源码入口；Textual 只作为可选依赖（`tui` extra，
 `textual>=8.2.8,<9`），普通 CLI 与离线 workflow 不加载它。
 
 - 核心执行沿用同步代码与现有线程：单 Lead 执行线程、CLI 唯一标准输入读取线程、Textual UI 线程；不做核心异步化。
@@ -256,7 +269,7 @@
 运行期职责深化：
 
 - 会话切换由 `runtime/session_switch.py` 的 `SessionSwitch.switch(target)` 独占：读快照、校验、停服务、chdir、
-  激活归属、重启服务、发布 `session_changed` 都在实现内按序完成，失败回滚也在实现内。
+  激活归属、重启服务、发布 `session_changed` 都在实现内按序完成，失败边界见第 5 节。
 - 命令路由由 `runtime/commands.py` 的 `CommandRouter.dispatch(text)` 处理本地命令并返回 `CommandOutcome`；
   `/resume` 委托 `SessionSwitch`。
 - 回合执行由 `runtime/turn_runner.py` 的 `TurnRunner.run(submission_id, kind, text)` 拥有：接受到终态的事件、
@@ -335,3 +348,12 @@
   token 估算包含 JSON 来源信息与序列化开销，按相关性顺序截取。记忆仍默认关闭。
 - 单条工具结果落盘默认 30000 字符，预览默认 1000 字符，分别由
   `TOOL_PERSIST_THRESHOLD_CHARS` / `TOOL_PREVIEW_CHARS` 覆盖，不随 token 窗口成比例变化。
+
+## 12. 目标评估器（2026-10-15）
+
+- 默认使用 `PromptGoalEvaluator`；`GOAL_EVALUATOR_PROVIDER=jev` 时使用 `JEV_API_KEY` 调用 Jev 的结构化 Choice API。
+  `auto` 模式在配置 Jev key 时选择 Jev，否则使用 Prompt evaluator。离线测试显式使用模拟评估，不访问外部 API。
+- Jev 的 `complete`、`incomplete`、`impossible` 分别表示目标达成、需要受限续做、目标无法完成。
+  只有 `choice=complete` 且整体 `confidence` 高于 `JEV_COMPLETION_CONFIDENCE_THRESHOLD` 才能结束目标；默认阈值为 0.9。
+  `probabilities` 校验后保留在响应中，不作为第二个完成门槛。原始响应写入会话诊断日志，不进入模型历史。
+- 评估器的对话输入默认最多 24000 个字符，由 `GOAL_EVALUATOR_MAX_TRANSCRIPT_CHARACTERS` 调整，单位不是 token。

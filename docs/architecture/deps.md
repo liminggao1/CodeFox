@@ -28,11 +28,11 @@ python scripts/arch_views.py
 
 ## Python 文件静态导入环
 
-- agent_harness.context.compaction ↔ agent_harness.context.prompt_state ↔ agent_harness.core ↔ agent_harness.runtime.session_store ↔ agent_harness.workspace.tasks ↔ agent_harness.workspace.worktrees
+- codefox.context.compaction ↔ codefox.context.prompt_state ↔ codefox.core ↔ codefox.runtime.session_store ↔ codefox.workspace.tasks ↔ codefox.workspace.worktrees
 
 此检查包含函数内的延迟导入，不执行代码，也不覆盖动态导入。
 
-节点是 `agent_harness` 的子包与顶层模块，箭头 `A --> B` 表示 A 导入 B。
+节点是 `codefox` 的子包与顶层模块，箭头 `A --> B` 表示 A 导入 B。
 全部依赖都在图上，没有省略；同层边只是弱化，不会藏住问题。
 VS Code 中打开本文件按 `Ctrl+Shift+V` 预览；AI 读同目录的纯文本 `deps.mmd`。
 

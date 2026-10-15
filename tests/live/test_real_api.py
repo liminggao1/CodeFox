@@ -196,7 +196,7 @@ def test_streaming_session_can_be_restored(live_runtime):
     assert store.load(session_id)["messages"]
     assert drain_runtime_closed(runtime)
 
-    from agent_harness.runtime.interactive_runtime import InteractiveRuntime
+    from codefox.runtime.interactive_runtime import InteractiveRuntime
 
     restored = InteractiveRuntime(store=store)
     restored.start()
@@ -231,12 +231,12 @@ def test_streaming_bounded_read_only_subagent_audit(live_runtime):
     """Audit real source ranges with a discover/read whitelist and bounded work."""
     import json
     from pathlib import Path
-    from agent_harness.agents import subagent
+    from codefox.agents import subagent
 
     runtime, store = live_runtime
-    source = (Path(__file__).resolve().parents[2] / "src" / "agent_harness" /
+    source = (Path(__file__).resolve().parents[2] / "src" / "codefox" /
               "agents" / "subagent.py").read_text(encoding="utf-8")
-    target = store.workdir / "src" / "agent_harness" / "agents" / "subagent.py"
+    target = store.workdir / "src" / "codefox" / "agents" / "subagent.py"
     target.parent.mkdir(parents=True)
     target.write_text(source, encoding="utf-8")
     lines = source.splitlines()
@@ -246,7 +246,7 @@ def test_streaming_bounded_read_only_subagent_audit(live_runtime):
                   if lines[index].strip() == 'if mode == "persistent":'
                   and any("def run_persistent" in item for item in lines[index:index + 5]))
     delegation = ("先用 glob 查找 src/**/subagent.py，然后只用 read_file 读取 "
-                  f"src/agent_harness/agents/subagent.py，offset={branch}、limit=34。"
+                  f"src/codefox/agents/subagent.py，offset={branch}、limit=34。"
                   "只根据这些源码简短说明 once 与 persistent 如何启动。"
                   "最多调用 glob 和 read_file 各一次，不读整文件、其他文件或会话归档。"
                   "不创建任务或工作树，不修改文件，完成后直接给出结论。")
@@ -303,7 +303,7 @@ def test_streaming_goal_followup_is_evaluated(live_runtime):
 
 def test_streaming_memory_extracts_a_durable_preference(live_runtime):
     runtime, _ = live_runtime
-    import agent_harness.core as core
+    import codefox.core as core
 
     core.MEMORY_ENABLED = True
     _, finished, events, _ = run_submission(

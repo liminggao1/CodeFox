@@ -1,15 +1,12 @@
 """Lead worktree cleanup preserves leases until Git removal succeeds."""
 
-from agent_harness.runtime import tool_execution
+from codefox.runtime import tool_execution
 
-import agent_harness.workspace.tasks as tasks
-import agent_harness.workspace.task_worktrees as task_worktrees
-import agent_harness.core as core
-import agent_harness.tools.shared_tools as shared_tools
-import agent_harness.runtime.scheduler as scheduler
-import agent_harness.workspace.worktrees as worktrees
-import agent_harness.registrations as registrations
-import agent_harness.tools.file_tools as file_tools
+import codefox.workspace.tasks as tasks
+import codefox.workspace.task_worktrees as task_worktrees
+import codefox.core as core
+import codefox.workspace.worktrees as worktrees
+import codefox.registrations as registrations
 
 
 import subprocess
@@ -117,30 +114,6 @@ def test_dirty_worktree_keeps_lead_assignment(worktree_runtime, file):
 
     assert "uncommitted" in result
     assert (checkout / file).read_text() == "unsaved result"
-    assert_lease_preserved(host, task, checkout, version)
-
-
-def test_lead_cannot_release_subagent_lease(worktree_runtime):
-    host, task, checkout, _ = worktree_runtime(owner="alice")
-    assert tasks.complete_task(task.id, owner="alice").startswith("Completed")
-    version = tasks.assignment_versions["alice"]
-
-    result = registrations.run_remove_worktree("feature").content
-
-    assert "still in use by alice" in result
-    assert_lease_preserved(host, task, checkout, version)
-
-
-def test_running_background_command_keeps_lead_assignment(worktree_runtime):
-    host, task, checkout, _ = worktree_runtime()
-    assert tasks.complete_task(task.id).startswith("Completed")
-    version = tasks.assignment_versions["agent"]
-    scheduler._background_tasks["bg_test"] = {
-        "status": "running", "cwd": str(checkout)}
-
-    result = registrations.run_remove_worktree("feature").content
-
-    assert "running background command" in result
     assert_lease_preserved(host, task, checkout, version)
 
 

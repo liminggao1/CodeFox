@@ -43,12 +43,12 @@ os.environ["GOAL_EVALUATOR_PROVIDER"] = "prompt"
 
 def _reload_host() -> None:
     """只重新加载 agent.host；goal 和 workflow 保持原模块实例。"""
-    sys.modules.pop("agent_harness.host", None)
+    sys.modules.pop("codefox.host", None)
 
 
 @pytest.fixture(autouse=True)
 def isolated_session_directory(tmp_path, monkeypatch):
-    from agent_harness.runtime import session_store, permissions
+    from codefox.runtime import session_store, permissions
 
     directory = tmp_path / "session-store"
     monkeypatch.setattr(session_store, "sessions_dir", lambda: directory)
@@ -60,7 +60,7 @@ def isolated_session_directory(tmp_path, monkeypatch):
 @pytest.fixture
 def no_approval():
     """工具执行类用例显式选择免审批，仍保留禁止命令和参数校验。"""
-    from agent_harness.runtime import permissions
+    from codefox.runtime import permissions
     permissions.SETTINGS.save("no_approval")
 
 
@@ -72,14 +72,14 @@ def host_factory(tmp_path, monkeypatch):
     def load(*, enable_memory=False):
         monkeypatch.chdir(tmp_path)
         _reload_host()
-        import agent_harness.host as host
+        import codefox.host as host
 
-        import agent_harness.core as core
-        import agent_harness.agents.subagent as subagent_runtime
-        import agent_harness.workspace.tasks as tasks
-        import agent_harness.tools.mcp_tools as mcp_tools
-        import agent_harness.runtime.scheduler as scheduler
-        from agent_harness.runtime.lead_context import LeadContext, lead_context_scope
+        import codefox.core as core
+        import codefox.agents.subagent as subagent_runtime
+        import codefox.workspace.tasks as tasks
+        import codefox.tools.mcp_tools as mcp_tools
+        import codefox.runtime.scheduler as scheduler
+        from codefox.runtime.lead_context import LeadContext, lead_context_scope
         # 路径和运行时状态位于模块全局变量中；新会话不能继承上个测试的
         # 启动目录、子 agent、计划审批、任务分配或 MCP 客户端。
         core.WORKDIR = tmp_path
@@ -107,7 +107,7 @@ def host_factory(tmp_path, monkeypatch):
 
 @pytest.fixture
 def workflow_module():
-    from agent_harness.workflows import workflow_runtime as workflow
+    from codefox.workflows import workflow_runtime as workflow
 
     return workflow
 
@@ -115,11 +115,11 @@ def workflow_module():
 @pytest.fixture
 def runtime_factory(host_factory, monkeypatch):
     """通过真实共享驱动启动离线运行时，测试结束统一关闭并核对收尾。"""
-    import agent_harness.core as core
-    import agent_harness.runtime.scheduler as scheduler
-    import agent_harness.agents.subagent as subagent_runtime
-    from agent_harness.runtime import interactive_runtime
-    from agent_harness.runtime.lead_context import lead_context_scope
+    import codefox.core as core
+    import codefox.runtime.scheduler as scheduler
+    import codefox.agents.subagent as subagent_runtime
+    from codefox.runtime import interactive_runtime
+    from codefox.runtime.lead_context import lead_context_scope
     from support.fakes import fake_stream_for, response
     from support.helpers import until
 
@@ -157,7 +157,8 @@ def runtime_factory(host_factory, monkeypatch):
 
 @pytest.fixture
 def approval_hook():
-    from agent_harness.runtime.interaction import ExecutionContext, InteractionChannel, execution_context
+    from codefox.runtime.interaction import ExecutionContext, InteractionChannel, execution_context
+    from support.helpers import displayed_approval
 
     def check(hook, block, decision):
         channel = InteractionChannel()
@@ -169,8 +170,7 @@ def approval_hook():
         worker = threading.Thread(target=execute)
         worker.start()
         try:
-            request = channel.next_approval(timeout=2)
-            assert request is not None
+            request, _ = displayed_approval(SimpleNamespace(channel=channel), timeout=2)
             assert channel.respond(request.request_id, request.generation, decision)
             worker.join(timeout=2)
         finally:

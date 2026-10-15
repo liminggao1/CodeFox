@@ -1,163 +1,174 @@
-# agent-harness
+# CodeFox
 
-本地 code agent 运行环境，打包为标准 Python 项目：`src/` 布局、`pyproject.toml`、console 入口。
+本地代码 Agent 运行环境，提供命令行交互和 CodeFox 终端工作台（Textual TUI）。
 
-## 安装
+在项目目录中用自然语言描述任务，让 Agent 阅读代码、修改文件、运行命令，也可以把独立工作交给子 agent。工具在本机执行，模型通过你配置的 API 调用。
 
-完整步骤（含换机器、全新克隆）见 [note/env-setup.md](note/env-setup.md)。快速版：
+## 主要功能
 
-```sh
-pip install -e ".[dev]"      # 含测试依赖
-cp .env.example .env         # 填好 key
-```
+- **代码任务**：查找和读写文件、执行 Shell 命令、维护 TODO 与任务板。
+- **子 agent 协作**：委派一次任务，或在同次运行中保留助手并分派后续工作。
+- **会话管理**：保存对话、工具记录、目标与 TODO，恢复后继续交流。
+- **上下文与目标**：自动或手动压缩历史；设置目标后评估是否需要继续执行。
+- **工作流**：用程序组织顺序和并行步骤，管理用量预算并恢复已完成步骤。
+- **扩展能力**：支持技能、MCP 工具和可选的长期记忆。
 
-## 运行
+## 快速开始
 
-```sh
-# 交互会话（调用真实 API，读 .env）
-agent-harness
-agent-harness tui            # Textual 界面，需安装 tui 可选依赖
+需要 Python 3.10+ 和 Git。日常开发与验证使用 WSL2，以下以 Linux / WSL 的 Bash 终端为例。
 
-# 离线演示工作流：fake client，不联网
-agent-harness workflow demo
-agent-harness workflow resume
-```
+### 1. 安装
 
-未安装成包时改用 `python -m agent_harness`，并先把源码目录放进 `PYTHONPATH`：
+克隆或下载仓库后，在仓库根目录执行：
 
 ```sh
-export PYTHONPATH=src        # Windows PowerShell: $env:PYTHONPATH="src"
-python -m agent_harness
-python -m agent_harness tui
-python -m agent_harness workflow demo
-python -m agent_harness workflow resume
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[tui]"
+cp .env.example .env
 ```
 
-Textual 的本机安装、启动、快捷键、审批和会话操作见
-[开发笔记：Textual 交互界面](note/dev-notes.md#textual-交互界面)。包安装方式可使用
-`pip install -e ".[dev,tui]"`；默认 CLI 和离线 workflow 不加载 Textual。
+只使用普通 CLI 时，安装命令改为 `python -m pip install -e .`。conda 等环境的安装方式见 [环境与调试说明](note/README.md)。
 
-## 目录
+<details>
+<summary>Windows PowerShell 的环境准备命令</summary>
 
-源码的文件分工、调用关系和职责边界见 [源码结构说明](src/agent_harness/README.md)。
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[tui]"
+Copy-Item .env.example .env
+```
 
-| 路径 | 内容 |
+</details>
+
+### 2. 配置模型
+
+编辑仓库根目录的 `.env`，填写 API key 和模型 ID：
+
+```dotenv
+ANTHROPIC_API_KEY=your-api-key
+MODEL_ID=your-model-id
+```
+
+默认使用 Anthropic Messages 协议。连接兼容服务时，再填写 `ANTHROPIC_BASE_URL`。
+按模型和服务端实际支持的上下文窗口设置 `MODEL_CONTEXT_TOKENS`，运行时用它计算压缩阈值和工具输出预算。
+
+<details>
+<summary>使用 OpenAI Responses 协议</summary>
+
+将 `.env` 中的模型配置替换为：
+
+```dotenv
+LLM_API=responses
+MODEL_ID=your-model-id
+OPENAI_API_KEY=your-api-key
+OPENAI_BASE_URL=https://api.example.com/v1
+```
+
+`OPENAI_BASE_URL` 填写所用服务的地址；`ANTHROPIC_BASE_URL` 保持未设置。
+需要指定完整请求地址时，使用 `LLM_RESPONSES_URL`。
+
+</details>
+
+更多配置见 [.env.example](.env.example)。长期记忆默认关闭，设 `AGENT_MEMORY_ENABLED=1` 后启用；提取与整理记忆会额外调用模型。
+
+### 3. 启动并发送任务
+
+```sh
+# 普通命令行
+codefox
+
+# CodeFox 终端工作台
+codefox tui
+```
+
+安装后可以切换到要工作的项目目录再启动。首次体验也可以直接在本仓库中输入：
+
+```text
+请梳理这个项目的代码结构，说明主程序从哪里启动，并列出关键文件路径。不用修改文件。
+```
+
+TUI 中 Enter 发送、Shift+Enter 换行，点击“停止”或按 Ctrl+C 停止当前回合，Ctrl+D 保存并退出。
+工具详情可以展开查看，顶部入口用于管理历史会话、查看会话状态和调整设置。
+
+默认权限模式允许工作区内的文件读写；需要确认的 Shell 命令、目录外文件访问和 MCP 操作会请求批准。
+CLI 显示 `Allow? [y/N]`，TUI 显示审批卡。
+
+<details>
+<summary>从源码运行，不安装项目包</summary>
+
+Python 模块名为 `codefox`。环境中已有项目依赖时，在仓库根目录运行：
+
+```sh
+PYTHONPATH=src python -m codefox
+PYTHONPATH=src python -m codefox tui
+```
+
+Windows PowerShell：
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m codefox tui
+```
+
+</details>
+
+## 常用命令
+
+CLI 与 TUI 共用以下命令：
+
+| 命令                | 作用                     |
+| ------------------- | ------------------------ |
+| `/goal`             | 查看当前目标             |
+| `/goal <目标>`      | 设置目标并开始执行       |
+| `/goal clear`       | 清除目标                 |
+| `/compact`          | 压缩当前会话上下文       |
+| `/new`              | 保存当前会话并开启新会话 |
+| `/resume`           | 查看历史会话             |
+| `/resume <会话 ID>` | 恢复指定会话             |
+| `/delete <会话 ID>` | 删除非活动会话           |
+| `/quit`             | 保存并退出               |
+
+会话自动保存在 `~/.agent-harness/sessions/`。恢复时会切回原启动目录，读取保存的上下文与展示记录；旧的后台线程和子 agent 不会重启。
+切换会话前需要先结束当前回合，并处理仍在运行或待交付的后台工作。原目录或关联工作树失效时会提示错误。
+
+任务、工作树、工作流记录等运行数据按会话启动目录保存；同一目录只运行一个交互进程。
+
+## 让子 agent 分工
+
+直接描述需要助手完成的工作即可。例如，委派一次阅读任务：
+
+```text
+请安排一个助手阅读项目根目录的 README.md，整理项目用途、启动方式和常用命令。等它完成后，给我一份简短的中文说明，只需要总结，不用修改文件。
+```
+
+需要连续配合时，可以让同一个助手保留上下文，完成后再分派下一项工作。
+直接说明任务和是否需要后续协作，模型会选择执行模式、工具和通信方式。
+
+## 离线工作流演示
+
+完成环境准备后，在同一目录依次执行：
+
+```sh
+codefox workflow demo
+codefox workflow resume
+```
+
+演示使用模拟模型，不请求真实 API、不消耗模型额度。`demo` 运行代码审查示例并将步骤记录写入 `.runtime/`，`resume` 重放已完成的调用。
+启动仍会读取模型配置，可以保留 `.env.example` 中的占位 key 和模型 ID。
+
+## 仓库导航
+
+阅读代码时，从目录 README 逐层进入：先了解本层职责，再查看子目录的文件分工。
+开发检查的运行方法和测试覆盖范围由对应目录维护。
+
+| 入口 | 内容 |
 | --- | --- |
-| [src/agent_harness/](src/agent_harness/README.md) | 包入口、共享配置与 Lead 装配代码 |
-| [frontends/](src/agent_harness/frontends/README.md) | CLI / Textual 输入与显示 |
-| [runtime/](src/agent_harness/runtime/README.md) | 共享交互驱动、命令、事件/审批、会话存储与调度 |
-| [agents/](src/agent_harness/agents/README.md) | Lead 与子 agent 的共享循环、各自策略、子 agent 生命周期、goal 与恢复控制 |
-| [context/](src/agent_harness/context/README.md) | 提示词、历史压缩、memory 与技能加载 |
-| [providers/](src/agent_harness/providers/README.md) | 模型协议适配和消息内容读取 |
-| [tools/](src/agent_harness/tools/README.md) | 基础工具、MCP 与工具注册机制 |
-| [workspace/](src/agent_harness/workspace/README.md) | 任务板、分配与 Git 工作树 |
-| [workflows/](src/agent_harness/workflows/README.md) | 程序化工作流、预算与 journal 恢复 |
-| `src/agent_harness/skills/` | 技能资产（随包分发） |
-| `assets/logo/` | Logo 素材、可编辑 SVG 与导出的图片 |
-| `scripts/debug_pass.py` | 离线端到端自检，10 项，见 `note/dev-notes.md` |
-| `scripts/arch_views.py` | 生成模块依赖图到 `docs/architecture/`，人看 `deps.md`、AI 读 `deps.mmd`；线型图例与循环依赖写在图外，只用标准库 |
-| `tests/` | 离线测试，按模块拆分（协议、任务、压缩、调度、权限、编码、技能等） |
-| `docs/` | 项目级设计与执行记录，入口见 `docs/README.md` |
-| `note/` | `env-setup.md` 安装说明；`dev-notes.md` 本机运行与调试笔记 |
-| `tmp/` | 本地临时文件，不入库（需要时手动 `mkdir tmp`） |
-| `.vscode/` | VS Code 调试配置（launch/settings/extensions） |
-| `AGENTS.md` | 本仓库的 agent 约定：环境、命令、编码、不变量 |
-| `GLOSSARY.md` | 项目术语表：会话、上下文、任务、工作目录等概念的统一名称 |
-| `pyproject.toml` | 元数据、依赖、console 入口、pytest 配置 |
-
-直接导入实现时使用新子包路径，例如
-`from agent_harness.runtime.interactive_runtime import InteractiveRuntime`。
-
-## 行为要点
-
-- **共同工具执行**：Lead 和子 agent 共用前置检查与同步执行；授权或 hook 只有返回 None 才放行。
-  Lead 停止优先于前置拒绝；compact 保留特殊路径，后台的后置 hook 在实际完成后执行。
-  权限模式、文件单次授权及用户设置规则见 [仓库事实](docs/architecture/facts.md) 第 9 节。
-
-- **长期记忆**：`AGENT_MEMORY_ENABLED=1` 才启用记忆召回、回合结束提取和记忆整理；默认关闭，
-  避免每轮最终回答后再次请求模型。历史压缩是独立的上下文安全机制，不受此开关控制。
-
-- **资源归属**：任务、记忆、工作流、后台任务等运行时状态（`.tasks` / `.memory` / `.runtime` /
-  `.mailboxes` / `.worktrees` / `.scheduled_tasks.json` / `.task_outputs`）跟随**当前会话的启动目录**；
-  会话上下文、诊断、压缩归档和长工具输出统一存放在用户目录 `~/.agent-harness/sessions/` 并随会话删除；`skills/` 随包分发。
-- **子 agent**：统一用 `spawn_subagent(name, prompt, mode, description=...)` 创建；模式、通信和后续任务由模型决定。
-  身份、工具能力、预算与查询见 [仓库事实第 4 节](docs/architecture/facts.md#4-统一子-agent2026-10-14)，操作路径见 [调试笔记第 9 节](note/dev-notes.md#9-统一子-agent-生命周期与协议)。
-- **工作流步骤**：`ctx.agent` 通过同一入口执行 once 子 agent，默认开放五项基础工具；
-  `tools=[]` 只处理文本，名单可限制工具。预算、格式重试与缓存恢复仍由工作流管理，见 [调试笔记第 12 节](note/dev-notes.md#12-工作流单次-agent-调用)。
-- **goal 接在 Stop 边界**：模型不再请求工具时先问目标控制器，返回 `block` 就补一条
-  `[Goal still active]` 消息，继续同一条循环。
-- **目标评估器**：`GOAL_EVALUATOR_PROVIDER=jev` 时，Stop 边界通过 `JEV_API_KEY` 调用
-  Jev 的结构化 Choice 判断；`complete`、`incomplete` 和 `impossible` 分别映射为目标达成、
-  受限续做和目标失败；只有 `choice=complete` 且整体 `confidence` 超过
-  `JEV_COMPLETION_CONFIDENCE_THRESHOLD` 才能结束。`probabilities` 会校验并保留在 Jev 返回中，
-  但不作为第二个硬门槛。
-  Jev 原始响应会写入当前会话的诊断日志，不进入模型历史。
-  对话输入默认限制为 `24000` 个字符，可通过 `GOAL_EVALUATOR_MAX_TRANSCRIPT_CHARACTERS` 调整。
-  未配置 Jev 时默认使用现有 Prompt evaluator，离线测试不会访问外部 API。
-- **交互会话**：第一次有效用户交互创建 `~/.agent-harness/sessions/<id>.json`，历史、goal、任务关联、工作目录和 TODO 变化都更新同一文件；`/resume` 列出会话，`/resume <id>` 恢复上下文，`/delete <id>` 删除非活动会话，`/new` 保存当前会话并开启干净会话（旧会话仍可恢复），`/compact` 手动压缩当前会话上下文。CLI 与 TUI 共用后端命令与展示记录。
-- **对话展示**：消息、工具调用与结果、TODO、后台进度、审批和回合摘要随会话保存；模型历史压缩不删除展示记录。恢复只读重放历史，不重执行工具或审批。尚无结果的工具提示核对当前状态；未结束的历史审批无操作按钮。TUI 详情默认收起，可加载更早记录；操作见 [开发笔记](note/dev-notes.md#textual-交互界面)。
-- **会话切换**：可从任意目录启动，按 ID 恢复后自动回到原启动目录，工具继续使用原任务工作树。恢复前必须没有正在运行或待交付的后台任务、子 agent、Lead 信箱事件或定时任务结果；目标校验不改变当前目录，校验、保存当前上下文或切目录失败均不切换。目标激活后保存失败，继续使用目标上下文并提示下次交互重试保存。跨目录切换时停止旧目录的调度，加载原目录的持久化定时任务，旧目录的非持久化定时任务不保留。Lead 任务按会话归属隔离，切换和退出保留未完成任务；完成任务后会话继续使用原工作树，成功移除工作树后回到启动目录。原目录不存在、任务归属、绑定或工作树失效时拒绝恢复，旧线程和连接不恢复。
-- **恢复后的异常**：目标已经激活后，信箱读取等收尾处理失败会报告错误并保留目标上下文；两个前端仍收到会话切换与命令结束通知。损坏的后台输入暂停消费，修复后可继续交互。
-- **会话格式**：只维护一种 JSON 上下文格式，不保存版本号；读取时校验启动目录、任务 ID、工作树名称、TODO，以及消息与展示记录。展示记录在 `events` 中，模型历史仍在 `messages` 中。缺少必要字段的文件提示错误并保留；不转换旧文件，重新交互可生成当前结构。原启动目录的 `.transcripts/sessions/` 不再扫描；目录移动后的恢复不支持。
-- **响应有效性**：Responses 失败状态和非法、截断的工具调用会交付明确错误；不执行部分工具。
-- **历史压缩**：失败保留原历史，自动或手动失败后继续主请求；真正超限时只尝试一次被动恢复。
-- **后台结果**：超过 200 字符的通知保留全文路径，全文随启动目录保存；绑定 worktree 的任务仍可通过 `read_file` 读取运行时归档，保存失败后整批等待重试。
-- **Lead 恢复**：每回合独立管理输出升级、续写和一次被动压缩；429 会打断连续 529 的计数。
-- **worktree 清理**：Lead 可请求 `remove_worktree`，移除目录并保留分支，不自动合并。
-  完成、占用检查和分配释放时机见 [调试笔记第 8 节](note/dev-notes.md#8-任务与-worktree-绑定)。
-- **workflow resume**：相同调用键回放 journal，不再次调用模型；预算包含该 run 的历史 token，
-  返回的 `usage` 是本次新增用量，`cumulativeUsage` 是整个 run 的累计用量。旧格式 journal
-  缺少 `tokens` 时会报错；重新运行 `workflow demo` 可生成新格式记录。
-- **workflow 收尾**：普通失败等待已登记的步骤与编排组结算；取消阻止新调用，等待已启动调用，
-  保存 failed 后重抛原取消。实际消费先计入预算；超额后禁止新调用，本次运行保持 failed。
-  有效结果只在未超额、未取消时缓存；格式修复和失败调用的已知消费也计入累计用量。
-- **定时任务**：持久化的一次性任务在模型接受后确认，确认前中断可能重投；循环 cron 仅在
-  当前进程内按分钟去重，重启后同一分钟可能再次触发。
-- **跨平台**：`fcntl` 用 try/except 包裹，无 fcntl 时退化为进程内锁并打印一次提示。
-- **`.env` 与启动目录无关**：`load_dotenv()` 从包文件位置逐级向上查找，因此在任何目录
-  启动都能读到项目根的 `.env`。
-
-## 测试
-
-```sh
-python -m pytest -q
-```
-
-全部离线，不消耗 API：
-
-默认只收集模拟测试。需要使用项目根 `.env` 中的真实 API 时，显式打开真实流式测试：
-
-```sh
-LIVE_API=1 PYTHONPATH=src python -m pytest -q tests/live
-```
-
-真实测试使用临时工作目录，会验证流式文本、`bash` 执行与拒绝、文件写读编辑和 glob、
-工具错误恢复、TODO、任务板生命周期、一次性子 agent、目标评估、长期记忆提取、多轮历史、
-用量累计，以及 `/new`、`/resume` 和会话保存恢复；每次运行会消耗模型额度。
-协议异常、截断响应、停止边界和精确恢复分支仍由下面的离线测试覆盖。
-
-共用设施放在 `tests/support/`：`fakes.py` 提供假模型响应构造器，`helpers.py` 提供运行时事件和会话文件工具；`conftest.py` 提供 host 与运行时工厂。
-
-- `tests/test_goal.py`：控制器用例，以及用脚本化 client 驱动 `agent_loop` 的会话级用例。
-- `tests/test_workflow.py`：journal 回放、预算与 runner 接线，以及跨真实子 agent 接口的工作流步骤。
-- `tests/test_llm_client.py`：响应协议、工具参数、失败响应的 Lead 行为，以及不依赖远端模型的真实 HTTP 流式响应。
-- `tests/test_subagents.py`：宿主、任务/审批协议，以及工具白名单、依赖注入和用量计数。
-- `tests/test_subagent_lifetimes.py`：统一创建工具、真实线程、跨任务上下文和消息投递。
-- `tests/test_subagent_session.py`：子 agent 会话的共享执行、截断与上下文恢复。
-- `tests/test_runtime_setup.py`：启动配置、注入 runner 的保留，以及运行时快照刷新。
-- `tests/test_scheduler.py`：后台任务、cron 调度与完整后台输出的单次交付。
-- `tests/test_worktree_cleanup.py`：Lead 同轮清理、目录切换，以及拒绝和失败后的分配保留。
-- `tests/test_interaction.py`：事件顺序与数据副本、审批关联、来源权限、停止和关闭解除等待。
-- `tests/test_interactive_runtime.py`：实际共享驱动、命令/会话、四种回合结果、停止边界、cron 确认、后台交付、CLI 读取归属和 Lead 状态拥有者。
-- `tests/test_tui_integration.py`：无头界面的中文多行对话、审批、停止、恢复和滚动；未安装 Textual 时跳过。
-- `tests/test_conversation.py`：展示记录与前端回放，含审批前保存、后台检查点、重试去重、压缩恢复续聊、CLI/TUI 详情与分段加载。
-
-离线端到端自检（覆盖 host 循环、工具防护、goal 边界、worktree、子 agent、架构图），说明见
-[note/dev-notes.md](note/dev-notes.md)：
-
-```sh
-python scripts/debug_pass.py
-```
-
-断点调试：用 VS Code 的 Remote-WSL 窗口打开本目录，按 F5 选「Agent 交互（真实 API）」。
-步骤见 [note/dev-notes.md](note/dev-notes.md)。
+| [src/](src/README.md) | Python 源码入口，继续进入 `codefox/` 查看模块分工 |
+| [tests/](tests/README.md) | 开发依赖、离线测试、覆盖归属和真实 API 测试入口 |
+| [scripts/](scripts/README.md) | 离线端到端自检、模拟交互和架构图生成 |
+| [docs/](docs/README.md) | 当前行为约束、设计计划、调研与验收记录 |
+| [note/](note/README.md) | 通用环境安装，以及维护者的本机运行与调试笔记 |
+| [GLOSSARY.md](GLOSSARY.md) | 会话、上下文、任务与工作目录等术语 |
+| [pyproject.toml](pyproject.toml) | Python 版本要求、依赖、可选安装项和命令入口 |

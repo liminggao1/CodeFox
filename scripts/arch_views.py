@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """生成架构视图：模块依赖图，同时服务人和 AI。
 
-扫描 `src/agent_harness` 的 import 关系，按子包与顶层模块聚合，
+扫描 `src/codefox` 的 import 关系，按子包与顶层模块聚合，
 输出到 `docs/architecture/`：
 
 - `deps.mmd` 纯 Mermaid 文本，AI 可直接读，也可做版本对比
@@ -24,8 +24,8 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src" / "agent_harness"
-PACKAGE = "agent_harness"
+SRC_ROOT = PROJECT_ROOT / "src" / "codefox"
+PACKAGE = "codefox"
 DEFAULT_OUT_DIR = PROJECT_ROOT / "docs" / "architecture"
 
 # 按职责分层配色，帮助读图时区分入口、核心与底层。
@@ -49,7 +49,7 @@ def iter_source_files():
 
 
 def collect_nodes():
-    """图的节点：agent_harness 的子包与顶层模块，忽略私有入口。"""
+    """图的节点：codefox 的子包与顶层模块，忽略私有入口。"""
     nodes = []
     for child in sorted(SRC_ROOT.iterdir()):
         if child.name.startswith("_"):
@@ -333,7 +333,7 @@ def render_markdown(mermaid_text, cycles, file_cycles):
         "\n"
         "此检查包含函数内的延迟导入，不执行代码，也不覆盖动态导入。\n"
         "\n"
-        "节点是 `agent_harness` 的子包与顶层模块，箭头 `A --> B` 表示 A 导入 B。\n"
+        "节点是 `codefox` 的子包与顶层模块，箭头 `A --> B` 表示 A 导入 B。\n"
         "全部依赖都在图上，没有省略；同层边只是弱化，不会藏住问题。\n"
         "VS Code 中打开本文件按 `Ctrl+Shift+V` 预览；AI 读同目录的纯文本 `deps.mmd`。\n"
         "\n"

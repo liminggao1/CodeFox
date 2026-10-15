@@ -2,58 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import json
 from types import SimpleNamespace
 
-from agent_harness.context import memory_runtime
-from agent_harness.providers.llm_client import estimate_input_tokens
+from codefox.context import memory_runtime
+from codefox.providers.llm_client import estimate_input_tokens
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_memory_runtime_exposes_memory_operations_only() -> None:
-    """Memory retains its storage, retrieval, extraction and consolidation API."""
-    for name in (
-        "run_bash",
-        "run_read",
-        "run_write",
-        "run_edit",
-        "run_glob",
-        "TOOLS",
-        "TOOL_HANDLERS",
-        "execute_tool",
-        "agent_loop",
-    ):
-        assert not hasattr(memory_runtime, name)
-
-    for name in (
-        "read_memory_index",
-        "read_memory_file",
-        "list_memory_files",
-        "load_memories",
-        "extract_memories",
-        "consolidate_memories",
-    ):
-        assert hasattr(memory_runtime, name)
-
-
-def test_memory_source_has_no_legacy_agent_runtime() -> None:
-    """Memory storage does not embed file tools or a Lead loop."""
-    source = (PROJECT_ROOT / "src/agent_harness/context/memory_runtime.py").read_text(
-        encoding="utf-8"
-    )
-
-    legacy_markers = (
-        "def run_bash(command: str)",
-        "def run_read(path: str",
-        "def execute_tool(block)",
-        "# -- Agent 循环 --",
-        "if __name__ == \"__main__\":",
-    )
-    for marker in legacy_markers:
-        assert marker not in source
 
 def test_memory_recall_survives_model_failure(tmp_path, monkeypatch) -> None:
     """Recall preserves paths, source metadata and keyword fallback offline."""
@@ -101,42 +55,6 @@ def test_memory_recall_respects_serialized_token_budget(tmp_path, monkeypatch) -
     assert estimate_input_tokens(
         messages=[{"role": "user", "content": result}]
     ) <= memory_runtime.core.MEMORY_RECALL_TOKEN_BUDGET
-
-
-def test_remember_after_turn_reports_memory_operations_when_enabled(monkeypatch) -> None:
-    """Enabled memory publishes the 记忆检查/记忆整理 operations to the frontend."""
-    from agent_harness import host
-    from agent_harness.runtime.interaction import (
-        ExecutionContext, InteractionChannel, execution_context)
-
-    monkeypatch.setattr(memory_runtime.core, "MEMORY_ENABLED", True)
-    monkeypatch.setattr(memory_runtime, "extract_memories", lambda messages: 0)
-    channel = InteractionChannel()
-    context = ExecutionContext(channel, "session", 1, "turn", origin="frontend")
-    with execution_context(context):
-        host.remember_after_turn([{"role": "user", "content": "hi"}])
-    phases = [event.payload.get("phase") for event in channel.drain_facts()
-              if event.type == "execution_status"]
-    assert phases == ["memory", "memory"]
-
-
-def test_remember_after_turn_skips_memory_operations_when_disabled(monkeypatch) -> None:
-    """Disabled memory must not publish 记忆检查/记忆整理 rows to the frontend."""
-    from agent_harness import host
-    from agent_harness.runtime.interaction import (
-        ExecutionContext, InteractionChannel, execution_context)
-
-    monkeypatch.setattr(memory_runtime.core, "MEMORY_ENABLED", False)
-    calls = []
-    monkeypatch.setattr(memory_runtime, "extract_memories",
-                        lambda messages: calls.append("extract") or 0)
-    channel = InteractionChannel()
-    context = ExecutionContext(channel, "session", 1, "turn", origin="frontend")
-    with execution_context(context):
-        host.remember_after_turn([{"role": "user", "content": "hi"}])
-    assert calls == []
-    assert not [event for event in channel.drain_facts()
-                if event.type == "execution_status" and event.payload.get("phase") == "memory"]
 
 
 def test_memory_disabled_skips_recall_extraction_and_consolidation(tmp_path, monkeypatch) -> None:

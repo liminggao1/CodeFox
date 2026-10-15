@@ -2,61 +2,20 @@
 
 from __future__ import annotations
 
-from agent_harness import core
-from agent_harness.context import skills
+from codefox import core
+from codefox.context import skills
 import pytest
 
-def test_catalog_lists_every_shipped_skill(host_factory) -> None:
-    host = host_factory()
-    catalog = skills.list_skills()
 
+def test_shipped_skill_catalog_load_and_unknown_name(host_factory) -> None:
+    host_factory()
     for name in ("agent-builder", "code-review", "mcp-builder", "pdf"):
-        assert f"- {name}:" in catalog
-
-
-def test_load_skill_returns_the_full_manifest(host_factory) -> None:
-    host = host_factory()
-
-    content = skills.load_skill("pdf")
-
-    assert content.startswith("---")
-    assert len(content) > len(skills.SKILL_REGISTRY["pdf"]["description"])
-
-
-def test_unknown_skill_lists_available_names(host_factory) -> None:
-    host = host_factory()
-
-    with pytest.raises(ValueError) as error:
+        assert f"- {name}:" in skills.list_skills()
+        content = skills.load_skill(name)
+        assert content.startswith("---")
+        assert len(content) > len(skills.SKILL_REGISTRY[name]["description"])
+    with pytest.raises(ValueError, match="Skill not found: nope.*agent-builder"):
         skills.load_skill("nope")
-    result = str(error.value)
-
-    assert result.startswith("Skill not found: nope")
-    assert "agent-builder" in result
-
-
-def test_frontmatter_requires_standalone_delimiters(host_factory) -> None:
-    host = host_factory()
-
-    meta, body = skills._parse_frontmatter(
-        "---\nname: demo\ndescription: d\n---\nBody text"
-    )
-    assert meta == {"name": "demo", "description": "d"}
-    assert body == "Body text"
-
-    meta, body = skills._parse_frontmatter("---\nname: demo\nBody text")
-    assert meta == {}
-    assert body == "---\nname: demo\nBody text"
-
-
-def test_frontmatter_falls_back_on_invalid_yaml(host_factory) -> None:
-    host = host_factory()
-
-    meta, body = skills._parse_frontmatter(
-        "---\n: : :\n---\nBody text"
-    )
-
-    assert meta == {}
-    assert body == "Body text"
 
 
 def test_skill_scan_uses_the_directory_name_when_metadata_is_missing(
@@ -66,14 +25,20 @@ def test_skill_scan_uses_the_directory_name_when_metadata_is_missing(
     skills_dir = tmp_path / "skills"
     manifest_dir = skills_dir / "my-skill"
     manifest_dir.mkdir(parents=True)
-    (manifest_dir / "SKILL.md").write_text(
-        "# Heading line\n\nDetails", encoding="utf-8"
-    )
-    monkeypatch.setattr(core, "SKILLS_DIR", skills_dir)
-
-    skills.scan_skills()
-
-    entry = skills.SKILL_REGISTRY["my-skill"]
-    assert entry["name"] == "my-skill"
-    assert entry["description"] == "Heading line"
-import agent_harness.context.skills as skills
+    manifest = manifest_dir / "SKILL.md"
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(core, "SKILLS_DIR", skills_dir)
+            # 清单解析通过扫描和加载接口验证，包括缺少分隔符与坏 YAML 的回退。
+            for raw, name, description in [
+                ("---\nname: demo\ndescription: d\n---\nBody text", "demo", "d"),
+                ("# Heading line\n\nDetails", "my-skill", "Heading line"),
+                ("---\nname: demo\nBody text", "my-skill", "---"),
+                ("---\n: : :\n---\nBody text", "my-skill", "Body text"),
+            ]:
+                manifest.write_text(raw, encoding="utf-8")
+                skills.scan_skills()
+                assert skills.SKILL_REGISTRY[name]["description"] == description, raw
+                assert skills.load_skill(name) == raw
+    finally:
+        skills.scan_skills()

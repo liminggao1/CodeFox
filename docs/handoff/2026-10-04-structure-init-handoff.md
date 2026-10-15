@@ -26,7 +26,7 @@ Remote-WSL 调试配置、以及 agent 协作约定（`AGENTS.md` + `docs/agents
 | 主题 | 落点 | 参考 |
 | --- | --- | --- |
 | 目录改名 + 工程化外壳 | `docs/ scripts/ pyproject.toml .editorconfig .gitattributes` | 工程化初始化 |
-| 迁移到 `src/agent_harness/` + console 入口 | `pyproject.toml` 的 `[project.scripts]`、`__main__.py` | 计划「十一」 |
+| 迁移到 `src/codefox/` + console 入口 | `pyproject.toml` 的 `[project.scripts]`、`__main__.py` | 计划「十一」 |
 | 项目约定文档 | `AGENTS.md`（本机环境 + 不变量）、`GLOSSARY.md`（术语 + 范围）、`docs/agents/` | 本机环境、运行不变量与协作规则 |
 | docs 骨架与索引 | `docs/{adr,plans,research,handoff,guides,agents}/`、`docs/README.md` | 项目文档分类与入口 |
 | 离线端到端自检 | `scripts/debug_pass.py`（9 项） | 说明在 `note/dev-notes.md` |
@@ -45,7 +45,7 @@ Remote-WSL 调试配置、以及 agent 协作约定（`AGENTS.md` + `docs/agents
   `python cli.py` 这个入口不再可用。
 - **来源事实只保留在本计划文档与 `docs/handoff/`**。`README`、`pyproject` 描述、CLI 横幅、
   模块 docstring、测试 docstring、`GLOSSARY.md` 里的章节编号（s07/s09/s15/s16/s17）已清除。
-  例外：`src/agent_harness/skills/agent-builder/` 内含章节引用的参考资产**刻意保留**。
+  例外：`src/codefox/skills/agent-builder/` 内含章节引用的参考资产**刻意保留**。
 
 ## 3. 验证证据（本会话已跑）
 
@@ -67,7 +67,7 @@ $PY scripts/debug_pass.py     # 9/9 passed
 
 自检特意不碰需要真实 API 的路径，因此以下仍未实测：
 
-- **真实 API 下的交互问答**（`python -m agent_harness`）——最高优先级，主路径未端到端跑过
+- **真实 API 下的交互问答**（`python -m codefox`）——最高优先级，主路径未端到端跑过
 - 队友线程端到端协作
 - memory 抽取与合并
 
@@ -93,10 +93,10 @@ $PY scripts/debug_pass.py     # 9/9 passed
   （Windows：`D:\01dpan\01project\life\learncc\agent-harness`，同一份文件）。
 - **本机按源码运行，未安装成包**。CLI 要 `PYTHONPATH=src`：
   ```sh
-  PYTHONPATH=src $PY -m agent_harness
+  PYTHONPATH=src $PY -m codefox
   ```
 - `pytest` 复用 `tests/conftest.py` 注入的 `src`，无需 `PYTHONPATH`。
-- 改完 `src/agent_harness/` 必须重跑 `python scripts/build_flat.py`，否则测试与自检会报
+- 改完 `src/codefox/` 必须重跑 `python scripts/build_flat.py`，否则测试与自检会报
   生成物过期。
 - 完整命令与踩坑：`note/dev-notes.md`；环境约定：`AGENTS.md`；通用安装：`note/env-setup.md`。
 

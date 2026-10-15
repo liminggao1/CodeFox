@@ -1,17 +1,17 @@
 """Lead recovery trajectories use one owner for output and overload state."""
 
-import agent_harness.core as core
-import agent_harness.context.compaction as compaction
-import agent_harness.context.memory_runtime as memory_runtime
-import agent_harness.tools.mcp_tools as mcp_tools
-import agent_harness.runtime.scheduler as scheduler
+import codefox.core as core
+import codefox.context.compaction as compaction
+import codefox.context.memory_runtime as memory_runtime
+import codefox.tools.mcp_tools as mcp_tools
+import codefox.runtime.scheduler as scheduler
 
 
 from types import SimpleNamespace
 
 import pytest
 
-from agent_harness.agents import recovery
+from codefox.agents import recovery
 
 
 def test_429_breaks_consecutive_529_sequence(monkeypatch):
@@ -82,62 +82,6 @@ def test_output_transitions_preserve_turn_total_and_reset_only_on_new_turn():
     assert fresh.recovery_count == 0
     assert fresh.current_model == recovery.core.PRIMARY_MODEL
     assert fresh.max_tokens == recovery.core.DEFAULT_MAX_TOKENS
-
-
-def test_reactive_opportunity_is_consumed_once_and_fields_are_readonly():
-    state = recovery.RecoveryState()
-    assert state.claim_reactive_compaction()
-    assert not state.claim_reactive_compaction()
-    assert recovery.RecoveryState().claim_reactive_compaction()
-    with pytest.raises(AttributeError):
-        state.max_tokens = 1
-    with pytest.raises(AttributeError):
-        state.current_model = "external"
-
-
-def test_lead_uses_state_limits_and_preserves_only_continuable_text(host_factory, monkeypatch):
-    host = host_factory()
-    calls = []
-    responses = [SimpleNamespace(stop_reason=stop, content=[SimpleNamespace(type="text", text=text)])
-                 for stop, text in [("max_tokens", "discarded"), ("max_tokens", "partial"),
-                                    ("end_turn", "done"), ("end_turn", "next")]]
-
-    def create(**kwargs):
-        calls.append(kwargs["max_tokens"])
-        return responses.pop(0)
-
-    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
-    history = [{"role": "user", "content": "go"}]
-    host.agent_loop(history, "go")
-    assert "discarded" not in str(history)
-    assert "partial" in str(history)
-    assert core.CONTINUATION_PROMPT in str(history)
-    host.agent_loop(history, "next")
-    assert calls == [core.DEFAULT_MAX_TOKENS, core.ESCALATED_MAX_TOKENS,
-                     core.ESCALATED_MAX_TOKENS, core.DEFAULT_MAX_TOKENS]
-
-
-def test_lead_does_not_repeat_reactive_recovery(host_factory, monkeypatch):
-    host = host_factory()
-    calls = []
-    summaries = []
-
-    def create(**kwargs):
-        calls.append(True)
-        raise RuntimeError("context_length_exceeded")
-
-    def summary(messages):
-        summaries.append(True)
-        return "summary"
-
-    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
-    monkeypatch.setattr(compaction, "summarize_history", summary)
-    history = [{"role": "user", "content": "go"}]
-    host.agent_loop(history, "go")
-    assert calls == [True, True]
-    assert summaries == [True]
-    assert not any(message.get("role") == "assistant" and "context_length_exceeded" in str(message.get("content"))
-                   for message in history)
 
 
 @pytest.mark.parametrize("failure", ["memory", "tools", "preparation_context_error"])

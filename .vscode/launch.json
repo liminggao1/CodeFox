@@ -19,7 +19,7 @@
       "type": "debugpy",
       "request": "launch",
       "python": "/home/gaogao/miniconda3/envs/learncc/bin/python",
-      "module": "agent_harness",
+      "module": "codefox",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": true,
@@ -35,7 +35,7 @@
       "type": "debugpy",
       "request": "launch",
       "python": "/home/gaogao/miniconda3/envs/learncc/bin/python",
-      "module": "agent_harness",
+      "module": "codefox",
       "cwd": "${workspaceFolder}",
       "console": "externalTerminal",
       "justMyCode": true,
@@ -51,7 +51,7 @@
       "type": "debugpy",
       "request": "launch",
       "python": "/home/gaogao/miniconda3/envs/learncc/bin/python",
-      "module": "agent_harness",
+      "module": "codefox",
       "args": [
         "workflow",
         "demo"

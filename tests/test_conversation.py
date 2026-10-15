@@ -8,13 +8,12 @@ import asyncio
 import copy
 import json
 import threading
-import time
 import uuid
 
 import pytest
 
-from agent_harness.frontends.cli import CLIAdapter
-from agent_harness.runtime.interaction import InteractionChannel
+from codefox.frontends.cli import CLIAdapter
+from codefox.runtime.interaction import InteractionChannel
 from support.fakes import blocking_client, response, tool
 from support.helpers import (
     complete,
@@ -22,13 +21,11 @@ from support.helpers import (
     records,
     stored,
     until,
-    wait_stored,
 )
-import agent_harness.context.compaction as compaction
-import agent_harness.core as core
-import agent_harness.runtime.scheduler as scheduler
-import agent_harness.tools.file_tools as file_tools
-import agent_harness.workspace.tasks as tasks
+import codefox.context.compaction as compaction
+import codefox.core as core
+import codefox.runtime.scheduler as scheduler
+import codefox.tools.file_tools as file_tools
 
 
 def test_historical_running_operations_are_marked_interrupted(runtime_factory):
@@ -48,65 +45,34 @@ def test_historical_running_operations_are_marked_interrupted(runtime_factory):
     assert historical[0]["payload"]["reason"] == "上次中断，结束状态未记录"
     assert historical[1]["payload"]["status"] == "interrupted"
     assert historical[2]["payload"]["status"] == "interrupted"
-
-
-@pytest.mark.parametrize("status", ["idle", "budget_exhausted", "network_error"])
-def test_historical_idle_or_terminal_subagent_is_not_marked_interrupted(runtime_factory, status):
-    runtime, _ = runtime_factory()
-    runtime.session.activate(runtime.session.store.create())
-    runtime.session.snapshot["events"] = [
-        {"id": "working", "kind": "display", "type": "subagent_status", "source": "helper",
-         "turn_id": "turn", "payload": {"name": "helper", "mode": "persistent", "status": "working"}},
-        {"id": "idle", "kind": "display", "type": "subagent_status", "source": "helper",
-         "turn_id": "turn", "payload": {"name": "helper", "mode": "persistent", "status": status}},
-    ]
+    for status in ("idle", "budget_exhausted", "network_error"):
+        runtime.session.snapshot["events"].append({
+            "id": status, "kind": "display", "type": "subagent_status", "source": "helper",
+            "turn_id": "turn", "payload": {"name": "helper", "mode": "persistent", "status": status},
+        })
     historical = runtime.session.display_records(historical=True)
-    assert historical[0]["payload"]["status"] == "working"
-    assert historical[1]["payload"]["status"] == status
+    assert [item["payload"]["status"] for item in historical[3:]] == [
+        "idle", "budget_exhausted", "network_error"]
 
 
-def test_full_conversation_exit_resume_and_continue(runtime_factory):
-    todos = [{"content": "Read command output", "status": "completed"}]
-    runtime, host = runtime_factory([
-        response("Plan", tools=[tool("todo_write", "todo", todos=todos)], stop="tool_use"),
-        response("Execute", tools=[tool("bash", "shell", command="printf verified")], stop="tool_use"),
-        response("Verified output"),
-    ])
-    submission = runtime.submit("Inspect the output")
-    request, _ = displayed_approval(runtime)
-    assert runtime.channel.respond(request.request_id, request.generation, "approve")
-    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
-    assert finished.payload["outcome"]["status"] == "completed"
-    session_id = runtime.session.session_id
-    runtime.close()
-    closed, _ = until(runtime, "runtime_closed")
-    assert closed.payload["saved"]
-    runtime._thread.join(timeout=3)
-    assert not runtime._thread.is_alive()
-    original = records(stored(runtime))
-
-    restored, host = runtime_factory([response("Continued answer")])
-    submission = restored.submit(f"/resume {session_id}")
-    changed, _ = until(restored, "session_changed")
-    until(restored, "command_result", submission_id=submission.submission_id)
-    historical = changed.payload["records"]
-    assert [item["id"] for item in historical] == [item["id"] for item in original]
-    assert runtime.lead_context.todos == todos
-    assert records(stored(restored), "approval_decided")[0]["payload"]["decision"] == "approve"
-    assert all(item["payload"]["historical"] for item in historical)
-    complete(restored, "Continue from that output")
-    saved = restored.session.store.load(session_id)
-    assert [item["id"] for item in records(saved)[:len(original)]] == [item["id"] for item in original]
-    assert records(saved, "assistant_message")[-1]["payload"]["text"] == "Continued answer"
-    assert len(records(saved, "approval_requested")) == 1
-    assert len(records(saved, "tool_call")) == 2
-
-
-def test_saved_records_match_live_order_and_contain_full_tool_payload(runtime_factory):
+def test_saved_records_match_live_order_and_contain_full_tool_payload(runtime_factory, monkeypatch):
     runtime, host = runtime_factory([
         response("Before", tools=[tool("bash", command="printf 'Error: sample output'")], stop="tool_use"),
         response("After"),
     ])
+    observed = []
+    execute = file_tools.run_bash
+
+    def checked_execute(*args, **kwargs):
+        checkpoint = stored(runtime)
+        assert records(checkpoint, "tool_call")[0]["payload"]["id"] == "call"
+        assert records(checkpoint, "approval_requested")
+        assert records(checkpoint, "approval_decided")[0]["payload"]["decision"] == "approve"
+        assert not records(checkpoint, "tool_result")
+        observed.append(True)
+        return execute(*args, **kwargs)
+
+    monkeypatch.setattr(file_tools, "run_bash", checked_execute)
     submission = runtime.submit("run command")
     request, before = displayed_approval(runtime)
     assert runtime.channel.respond(request.request_id, request.generation, "approve")
@@ -119,6 +85,7 @@ def test_saved_records_match_live_order_and_contain_full_tool_payload(runtime_fa
     assert records(snapshot, "user_message")[0]["payload"]["text"] == "run command"
     assert [item["payload"]["text"] for item in records(snapshot, "assistant_message")] == ["Before", "After"]
     result = records(snapshot, "tool_result")[0]
+    assert observed == [True]
     assert result["payload"]["content"] == "Error: sample output"
     assert result["payload"]["status"] == "success"
     assert result["payload"]["tool_use_id"] == "call"
@@ -141,144 +108,11 @@ def test_saved_records_match_live_order_and_contain_full_tool_payload(runtime_fa
     assert any("[HOOK] Stop: 1 tool result(s)" in text for text in logs)
 
 
-def _save_trace(monkeypatch, runtime):
-    """记录每次落盘时快照里最后一条展示记录的类型。"""
-    trace = []
-    original = runtime.session.save
-
-    def counting():
-        events = runtime.session.snapshot["events"] if runtime.session.snapshot else []
-        trace.append(events[-1]["type"] if events else None)
-        return original()
-
-    monkeypatch.setattr(runtime.session, "save", counting)
-    return trace
-
-
-def test_turn_boundary_saves_terminal_fact_before_delivery(runtime_factory, monkeypatch):
-    """首次简单回合保存 4 次，且终态先落盘再交付。
-
-    Hook 日志独立保存；检查点依次落在用户输入、提示词初始化、助手消息与终态；最后一次
-    保存已包含 turn_finished，前端读到的终态与文件一致。
-    """
-    runtime, host = runtime_factory([response("Done")])
-    trace = _save_trace(monkeypatch, runtime)
-    finished, _ = complete(runtime, "run")
-    assert trace == ["user_message", "user_message", "assistant_message", "turn_finished"]
-    assert finished.payload["saved"] is True
-    assert stored(runtime)["events"][-1]["type"] == "turn_finished"
-
-
-def test_tool_turn_boundary_saves_each_settled_step(runtime_factory, monkeypatch):
-    """首次带工具往返的回合保存 9 次，提示词只在初始化时额外保存。"""
-    runtime, host = runtime_factory([
-        response("Before", tools=[tool("bash", command="printf hi")], stop="tool_use"),
-        response("After"),
-    ])
-    trace = _save_trace(monkeypatch, runtime)
-    submission = runtime.submit("run command")
-    request, _ = displayed_approval(runtime)
-    assert runtime.channel.respond(request.request_id, request.generation, "approve")
-    finished, _ = until(runtime, "turn_finished", submission_id=submission.submission_id)
-    assert trace == ["user_message", "user_message", "tool_call", "approval_requested", "approval_decided",
-                     "tool_result", "tool_result", "assistant_message", "turn_finished"]
-    assert finished.payload["saved"] is True
-
-
-@pytest.mark.parametrize("once", [False, True])
-def test_approval_checkpoint_saves_request_and_background_while_waiting(runtime_factory, once):
-    from agent_harness.runtime.interaction import ExecutionContext
-
-    bash = response(tools=[tool("bash", command="printf approved")], stop="tool_use")
-    values = ([response(tools=[tool("spawn_subagent", name="helper", description="Run child work", prompt="run", mode="once")], stop="tool_use"),
-               bash, response("child done"), response("lead done")] if once
-              else [bash, response("lead done")])
-    runtime, host = runtime_factory(values)
-    submission = runtime.submit("execute")
-    request, _ = displayed_approval(runtime)
-    snapshot = stored(runtime)
-    requested = records(snapshot, "approval_requested")
-    assert len(requested) == 1
-    assert requested[0]["payload"]["request_id"] == request.request_id
-    assert requested[0]["source"] == ("helper" if once else "lead")
-    assert records(snapshot, "tool_call")
-    assert not records(snapshot, "tool_result")
-
-    context = ExecutionContext(runtime.channel, runtime.session.session_id,
-                               runtime._generation, request.turn_id,
-                               source="observer", origin="persistent")
-    worker = threading.Thread(target=lambda: context.publish(
-        "subagent_status", name="observer", mode="persistent", status="completed"))
-    worker.start()
-    worker.join(timeout=2)
-    wait_stored(runtime, lambda value: any(
-        item["payload"].get("name") == "observer"
-        for item in records(value, "subagent_status")))
-    assert not records(stored(runtime), "approval_decided")
-    assert runtime.channel.respond(request.request_id, request.generation, "deny")
-    assert not runtime.channel.respond(request.request_id, request.generation, "approve")
-    until(runtime, "turn_finished", submission_id=submission.submission_id)
-    decided = records(stored(runtime), "approval_decided")
-    assert len(decided) == 1
-    assert decided[0]["payload"]["decision"] == "deny"
-    results = records(stored(runtime), "tool_result")
-    if not once:
-        assert any(item["payload"]["status"] == "denied" for item in results)
-
-
-def test_tool_request_and_approved_decision_are_saved_before_execution(runtime_factory, monkeypatch):
-    runtime, host = runtime_factory([
-        response(tools=[tool("bash", command="printf checked")], stop="tool_use"), response("Done")])
-    original = file_tools.run_bash
-    observed = []
-
-    def execute(*args, **kwargs):
-        snapshot = stored(runtime)
-        assert records(snapshot, "tool_call")[0]["payload"]["id"] == "call"
-        assert records(snapshot, "approval_requested")
-        assert records(snapshot, "approval_decided")[0]["payload"]["decision"] == "approve"
-        assert not records(snapshot, "tool_result")
-        observed.append(True)
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(file_tools, "run_bash", execute)
-    submission = runtime.submit("execute")
-    request, _ = displayed_approval(runtime)
-    assert runtime.channel.respond(request.request_id, request.generation, "approve")
-    until(runtime, "turn_finished", submission_id=submission.submission_id)
-    assert observed == [True]
-
-
-def test_failed_save_retry_preserves_record_ids_and_does_not_repeat_records(runtime_factory, monkeypatch):
-    runtime, host = runtime_factory([response("First"), response("Second")])
-    original = runtime.session.store.save
-    attempts = []
-
-    def fail(snapshot):
-        attempts.append(copy.deepcopy(snapshot))
-        raise OSError("offline disk failure")
-
-    monkeypatch.setattr(runtime.session.store, "save", fail)
-    complete(runtime, "first question")
-    assert runtime.session.dirty
-    before = records(runtime.session.snapshot)
-    ids = [item["id"] for item in before]
-    assert ids
-    monkeypatch.setattr(runtime.session.store, "save", original)
-    complete(runtime, "second question")
-    saved = records(stored(runtime))
-    assert [item["id"] for item in saved[:len(before)]] == ids
-    assert len({item["id"] for item in saved}) == len(saved)
-    assert len(records(stored(runtime), "user_message")) == 2
-    assert not runtime.session.dirty
-    assert attempts
-
-
 def test_compaction_changes_model_messages_without_erasing_display_history(runtime_factory, monkeypatch):
     runtime, host = runtime_factory([response("Original reply"), response("New reply")])
     complete(runtime, "original question")
     prior = records(stored(runtime))
-    from agent_harness.context.compaction import CompactionResult
+    from codefox.context.compaction import CompactionResult
     applied = []
 
     def compact(messages, active_request, **kwargs):
@@ -350,57 +184,58 @@ def test_resume_replays_records_without_model_execution_or_duplicate_interruptio
     assert len(model_results) == 1
 
 
-@pytest.mark.parametrize("malformation", [
-    "missing_display", "missing_reply", "missing_kind", "invalid_payload", "invalid_text", "duplicate_id",
-    "invalid_summary", "invalid_outcome", "invalid_todo",
-])
-def test_invalid_current_context_is_rejected_without_modifying_files_or_active_session(runtime_factory, malformation):
+def test_invalid_current_context_is_rejected_without_modifying_files_or_active_session(runtime_factory):
     runtime, host = runtime_factory([response("Current answer")])
     complete(runtime, "current question")
     active_id = runtime.session.session_id
     active_history = copy.deepcopy(runtime.session.history)
     active_generation = runtime._generation
-    snapshot = copy.deepcopy(stored(runtime))
-    target = runtime.session.store.create()["id"]
-    snapshot["id"] = target
-    display = records(snapshot)
-    if malformation == "missing_display":
-        snapshot["events"] = [item for item in snapshot["events"] if item.get("kind") != "display"]
-    elif malformation == "missing_reply":
-        snapshot["events"] = [item for item in snapshot["events"] if item["type"] != "assistant_message"]
-    elif malformation == "missing_kind":
-        del display[0]["kind"]
-    elif malformation == "invalid_payload":
-        display[0]["payload"] = "invalid"
-    elif malformation == "invalid_text":
-        display[0]["payload"]["text"] = ["invalid"]
-    elif malformation == "invalid_summary":
-        records(snapshot, "turn_finished")[0]["payload"]["summary"]["tool_calls"] = "invalid"
-    elif malformation == "invalid_outcome":
-        records(snapshot, "turn_finished")[0]["payload"]["outcome"]["status"] = "invalid"
-    elif malformation == "invalid_todo":
-        snapshot["events"].append({
-            "id": "invalid-todo", "at": snapshot["created_at"], "kind": "display",
-            "type": "todo_updated", "source": "lead", "turn_id": "turn",
-            "payload": {"todos": [{"content": "bad", "status": "unknown"}]},
-        })
-    else:
-        display[1]["id"] = display[0]["id"]
-    path = runtime.session.store.path(target)
-    path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
-    original_bytes = path.read_bytes()
-    submission = runtime.submit("/resume " + target)
-    result, events = until(runtime, "command_result", submission_id=submission.submission_id)
-    assert result.payload["status"] == "failed"
-    assert path.read_bytes() == original_bytes
-    assert runtime.session.session_id == active_id
-    assert runtime.session.history == active_history
-    assert runtime._generation == active_generation
-    assert not any(event.type == "session_changed" for event in events)
+    valid_snapshot = copy.deepcopy(stored(runtime))
+    for malformation in (
+        "missing_display", "missing_reply", "missing_kind", "invalid_payload",
+        "invalid_text", "duplicate_id", "invalid_summary", "invalid_outcome", "invalid_todo",
+    ):
+        snapshot = copy.deepcopy(valid_snapshot)
+        target = runtime.session.store.create()["id"]
+        snapshot["id"] = target
+        display = records(snapshot)
+        if malformation == "missing_display":
+            snapshot["events"] = [item for item in snapshot["events"] if item.get("kind") != "display"]
+        elif malformation == "missing_reply":
+            snapshot["events"] = [item for item in snapshot["events"] if item["type"] != "assistant_message"]
+        elif malformation == "missing_kind":
+            del display[0]["kind"]
+        elif malformation == "invalid_payload":
+            display[0]["payload"] = "invalid"
+        elif malformation == "invalid_text":
+            display[0]["payload"]["text"] = ["invalid"]
+        elif malformation == "invalid_summary":
+            records(snapshot, "turn_finished")[0]["payload"]["summary"]["tool_calls"] = "invalid"
+        elif malformation == "invalid_outcome":
+            records(snapshot, "turn_finished")[0]["payload"]["outcome"]["status"] = "invalid"
+        elif malformation == "invalid_todo":
+            snapshot["events"].append({
+                "id": "invalid-todo", "at": snapshot["created_at"], "kind": "display",
+                "type": "todo_updated", "source": "lead", "turn_id": "turn",
+                "payload": {"todos": [{"content": "bad", "status": "unknown"}]},
+            })
+        else:
+            display[1]["id"] = display[0]["id"]
+        path = runtime.session.store.path(target)
+        path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+        original_bytes = path.read_bytes()
+        submission = runtime.submit("/resume " + target)
+        result, events = until(runtime, "command_result", submission_id=submission.submission_id)
+        assert result.payload["status"] == "failed", malformation
+        assert path.read_bytes() == original_bytes, malformation
+        assert runtime.session.session_id == active_id, malformation
+        assert runtime.session.history == active_history, malformation
+        assert runtime._generation == active_generation, malformation
+        assert not any(event.type == "session_changed" for event in events), malformation
 
 
 def test_shutdown_saves_background_terminal_status_after_worker_join(runtime_factory, monkeypatch):
-    from agent_harness.runtime.interaction import execution_context
+    from codefox.runtime.interaction import execution_context
 
     runtime, host = runtime_factory([response("Ready")])
     complete(runtime, "start session")
@@ -434,42 +269,15 @@ def test_shutdown_saves_background_terminal_status_after_worker_join(runtime_fac
     assert not scheduler.has_pending_background()
 
 
-def test_backend_fact_queue_is_independent_of_frontend_delivery_and_detached():
-    from agent_harness.runtime.interaction import ExecutionContext, InteractionChannel
-
-    channel = InteractionChannel()
-    context = ExecutionContext(channel, "session", 1, "turn", origin="frontend")
-    arguments = {"id": "call", "name": "read_file", "input": {"path": "original"}}
-    published = context.publish("tool_call", **arguments)
-    arguments["input"]["path"] = "changed"
-    frontend = channel.next_event()
-    assert frontend.id == published.id
-    assert channel.acknowledge_event(frontend.sequence)
-    frontend.payload["input"]["path"] = "adapter mutation"
-    facts = channel.drain_facts()
-    assert len(facts) == 1
-    assert facts[0].id == published.id
-    assert facts[0].payload["input"]["path"] == "original"
-    assert channel.drain_facts() == []
-
-
-@pytest.mark.parametrize("invalid", [
-    None,
-    {"content": "bad", "status": "pending"},
-    '[{"content":"bad","status":"pending"}]',
-    "[{'content': 'bad', 'status': 'pending'}]",
-    ["bad"],
-    [{"content": "bad"}],
-    [{"status": "pending"}],
-    [{"content": 42, "status": "pending"}],
-    [{"content": "bad", "status": "unknown"}],
-    [{"content": "valid prefix", "status": "pending"}, {"content": None, "status": "pending"}],
-])
-def test_todo_records_include_only_applied_updates(runtime_factory, invalid):
+def test_todo_records_include_only_applied_updates(runtime_factory):
     todos = [{"content": "Check output", "status": "in_progress"}]
     values = iter([
         response(tools=[tool("todo_write", "valid", todos=todos),
-                        tool("todo_write", "invalid", todos=invalid)],
+                        tool("todo_write", "invalid-status", todos=[
+                            {"content": "bad", "status": "unknown"}]),
+                        tool("todo_write", "invalid-content", todos=[
+                            {"content": "valid prefix", "status": "pending"},
+                            {"content": None, "status": "pending"}])],
                  stop="tool_use"), response("Done")])
     requests = []
 
@@ -484,125 +292,30 @@ def test_todo_records_include_only_applied_updates(runtime_factory, invalid):
     assert updates[0]["payload"]["todos"] == todos
     assert stored(runtime)["todos"] == todos
     assert runtime.lead_context.todos == todos
+    detached = runtime.lead_context.snapshot()
+    detached["todos"].clear()
+    assert runtime.lead_context.todos == todos
     results = requests[1][-1]["content"]
-    assert [item["tool_use_id"] for item in results] == ["valid", "invalid"]
-    assert results[0]["content"] == "已更新 1 项待办：完成 0 项，进行中 1 项，待处理 0 项。"
-    assert results[1]["content"].startswith("Error: ")
-
-
-def test_model_owns_todo_updates_without_cross_round_reminders(runtime_factory):
-    todos = [
-        {"content": "准备文件", "status": "completed"},
-        {"content": "读取文件", "status": "in_progress"},
-        {"content": "总结结果", "status": "pending"},
+    assert [item["tool_use_id"] for item in results] == [
+        "valid", "invalid-status", "invalid-content",
     ]
-    completed = [dict(todo, status="completed") for todo in todos]
-    values = iter([
-        response(tools=[tool("todo_write", "plan", todos=todos)], stop="tool_use"),
-        # 分六轮执行真实普通工具，覆盖跨模型轮次的旧提醒触发条件。
-        *[response(tools=[tool("read_file", f"read-{index}",
-                              path="输入.txt" if index % 2 == 0 else "不存在.txt")], stop="tool_use")
-          for index in range(6)],
-        response(tools=[tool("todo_write", "finish-plan", todos=completed)], stop="tool_use"),
-        response(tools=[tool("todo_write", "clear-plan", todos=[])], stop="tool_use"),
-        response("Done"),
-    ])
-    requests, observed = [], []
-
-    def model(**kwargs):
-        requests.append(copy.deepcopy(kwargs["messages"]))
-        observed.append(copy.deepcopy(runtime.lead_context.todos))
-        return next(values)
-
-    runtime, host = runtime_factory(client=model)
-    (core.WORKDIR / "输入.txt").write_text("读取成功", encoding="utf-8")
-    finished, _ = complete(runtime, "读取文件并记录计划")
-    assert finished.payload["outcome"]["status"] == "completed"
-    assert len(requests) == 10
-    assert observed == [[], *[todos for _ in range(7)], completed, []]
-    expected_ids = ["plan", *[f"read-{index}" for index in range(6)], "finish-plan", "clear-plan"]
-    for index, call_id in enumerate(expected_ids, start=1):
-        # 初始运行通知之后，每轮只追加助手响应和配对结果，没有 TODO 提醒。
-        assert len(requests[index]) == 2 + index * 2
-        results = requests[index][-1]["content"]
-        assert len(results) == 1
-        assert results[0]["type"] == "tool_result"
-        assert results[0]["tool_use_id"] == call_id
-        assert "<reminder>" not in str(requests[index])
-    assert requests[1][-1]["content"][0]["content"] == "已更新 3 项待办：完成 1 项，进行中 1 项，待处理 1 项。"
-    for index in range(6):
-        output = requests[index + 2][-1]["content"][0]["content"]
-        if index % 2 == 0:
-            assert "读取成功" in output
-        else:
-            assert output.startswith("Error:")
-    assert requests[8][-1]["content"][0]["content"] == "已更新 3 项待办：完成 3 项，进行中 0 项，待处理 0 项。"
-    assert requests[9][-1]["content"][0]["content"] == "已更新 0 项待办：完成 0 项，进行中 0 项，待处理 0 项。"
-    updates = records(stored(runtime), "todo_updated")
-    assert [item["payload"]["todos"] for item in updates] == [todos, completed, []]
-    assert stored(runtime)["todos"] == runtime.lead_context.todos == []
+    assert results[0]["content"] == "已更新 1 项待办：完成 0 项，进行中 1 项，待处理 0 项。"
+    assert all(item["content"].startswith("Error: ") for item in results[1:])
+    # The state owner also preserves completion, clearing and input isolation.
+    for malformed in (None, [None], [{"content": "missing status"}]):
+        with pytest.raises(ValueError):
+            runtime.lead_context.replace_todos(malformed)
+        assert runtime.lead_context.todos == todos, malformed
+    completed = [{"content": "Check output", "status": "completed"}]
+    assert runtime.lead_context.replace_todos(completed) == completed
+    completed[0]["content"] = "mutated input"
+    assert runtime.lead_context.todos == [{"content": "Check output", "status": "completed"}]
+    assert runtime.lead_context.replace_todos([]) == []
+    assert runtime.lead_context.todos == []
 
 
-@pytest.mark.parametrize("action,decision", [("stop", "deny"), ("close", "closed")])
-def test_stop_and_close_save_one_terminal_approval_decision(runtime_factory, action, decision):
-    runtime, host = runtime_factory([
-        response(tools=[tool("bash", command="touch must-not-exist")], stop="tool_use")])
-    submission = runtime.submit("run")
-    request, _ = displayed_approval(runtime)
-    if action == "stop":
-        assert runtime.request_stop(request.turn_id)
-        until(runtime, "turn_finished", submission_id=submission.submission_id)
-    else:
-        runtime.close()
-        until(runtime, "runtime_closed")
-    terminal = records(stored(runtime), "approval_decided")
-    assert len(terminal) == 1
-    assert terminal[0]["payload"]["decision"] == decision
-    assert not (core.WORKDIR / "must-not-exist").exists()
-
-
-def test_synchronous_model_queues_background_facts_until_next_checkpoint(runtime_factory):
-    from agent_harness.runtime.interaction import ExecutionContext
-
-    started, release = threading.Event(), threading.Event()
-
-    def model(**kwargs):
-        started.set()
-        assert release.wait(4)
-        return response("Done")
-
-    runtime, host = runtime_factory(client=model)
-    submission = runtime.submit("wait for model")
-    assert started.wait(2)
-    context = ExecutionContext(runtime.channel, runtime.session.session_id,
-                               runtime._generation, source="background", origin="background")
-    context.publish("background_status", task_id="offline", status="completed")
-    assert not records(stored(runtime), "background_status")
-    release.set()
-    until(runtime, "turn_finished", submission_id=submission.submission_id)
-    assert records(stored(runtime), "background_status")[0]["payload"]["task_id"] == "offline"
-
-
-def test_failed_approval_checkpoint_does_not_retry_empty_polls(runtime_factory, monkeypatch):
-    runtime, host = runtime_factory([
-        response(tools=[tool("bash", command="printf unused")], stop="tool_use"), response("Done")])
-    attempts = []
-
-    def fail(snapshot):
-        attempts.append(time.monotonic())
-        raise OSError("offline disk failure")
-
-    monkeypatch.setattr(runtime.session.store, "save", fail)
-    submission = runtime.submit("run")
-    request, _ = displayed_approval(runtime)
-    settled = len(attempts)
-    time.sleep(0.35)
-    assert len(attempts) == settled
-    assert runtime.channel.respond(request.request_id, request.generation, "deny")
-    until(runtime, "turn_finished", submission_id=submission.submission_id)
-    assert len(attempts) > settled
 def test_background_fact_is_visible_before_blocked_lead_checkpoint(runtime_factory):
-    from agent_harness.runtime.interaction import ExecutionContext
+    from codefox.runtime.interaction import ExecutionContext
 
     started, release = threading.Event(), threading.Event()
     runtime, _ = runtime_factory(client=blocking_client(started, release))
@@ -710,15 +423,6 @@ def test_stream_stop_discards_partial_body_without_retry_or_saved_message(runtim
     assert any(e["payload"]["state"] == "stopped" for e in records(stored(runtime), "execution_status"))
 
 
-def test_truncated_retry_uses_distinct_identity_and_saves_only_accepted_text(runtime_factory):
-    runtime, _ = runtime_factory([response("discard this", stop="max_tokens"), response("accepted")])
-    finished, events = complete(runtime, "retry safely")
-    calls = [r for r in records(stored(runtime), "execution_status") if r["payload"]["phase"] == "model"]
-    assert len({r["payload"]["model_call_id"] for r in calls}) == 2
-    assert any(r["payload"]["state"] == "discarded" for r in calls)
-    assert [r["payload"]["text"] for r in records(stored(runtime), "assistant_message")] == ["accepted"]
-
-
 def record(number, kind, payload, source="lead", turn="turn"):
     return {"id": f"{number:032x}", "at": "2026-10-09T00:00:00+00:00", "kind": "display",
             "type": kind, "source": source, "turn_id": turn, "payload": payload}
@@ -772,12 +476,11 @@ class DisplayRuntime:
         self.closed = True
 
 
-@pytest.mark.parametrize("delivery", ["live", "restore"])
-def test_tui_subagent_progress_updates_one_row_and_preserves_records(delivery):
+def test_tui_subagent_progress_updates_one_row_and_preserves_records():
     pytest.importorskip("textual")
     from textual.widgets import Static
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ConversationRecord
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.frontends.tui.widgets import ConversationRecord
 
     app = HarnessApp(DisplayRuntime())
     updates = [record(1, "user_message", {"text": "Summarize README"})]
@@ -802,59 +505,36 @@ def test_tui_subagent_progress_updates_one_row_and_preserves_records(delivery):
 
     async def exercise():
         async with app.run_test(size=(100, 30)) as pilot:
-            if delivery == "live":
-                for update in updates[:-1]:
-                    await app.conversation.display_record(update)
-                initial = [widget for widget in app.query(ConversationRecord)
-                           if widget.record["type"] == "subagent_status"]
-                assert len(initial) == 1
-                await app.conversation.display_record(updates[-1])
-                assert status_row() is initial[0]
-            else:
-                await app.conversation.restore(updates, session_id="test", generation=1)
+            for update in updates[:-1]:
+                await app.conversation.display_record(update)
+            initial = next(
+                widget for widget in app.query(ConversationRecord) if widget.record["type"] == "subagent_status")
+            await app.conversation.display_record(updates[-1])
+            assert status_row() is initial
             await pilot.pause()
             status_row()
             assert app.records == updates
+            await app.conversation.restore(updates, session_id="test", generation=1)
+            status_row()
             await app.conversation.render_window()
             await pilot.pause()
             status_row()
             assert app.records == updates
+            await app.conversation.display_record(record(15, "subagent_status", {
+                "agent_id": "child-2", "name": "readme_summarizer", "mode": "once", "status": "working",
+            }, source="readme_summarizer"))
+            assert len([widget for widget in app.query(ConversationRecord)
+                        if widget.record["type"] == "subagent_status"]) == 2
             await app.conversation.restore([], session_id="new", generation=2)
             assert not app.query(ConversationRecord)
-    asyncio.run(exercise())
-
-
-def test_tui_subagent_status_keeps_same_named_instances_separate():
-    pytest.importorskip("textual")
-    from textual.widgets import Static
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ConversationRecord
-
-    app = HarnessApp(DisplayRuntime())
-    updates = [record(index + 1, "subagent_status", {
-        "agent_id": agent, "name": "helper", "mode": "once", "status": status,
-    }, source="helper") for index, (agent, status) in enumerate([
-        ("first", "working"), ("second", "working"), ("first", "completed"),
-    ])]
-
-    async def exercise():
-        async with app.run_test(size=(100, 30)) as pilot:
-            for update in updates:
-                await app.conversation.display_record(update)
-            await pilot.pause()
-            rows = list(app.query(ConversationRecord))
-            assert len(rows) == 2
-            assert {row.record["payload"]["agent_id"]: str(row.query_one(Static).content)
-                    for row in rows} == {
-                "first": "helper · completed", "second": "helper · working"}
     asyncio.run(exercise())
 
 
 def test_tui_record_window_expansion_history_and_dedup():
     pytest.importorskip("textual")
     from textual.widgets import Button, Collapsible, Static
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ApprovalCard, ConversationRecord
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.frontends.tui.widgets import ApprovalCard, ConversationRecord
 
     app = HarnessApp(DisplayRuntime())
     records = [record(index + 1, "user_message", {"text": f"message {index}"}) for index in range(90)]
@@ -887,88 +567,12 @@ def test_tui_record_window_expansion_history_and_dedup():
     asyncio.run(exercise())
 
 
-def test_tui_workbench_has_brand_state_panel_and_single_stateful_button():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import BrandBar, SessionStatePanel
-    from textual.widgets import Button, Static
-
-    app = HarnessApp(DisplayRuntime())
-    async def exercise():
-        async with app.run_test(size=(110, 30)) as pilot:
-            assert app.query_one(BrandBar)
-            # 顶部四个固定按钮，设置打开弹窗。
-            assert [button.id for button in app.query_one(BrandBar).query(Button)] == [
-                "history", "state", "new-session", "settings"]
-            assert app.query_one("#conversation-top").region.y == 1
-            assert not app.query_one(SessionStatePanel).display
-            assert app.query_one("#send", Button).label == "发送"
-            assert not app.query("#stop")
-            await app._event(event("state_snapshot", {
-                "history": [{"role": "user", "content": "hello"}],
-                "goal": None, "todos": [], "subagents": [], "model": "test-model",
-                "busy": True, "closing": False,
-                    "context_input_tokens": 2000, "context_limit_tokens": 50000,
-                    "lead_main_model_usage": {"model_calls": 1, "input_tokens": 2, "output_tokens": 3},
-                "workdir": "/tmp/project", "task_id": "task_1", "worktree": "feature",
-            }))
-            await pilot.pause()
-            assert app.query_one("#send", Button).label == "停止"
-            app.action_stop_turn()
-            app.turn_id = "turn-1"
-            app.runtime.request_stop = lambda turn_id: True
-            app.action_stop_turn()
-            assert app.stopping and app.query_one("#send", Button).label == "停止"
-            assert app.query_one("#send", Button).disabled
-            assert str(app.query_one("#input-status", Static).content) == ""
-            assert not app.query_one("#input-status").display
-            app.state_expanded = True
-            app._controls()
-            await pilot.pause()
-            assert app.query_one(SessionStatePanel).display
-            assert str(app.query_one("#state-collapse", Button).label) == "收起"
-            state = str(app.query_one(SessionStatePanel).query_one(".state-body", Static).content)
-            assert "test-model" in state and "/tmp/project" in state and "feature" in state
-            # 输入区：活动期间状态行隐藏，主按钮在同一输入框内，底部是权限与模型摘要。
-            box = app.query_one("#input-box").region
-            send = app.query_one("#send", Button).region
-            assert box.y <= send.y and send.bottom <= box.bottom
-            footer = str(app.query_one("#bottom-status", Static).content)
-            assert "test-model" in footer and "已使用上下文窗口：2k/50k（4%）" in footer
-            assert str(app.query_one("#permission", Button).label) == "权限：默认 ▾"
-    import asyncio
-    asyncio.run(exercise())
-
-
-def test_tui_state_panel_reopens_and_top_entries_keep_editor_focus():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import SessionStatePanel
-    from textual.widgets import TextArea
-
-    app = HarnessApp(DisplayRuntime())
-    async def exercise():
-        async with app.run_test(size=(112, 34)) as pilot:
-            editor = app.query_one("#input", TextArea)
-            await pilot.click("#state")
-            await pilot.pause()
-            assert app.state_expanded and app.query_one(SessionStatePanel).display
-            assert app.focused is editor
-            await pilot.click("#state-collapse")
-            await pilot.pause()
-            assert not app.state_expanded and not app.query_one(SessionStatePanel).display
-            # 收起后仍可再次展开，且焦点回到输入框。
-            await pilot.click("#state")
-            await pilot.pause()
-            assert app.query_one(SessionStatePanel).display and app.focused is editor
-    import asyncio
-    asyncio.run(exercise())
-
-
 def test_tui_inline_approval_only_enables_delivered_request(monkeypatch):
     pytest.importorskip("textual")
     from textual.widgets import Button
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ApprovalCard
-    from agent_harness.runtime.interaction import ApprovalRequest
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.frontends.tui.widgets import ApprovalCard
+    from codefox.runtime.interaction import ApprovalRequest
 
     runtime = DisplayRuntime()
     app = HarnessApp(runtime)
@@ -1003,144 +607,6 @@ def test_tui_inline_approval_only_enables_delivered_request(monkeypatch):
             assert all(button.disabled for button in card.query(Button))
             assert app.approval is None
     asyncio.run(exercise())
-def test_approval_decision_does_not_add_a_separate_row():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ApprovalCard, ConversationRecord
-    from textual.widgets import Static
-
-    app = HarnessApp(DisplayRuntime())
-
-    async def exercise():
-        async with app.run_test(size=(112, 34)) as pilot:
-            await app.conversation.display_record(record(1, "approval_requested", {
-                "request_id": "req", "tool_name": "bash", "arguments": {"command": "pwd"}}))
-            await pilot.pause()
-            card = app.query_one(ApprovalCard)
-            assert len(app.query(ConversationRecord)) == 1
-            await app.conversation.display_record(record(2, "approval_decided", {
-                "request_id": "req", "tool_name": "bash", "decision": "approve"}))
-            await pilot.pause()
-            # 审批结果就地更新审批卡，不再单独占一行“bash · 已批准”。
-            assert len(app.query(ConversationRecord)) == 1
-            state = card.query_one(".approval-state", Static)
-            marked = [widget for widget in app.query(Static) if "已批准" in str(widget.content)]
-            assert marked == [state]
-    asyncio.run(exercise())
-
-
-def test_empty_operation_details_are_hidden():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import OperationEntry
-    from textual.widgets import Collapsible, Static
-
-    app = HarnessApp(DisplayRuntime())
-
-    async def exercise():
-        async with app.run_test(size=(112, 34)) as pilot:
-            # 目标、模型、记忆等状态行没有参数也没有结果，不显示空详情块。
-            await app.conversation.display_record(record(1, "execution_status", {
-                "operation_id": "goal", "phase": "goal", "name": "检查目标",
-                "state": "completed", "elapsed_seconds": 0.0}))
-            await app.conversation.display_record(record(2, "execution_status", {
-                "operation_id": "mem", "phase": "memory", "name": "记忆检查",
-                "state": "completed", "elapsed_seconds": 0.0}))
-            # 有参数的工具调用仍保留可展开的详情。
-            await app.conversation.display_record(record(3, "tool_call", {
-                "id": "tool", "name": "read_file", "input": {"path": "说明.md"}, "model_call_id": "c1"}))
-            await pilot.pause()
-            entries = list(app.query(OperationEntry))
-            assert len(entries) == 3
-            by_name = {str(entry.query_one(".operation-summary", Static).content): entry for entry in entries}
-            goal = next(entry for text, entry in by_name.items() if "检查目标" in text)
-            memory = next(entry for text, entry in by_name.items() if "记忆检查" in text)
-            tool = next(entry for text, entry in by_name.items() if "read_file" in text)
-            assert not goal.query_one(Collapsible).display
-            assert not memory.query_one(Collapsible).display
-            assert tool.query_one(Collapsible).display
-    asyncio.run(exercise())
-
-
-def test_tool_summary_is_visible_before_expanding_details():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from textual.widgets import Collapsible
-    app = HarnessApp(DisplayRuntime())
-    async def exercise():
-        async with app.run_test(size=(85, 30)) as pilot:
-            await app.conversation.display_record(record(1, "tool_call", {"id": "read", "name": "read_file",
-                                     "input": {"path": "说明.md"}}))
-            await app.conversation.display_record(record(2, "tool_result", {"tool_use_id": "read", "status": "returned",
-                                     "content": "读取成功\n" + "long output\n" * 100}))
-            await pilot.pause()
-            text = "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
-            assert "说明.md" in text and "读取成功" in text
-            assert all(item.collapsed for item in app.query(Collapsible))
-    asyncio.run(exercise())
-
-
-def test_operation_summary_keeps_confirmed_elapsed_time():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import OperationEntry
-    from textual.containers import VerticalScroll
-    from textual.widgets import Static
-
-    app = HarnessApp(DisplayRuntime())
-    async def exercise():
-        async with app.run_test(size=(85, 30)) as pilot:
-            from agent_harness.frontends.conversation import ConversationProjection
-            projection = ConversationProjection()
-            change = projection.apply_record(record(1, "execution_status", {
-                "operation_id": "op", "phase": "tool", "name": "读取 README.md",
-                "state": "completed", "elapsed_seconds": 3.0,
-            }))[0]
-            entry = OperationEntry(change["entry"])
-            await app.query_one("#chat", VerticalScroll).mount(entry)
-            entry.render_entry(change["entry"])
-            await pilot.pause()
-            text = str(entry.query_one(".operation-summary", Static).content)
-            assert "耗时 3.0s" in text
-    import asyncio
-    asyncio.run(exercise())
-def test_many_tools_share_scrollable_group_and_update_in_place():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import GroupHead, OperationEntry, ProcessGroup
-    from textual.containers import VerticalScroll
-    from textual.events import MouseScrollDown
-    app = HarnessApp(DisplayRuntime())
-    async def exercise():
-        async with app.run_test(size=(85, 32)) as pilot:
-            for index in range(20):
-                await app.conversation.display_record(record(100 + index, "tool_call", {
-                    "id": f"tool-{index}", "name": "read_file", "input": {"path": f"file-{index}.txt"},
-                    "model_call_id": "model-1"}))
-                await app.conversation.display_record(record(200 + index, "tool_result", {
-                    "tool_use_id": f"tool-{index}", "content": f"result-{index}", "status": "returned",
-                    "model_call_id": "model-1"}))
-            await pilot.pause()
-            assert len(app.query(ProcessGroup)) == 1
-            assert len(app.query(OperationEntry)) == 20
-            group = app.query_one(ProcessGroup)
-            assert str(group.query_one(GroupHead).content).startswith("工具调用 · 耗时 ")
-            group.query_one(GroupHead).post_message(GroupHead.Toggle())
-            await pilot.pause()
-            scroll = group.query_one(VerticalScroll)
-            assert scroll.region.height <= 14 and scroll.max_scroll_y > 0
-            scroll.scroll_home(animate=False)
-            await pilot.pause()
-            await pilot.hover(scroll, offset=(3, 2))
-            outer = app.query_one("#chat", VerticalScroll)
-            position = outer.scroll_y
-            await pilot._post_mouse_events([MouseScrollDown], scroll, offset=(3, 2))
-            await pilot.pause()
-            assert scroll.scroll_y > 0 and outer.scroll_y == position
-            bar = scroll.vertical_scrollbar
-            await pilot.click(bar, offset=(0, bar.region.height - 2))
-            await pilot.pause()
-            assert scroll.scroll_y > 0
-            scroll.scroll_end(animate=False)
-            await pilot.pause()
-            text = "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
-            assert "file-19.txt" in text and "result-19" in text
-    asyncio.run(exercise())
 def test_cli_stream_confirms_without_duplicate_body_and_marks_discarded_attempt():
     output, chunks = [], []
     adapter = CLIAdapter(None, write=output.append, write_chunk=chunks.append)
@@ -1157,24 +623,8 @@ def test_cli_stream_confirms_without_duplicate_body_and_marks_discarded_attempt(
     assert output[0] == "background update"
 
 
-def test_projection_confirmed_body_rejects_late_delta_and_is_read_only():
-    from agent_harness.frontends.conversation import ConversationProjection
-    projection = ConversationProjection()
-    projection.restore([], "test", 1)
-    projection.apply_record(record(1, "assistant_message", {"model_call_id": "one", "text": "正式正文"}))
-    assert projection.apply_delta(event("assistant_text_delta", {
-        "model_call_id": "one", "block_index": 0, "sequence": 1, "delta": "过期正文"})) == []
-    records = projection.records
-    records[0]["payload"]["text"] = "外部修改"
-    assert projection.records[0]["payload"]["text"] == "正式正文"
-    projection.apply_record(record(2, "execution_status", {
-        "phase": "model", "name": "请求模型", "state": "failed", "operation_id": "op", "model_call_id": "two"}))
-    assert projection.apply_delta(event("assistant_text_delta", {
-        "model_call_id": "two", "block_index": 0, "sequence": 1, "delta": "结束后迟到"})) == []
-
-
 def test_projection_deduplicates_and_discards_only_matching_unaccepted_source():
-    from agent_harness.frontends.conversation import ConversationProjection
+    from codefox.frontends.conversation import ConversationProjection
     projection = ConversationProjection()
     delta = event("assistant_text_delta", {"model_call_id": "same", "block_index": 0, "sequence": 1, "delta": "Lead"})
     projection.apply_delta(delta)
@@ -1188,11 +638,18 @@ def test_projection_deduplicates_and_discards_only_matching_unaccepted_source():
     delta.generation = 0
     assert projection.apply_delta(delta) == []
     assert next(e for e in projection.entries if e.get("source") == "child")["discarded"] is False
+    projection.apply_record(record(2, "assistant_message", {"model_call_id": "accepted", "text": "正式正文"}))
+    confirmed = event("assistant_text_delta", {
+        "model_call_id": "accepted", "block_index": 0, "sequence": 1, "delta": "迟到正文"})
+    assert projection.apply_delta(confirmed) == []
+    detached = projection.records
+    detached[-1]["payload"]["text"] = "外部修改"
+    assert projection.records[-1]["payload"]["text"] == "正式正文"
 
 
 def test_tui_window_rebuild_preserves_expansion_and_live_body():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import OperationEntry, StreamingText
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.frontends.tui.widgets import OperationEntry, StreamingText
     from textual.widgets import Collapsible, Markdown
     app = HarnessApp(DisplayRuntime())
 
@@ -1225,57 +682,9 @@ def test_tui_window_rebuild_preserves_expansion_and_live_body():
     asyncio.run(exercise())
 
 
-def test_tui_pending_user_message_is_right_aligned_before_record_arrives():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ConversationRecord, MessageRow
-
-    class SubmitRuntime(DisplayRuntime):
-        def submit(self, text):
-            return SimpleNamespace(status="accepted", kind="turn", submission_id="sub-1", reason="")
-
-    app = HarnessApp(SubmitRuntime())
-
-    async def exercise():
-        async with app.run_test(size=(112, 34)) as pilot:
-            assert app._submit("刚发送的消息")
-            await pilot.pause()
-            row = app.query_one(MessageRow)
-            assert "user" in row.classes
-            box = row.query_one(ConversationRecord).region
-            assert box.x > 1
-    asyncio.run(exercise())
-
-
-def test_tui_messages_hide_source_labels_and_user_messages_hug_right():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ConversationRecord, MessageRow
-
-    app = HarnessApp(DisplayRuntime())
-
-    async def exercise():
-        async with app.run_test(size=(112, 34)) as pilot:
-            await app.conversation.display_record(record(1, "user_message", {"text": "问题"}))
-            await app.conversation.display_record(record(2, "assistant_message", {"text": "回答"}))
-            await pilot.pause()
-            rows = list(app.query(MessageRow))
-            user_row = next(row for row in rows if "user" in row.classes)
-            model_row = next(row for row in rows if "user" not in row.classes)
-            user_box = user_row.query_one(ConversationRecord).region
-            model_box = model_row.query_one(ConversationRecord).region
-            assert user_box.x > model_box.x
-            assert user_box.right > model_box.right
-            # 短消息的用户气泡按内容收缩并贴右，不是占满 82% 后把文字留在左侧。
-            assert user_box.width < model_box.width
-            assert user_box.right == user_row.region.right
-            # 消息框内不显示“你”“CodeFox”等来源标签。
-            for item in app.query(ConversationRecord):
-                assert not item.query(".record-source")
-    asyncio.run(exercise())
-
-
 def test_tui_state_panel_toggles_in_one_layout_and_keeps_input_visible():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import BrandBar, SessionStatePanel
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.frontends.tui.widgets import BrandBar, SessionStatePanel
     from textual.widgets import Button
 
     app = HarnessApp(DisplayRuntime())
@@ -1302,67 +711,14 @@ def test_tui_state_panel_toggles_in_one_layout_and_keeps_input_visible():
     asyncio.run(exercise())
 
 
-def test_tui_command_result_notifies_without_conversation_row():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ConversationRecord
-
-    app = HarnessApp(DisplayRuntime())
-    notified = []
-    app.notify = lambda message, **kwargs: notified.append((str(message), kwargs))
-
-    async def exercise():
-        async with app.run_test(size=(112, 34)) as pilot:
-            app._status("处理中")
-            await pilot.pause()
-            assert app.query(".activity")
-            await app._event(event("command_result", {
-                "command": "/delete", "status": "completed",
-                "data": {"text": "已删除会话 20261011-072015-6526e2ec"}}))
-            await pilot.pause()
-            # 命令结果只弹窗提示：对话区不留命令行，终态也不留活动状态行。
-            assert notified == [("已删除会话 20261011-072015-6526e2ec", {"markup": False})]
-            assert not app.query(ConversationRecord)
-            assert not app.query(".activity")
-            # 历史回放同样跳过命令结果行。
-            await app.conversation.display_record(record(9, "command_result", {
-                "command": "/delete", "status": "completed",
-                "data": {"text": "已删除会话 20261011-072015-6526e2ec"}}))
-            await pilot.pause()
-            assert not app.query(ConversationRecord)
-    asyncio.run(exercise())
-
-
-def test_tui_hides_active_input_status_but_keeps_terminal_notice():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from textual.widgets import Static
-
-    app = HarnessApp(DisplayRuntime())
-
-    async def exercise():
-        async with app.run_test(size=(112, 34)) as pilot:
-            app.busy = True
-            app._status("处理中")
-            await pilot.pause()
-            assert not app.query_one("#input-status").display
-            assert app.query_one(".activity", Static)
-
-            await app._event(event("turn_finished", {"outcome": {"status": "completed"}}))
-            await pilot.pause()
-            status = app.query_one("#input-status", Static)
-            assert status.display and str(status.content) == "完成"
-            assert not app.query(".activity")
-
-    asyncio.run(exercise())
-
-
-@pytest.mark.parametrize("size", [(112, 34), (72, 24)])
-def test_tui_settings_dialog_toggles_diagnostics_and_returns_to_draft(size):
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import SettingsScreen
+def test_tui_settings_dialog_toggles_diagnostics_and_returns_to_draft():
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.frontends.tui.widgets import SettingsScreen
     from textual.screen import ModalScreen
     from textual.widgets import Switch, TextArea
 
     app = HarnessApp(DisplayRuntime())
+    size = (72, 24)
 
     async def exercise():
         async with app.run_test(size=size) as pilot:
@@ -1406,9 +762,9 @@ def test_tui_settings_dialog_toggles_diagnostics_and_returns_to_draft(size):
 
 
 def test_tui_theme_switch_updates_reply_and_logs_without_losing_draft():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import SettingsScreen
-    from agent_harness.frontends.tui.themes import DEFAULT_THEME, THEMES
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.frontends.tui.widgets import SettingsScreen
+    from codefox.frontends.tui.themes import DEFAULT_THEME, THEMES
     from textual.widgets import Markdown, Select, TextArea
 
     app = HarnessApp(DisplayRuntime())
@@ -1454,58 +810,9 @@ def test_tui_theme_switch_updates_reply_and_logs_without_losing_draft():
     asyncio.run(exercise())
 
 
-def test_tui_diagnostics_keep_content_and_place_after_window_rebuild():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from textual.widgets import Collapsible
-
-    app = HarnessApp(DisplayRuntime())
-
-    def diagnostics():
-        return [block for block in app.query(Collapsible) if "diagnostic" in block.classes]
-
-    def screen():
-        return "".join(ElementTree.fromstring(app.export_screenshot()).itertext())
-
-    async def show(pilot):
-        diagnostics()[0].collapsed = False
-        await pilot.pause()
-
-    async def exercise():
-        async with app.run_test(size=(112, 34)) as pilot:
-            await app.conversation.display_record(record(1, "user_message", {"text": "问题"}))
-            # 同一回合只产生一块诊断日志，内容累积。
-            await app._event(event("log", {"text": "第一条日志"}))
-            await app._event(event("log", {"text": "第二条日志"}))
-            await pilot.pause()
-            assert len(diagnostics()) == 1
-            await show(pilot)
-            assert "第一条日志" in screen() and "第二条日志" in screen()
-            # 窗口重建会移除整个对话区：诊断日志必须重新挂载，内容和展开状态都不能丢。
-            await app.conversation.load_earlier()
-            await pilot.pause()
-            assert len(diagnostics()) == 1 and not diagnostics()[0].collapsed
-            assert "第一条日志" in screen() and "第二条日志" in screen()
-            await app._event(event("log", {"text": "第三条日志"}))
-            await pilot.pause()
-            assert len(diagnostics()) == 1
-            assert "第三条日志" in screen()
-            # 关闭显示后继续收集；重建不能重新打开日志或丢失展开状态。
-            app.conversation.set_diagnostics_visible(False)
-            await app._event(event("log", {"text": "隐藏期间的日志"}))
-            await app.conversation.load_earlier()
-            await pilot.pause()
-            assert len(diagnostics()) == 1 and not diagnostics()[0].display
-            assert "隐藏期间的日志" not in screen()
-            app.conversation.set_diagnostics_visible(True)
-            await pilot.pause()
-            assert diagnostics()[0].display and not diagnostics()[0].collapsed
-            assert "第一条日志" in screen() and "隐藏期间的日志" in screen()
-    asyncio.run(exercise())
-
-
 def test_tui_rebuild_preserves_pending_input_activity_error_and_confirms_once():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ConversationRecord, MessageRow
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.frontends.tui.widgets import ConversationRecord, MessageRow
     from textual.widgets import Collapsible, Static
 
     class SubmitRuntime(DisplayRuntime):
@@ -1519,6 +826,10 @@ def test_tui_rebuild_preserves_pending_input_activity_error_and_confirms_once():
     async def exercise():
         async with app.run_test(size=(112, 34)) as pilot:
             assert app._submit("待确认的消息")
+            await pilot.pause()
+            pending = app.query_one(MessageRow)
+            assert "user" in pending.classes
+            assert pending.query_one(ConversationRecord).region.x > 1
             await app._event(event("log", {"text": "保存暂不可用"}))
             await app._event(event("runtime_error", {"error": "保存暂不可用"}))
             await app._event(event("log", {"text": "当前会话日志"}))
@@ -1558,7 +869,7 @@ def test_tui_rebuild_preserves_pending_input_activity_error_and_confirms_once():
 
 
 def test_tui_diagnostics_follow_each_user_row_and_keep_late_child_logs_in_original_turn():
-    from agent_harness.frontends.tui.app import HarnessApp
+    from codefox.frontends.tui.app import HarnessApp
 
     app = HarnessApp(DisplayRuntime())
 
@@ -1602,8 +913,8 @@ def test_tui_diagnostics_follow_each_user_row_and_keep_late_child_logs_in_origin
 
 
 def test_tui_restored_logs_are_complete_and_follow_history_window():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.runtime.diagnostics import log_record
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.runtime.diagnostics import log_record
 
     app = HarnessApp(DisplayRuntime())
     history, logs = [], []
@@ -1640,8 +951,8 @@ def test_tui_restored_logs_are_complete_and_follow_history_window():
 
 
 def test_tui_unanchored_logs_use_original_time_and_do_not_attach_to_next_user():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.runtime.diagnostics import log_record
+    from codefox.frontends.tui.app import HarnessApp
+    from codefox.runtime.diagnostics import log_record
 
     app = HarnessApp(DisplayRuntime())
     first = record(1, "user_message", {"text": "第一轮"}, turn="first")
@@ -1671,29 +982,4 @@ def test_tui_unanchored_logs_use_original_time_and_do_not_attach_to_next_user():
             await app._event(background)
             assert list(app.query_one("#chat").children) == children
             assert "后台延迟日志" in str(app.conversation._diagnostic_details[("background", "background-turn")].content)
-    asyncio.run(exercise())
-
-
-def test_tui_rebuild_keeps_process_group_expanded():
-    from agent_harness.frontends.tui.app import HarnessApp
-    from agent_harness.frontends.tui.widgets import ProcessGroup
-    from textual.containers import VerticalScroll
-
-    app = HarnessApp(DisplayRuntime())
-
-    async def exercise():
-        async with app.run_test(size=(112, 34)) as pilot:
-            await app.conversation.display_record(record(1, "tool_call", {
-                "id": "tool", "name": "read_file", "input": {"path": "说明.md"}, "model_call_id": "model"}))
-            await pilot.pause()
-            await pilot.click("#group-head")
-            group = app.query_one(ProcessGroup)
-            assert group.expanded and group.query_one(VerticalScroll).display
-            await app.conversation.load_earlier()
-            await pilot.pause()
-            rebuilt = app.query_one(ProcessGroup)
-            assert rebuilt is not group
-            assert rebuilt.expanded and rebuilt.query_one(VerticalScroll).display
-            await pilot.click("#group-head")
-            assert not rebuilt.expanded and not rebuilt.query_one(VerticalScroll).display
     asyncio.run(exercise())

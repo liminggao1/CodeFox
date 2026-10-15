@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-harness"
+name = "codefox"
 version = "0.1.0"
-description = "Local code agent harness: agent loop, tools, teams, workflows, and goals in one Python package"
+description = "CodeFox: local coding agent with tools, subagents, workflows, and goals"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -19,13 +19,13 @@ dev = ["pytest>=8.0"]
 tui = ["textual>=8.2.8,<9"]
 
 [project.scripts]
-agent-harness = "agent_harness.frontends.cli:main"
+codefox = "codefox.frontends.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-agent_harness = ["skills/*/*", "skills/*/*/*"]
+codefox = ["skills/*/*", "skills/*/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

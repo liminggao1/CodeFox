@@ -13,8 +13,8 @@
 ## 1. 获取代码
 
 ```sh
-git clone <仓库地址> agent-harness
-cd agent-harness
+git clone <仓库地址> codefox
+cd codefox
 ```
 
 ## 2. 创建并激活环境
@@ -24,8 +24,8 @@ cd agent-harness
 **conda**
 
 ```sh
-conda create -n agent-harness python=3.12 -y
-conda activate agent-harness
+conda create -n codefox python=3.12 -y
+conda activate codefox
 ```
 
 **venv**
@@ -86,22 +86,22 @@ cp .env.example .env
 
 ```sh
 python -m pytest -q                     # 期望全部通过
-python -m agent_harness workflow demo   # 期望输出 status=completed
+python -m codefox workflow demo   # 期望输出 status=completed
 ```
 
 **真实 API 交互：**
 
 ```sh
-python -m agent_harness
+python -m codefox
 ```
 
-如果第 3 步选的是"不安装成包"，运行 `python -m agent_harness` 前要先让源码可见：
+如果第 3 步选的是"不安装成包"，运行 `python -m codefox` 前要先让源码可见：
 
 ```sh
 export PYTHONPATH=src        # Windows PowerShell: $env:PYTHONPATH="src"
 ```
 
-装了包就不需要这一步，也可以用命令 `agent-harness` 代替 `python -m agent_harness`。
+装了包就不需要这一步，也可以用命令 `codefox` 代替 `python -m codefox`。
 
 ## 可选：断点调试
 
@@ -115,7 +115,7 @@ VS Code 的具体配置见 [dev-notes.md](dev-notes.md)。
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| `ModuleNotFoundError: agent_harness` | 第 3 步没做，或纯源码运行时没设 `PYTHONPATH=src` |
+| `ModuleNotFoundError: codefox` | 第 3 步没做，或纯源码运行时没设 `PYTHONPATH=src` |
 | `KeyError: 'MODEL_ID'` | 第 4 步的 `.env` 没建，或没放在项目根目录 |
-| 命令 `agent-harness` 找不到 | 没安装成包；改用 `python -m agent_harness` |
+| 命令 `codefox` 找不到 | 没安装成包；改用 `python -m codefox` |
 | 断点不命中，显示为空心圆 | 见 [dev-notes.md](dev-notes.md) 的踩坑记录 |

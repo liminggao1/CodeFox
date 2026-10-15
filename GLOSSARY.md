@@ -1,4 +1,4 @@
-# agent-harness 术语表
+# codefox 术语表
 
 本文统一项目概念的名称。运行方式、代码布局和实现进度分别见 [README](README.md) 与 [文档索引](docs/README.md)。
 

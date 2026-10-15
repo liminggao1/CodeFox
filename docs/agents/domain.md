@@ -19,7 +19,7 @@
 ├── GLOSSARY.md
 ├── docs/adr/
 │   └── 0001-example-decision.md
-└── src/agent_harness/
+└── src/codefox/
 ```
 
 ## Use the glossary's vocabulary

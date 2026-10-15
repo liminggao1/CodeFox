@@ -2,21 +2,20 @@
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from types import SimpleNamespace
 import asyncio
 import json
 import threading
 
 import pytest
 
-from agent_harness.agents import recovery
-from agent_harness.providers import llm_client
-import agent_harness.agents.goal as goal_module
-import agent_harness.agents.goal_evaluator as evaluator_module
-import agent_harness.core as core
-import agent_harness.runtime.hooks as hooks
-import agent_harness.runtime.scheduler as scheduler
-import agent_harness.workflows.workflow_runtime as workflow_runtime
+from codefox.agents import recovery
+from codefox.providers import llm_client
+import codefox.agents.goal as goal_module
+import codefox.agents.goal_evaluator as evaluator_module
+import codefox.core as core
+import codefox.runtime.hooks as hooks
+import codefox.runtime.scheduler as scheduler
+import codefox.workflows.workflow_runtime as workflow_runtime
 
 
 def responses_tool(arguments="{}", name="read_file", call_id="call-1"):
@@ -36,7 +35,7 @@ def create(client):
 
 
 def test_failed_tool_result_uses_supported_responses_output(monkeypatch):
-    from agent_harness.tools.tool_result import ToolResult
+    from codefox.tools.tool_result import ToolResult
     payloads = []
     client = llm_client.ResponsesClient(api_key="fake")
 
@@ -65,6 +64,13 @@ def test_completed_text_tool_and_usage(monkeypatch):
     assert message.content[1].input == {"path": "你好.txt"}
     assert message.content[2].input == {}
     assert (message.usage.input_tokens, message.usage.output_tokens) == (12, 4)
+    empty = create(stubbed_client(monkeypatch, {"status": "completed", "output": []}))
+    assert empty.content == []
+    for call_id in (None, "", " ", 1):
+        item = dict(responses_tool(call_id=call_id), id="fallback-id")
+        parsed = create(stubbed_client(monkeypatch, {"status": "completed", "output": [item]}))
+        assert parsed.content[0].id == "fallback-id"
+        assert parsed.content[0].input == {}
 
 
 def test_plain_json_text_is_not_executed_as_a_tool(host_factory, monkeypatch):
@@ -81,31 +87,29 @@ def test_plain_json_text_is_not_executed_as_a_tool(host_factory, monkeypatch):
     assert not (core.WORKDIR / "unwanted.txt").exists()
 
 
-@pytest.mark.parametrize("status", ["failed", "cancelled", "queued", "in_progress", None, "unknown", []])
-def test_invalid_status_is_not_normal_completion(monkeypatch, status):
-    with pytest.raises(llm_client.ProtocolResponseError):
-        create(stubbed_client(monkeypatch, {"status": status, "output": []}))
+def test_invalid_arguments_fail_the_entire_tool_batch(monkeypatch):
+    for arguments in [None, '', ' ', '{"path":', '[]', 'true', '1', '"path"', []]:
+        client = stubbed_client(monkeypatch, {"status": "completed", "output": [responses_tool(), responses_tool(arguments)]})
+        with pytest.raises(llm_client.ProtocolResponseError) as error:
+            create(client)
+        assert error.value.tool_name == "read_file"
 
 
-@pytest.mark.parametrize("arguments", [None, "", " ", '{"path":', "[]", "true", "1", '"path"', []])
-def test_invalid_arguments_fail_the_entire_tool_batch(monkeypatch, arguments):
-    client = stubbed_client(monkeypatch, {"status": "completed", "output": [responses_tool(), responses_tool(arguments)]})
-    with pytest.raises(llm_client.ProtocolResponseError) as error:
-        create(client)
-    assert error.value.tool_name == "read_file"
+def test_missing_tool_identity(monkeypatch):
+    for item in [responses_tool(name=None), responses_tool(name=" "),
+                 responses_tool(call_id=None), responses_tool(call_id=" ")]:
+        with pytest.raises(llm_client.ProtocolResponseError):
+            create(stubbed_client(monkeypatch, {"status": "completed", "output": [item]}))
 
 
-@pytest.mark.parametrize("item", [responses_tool(name=None), responses_tool(name=" "), responses_tool(call_id=None), responses_tool(call_id=" ")])
-def test_missing_tool_identity(monkeypatch, item):
-    with pytest.raises(llm_client.ProtocolResponseError):
-        create(stubbed_client(monkeypatch, {"status": "completed", "output": [item]}))
-
-
-def test_valid_id_is_used_when_call_id_is_unusable(monkeypatch):
-    for call_id in (None, "", " ", 1):
-        item = dict(responses_tool(call_id=call_id), id="fallback-id")
-        message = create(stubbed_client(monkeypatch, {"status": "completed", "output": [item]}))
-        assert message.content[0].id == "fallback-id"
+def test_malformed_response_envelopes_are_rejected(monkeypatch):
+    invalid = [None, [], {}, {"status": "incomplete"},
+               {"status": "incomplete", "incomplete_details": {"reason": "content_filter"}}]
+    invalid.extend({"status": status, "output": []}
+                   for status in ("failed", "cancelled", "queued", "in_progress", None, "unknown", []))
+    for envelope in invalid:
+        with pytest.raises(llm_client.ProtocolResponseError):
+            create(stubbed_client(monkeypatch, envelope))
 
 
 def test_incomplete_text_can_continue_but_incomplete_tools_cannot(monkeypatch):
@@ -117,18 +121,6 @@ def test_incomplete_text_can_continue_but_incomplete_tools_cannot(monkeypatch):
     response["output"].append(responses_tool())
     with pytest.raises(llm_client.ProtocolResponseError):
         create(stubbed_client(monkeypatch, response))
-
-
-@pytest.mark.parametrize("response", [None, [], {}, {"status": "incomplete"},
-    {"status": "incomplete", "incomplete_details": {"reason": "content_filter"}}])
-def test_missing_status_or_unknown_incomplete_reason(monkeypatch, response):
-    with pytest.raises(llm_client.ProtocolResponseError):
-        create(stubbed_client(monkeypatch, response))
-
-
-def test_completed_empty_and_zero_argument_calls_are_valid(monkeypatch):
-    assert create(stubbed_client(monkeypatch, {"status": "completed", "output": []})).content == []
-    assert create(stubbed_client(monkeypatch, {"status": "completed", "output": [responses_tool()]})).content[0].input == {}
 
 
 def test_protocol_error_is_not_retried_or_recovered(monkeypatch):
@@ -344,10 +336,15 @@ def test_eof_after_partial_text_is_not_a_completed_message(protocol):
             llm_client.stream_message(live_client(protocol, url), on_text=lambda i, t: parts.append(t),
                                       stopped=lambda: False, model="test", messages=[], max_tokens=100)
         assert parts == ["你好"]
+
+
 @pytest.mark.parametrize("final", [
     {"type": "response.failed", "response": {"status": "failed", "error": {"message": "rejected"}}},
-    {"type": "response.completed", "response": {"status": "completed", "output": [{"type": "function_call", "name": "write_file", "call_id": "tool", "arguments": '{"path":'}]}},
-    {"type": "response.incomplete", "response": {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "output": [{"type": "function_call", "name": "write_file", "call_id": "tool", "arguments": "{}"}]}},
+    {"type": "response.completed", "response": {"status": "completed", "output": [
+        {"type": "function_call", "name": "write_file", "call_id": "tool", "arguments": '{"path":'}]}},
+    {"type": "response.incomplete", "response": {"status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"}, "output": [
+            {"type": "function_call", "name": "write_file", "call_id": "tool", "arguments": "{}"}]}},
     {"type": "error", "message": "model failure"},
 ])
 def test_responses_failed_or_partial_tool_response_is_rejected(final):

@@ -8,10 +8,10 @@ import pytest
 @pytest.fixture
 def live_runtime(tmp_path, monkeypatch):
     """启动使用项目真实配置的共享交互运行时，并隔离会话文件。"""
-    import agent_harness.core as core
-    import agent_harness.host as host
-    from agent_harness.runtime.interactive_runtime import InteractiveRuntime
-    from agent_harness.runtime.session_store import SessionStore
+    import codefox.core as core
+    import codefox.host as host
+    from codefox.runtime.interactive_runtime import InteractiveRuntime
+    from codefox.runtime.session_store import SessionStore
     from support.live import drain_runtime_closed
 
     monkeypatch.chdir(tmp_path)

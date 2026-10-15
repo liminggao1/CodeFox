@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent_harness 的离线端到端调试自检。
+"""codefox 的离线端到端调试自检。
 
 覆盖真实 host 主循环、工具检查、目标 Stop 边界、任务生命周期、
 工作流恢复、Git worktree、子 agent 生命周期和架构图生成，全程不联网。
@@ -86,17 +86,17 @@ def run_git(*args: str, cwd: Path):
 
 def worktree_child() -> int:
     """在独立进程中执行 worktree 流程，此时 cwd 是 Git 仓库。"""
-    import agent_harness.host as host
-    from agent_harness.runtime import tool_execution, permissions
+    import codefox.host as host
+    from codefox.runtime import tool_execution, permissions
 
 
-    import agent_harness.workspace.tasks as tasks
-    import agent_harness.workspace.task_worktrees as task_worktrees
-    import agent_harness.registrations as registrations
-    import agent_harness.core as core
-    import agent_harness.tools.file_tools as file_tools
-    import agent_harness.workflows.workflow_runtime as workflow_runtime
-    import agent_harness.agents.subagent as subagent_runtime
+    import codefox.workspace.tasks as tasks
+    import codefox.workspace.task_worktrees as task_worktrees
+    import codefox.registrations as registrations
+    import codefox.core as core
+    import codefox.tools.file_tools as file_tools
+    import codefox.workflows.workflow_runtime as workflow_runtime
+    import codefox.agents.subagent as subagent_runtime
     repo = Path.cwd()
     permissions.settings_path = lambda: repo / ".runtime" / "debug-settings.json"
     host.initialize_runtime()
@@ -135,20 +135,20 @@ def _main() -> int:
     workdir = Path(tempfile.mkdtemp(prefix="agent-harness-debug-"))
     os.chdir(workdir)
 
-    import agent_harness.host as host
-    from agent_harness.runtime import tool_execution
+    import codefox.host as host
+    from codefox.runtime import tool_execution
 
-    import agent_harness.workspace.tasks as tasks
-    import agent_harness.workspace.task_worktrees as task_worktrees
-    import agent_harness.registrations as registrations
-    import agent_harness.core as core
-    import agent_harness.tools.file_tools as file_tools
-    import agent_harness.workflows.workflow_runtime as workflow_runtime
-    import agent_harness.agents.subagent as subagent_runtime
-    from agent_harness.agents import goal as goal_module
+    import codefox.workspace.tasks as tasks
+    import codefox.workspace.task_worktrees as task_worktrees
+    import codefox.registrations as registrations
+    import codefox.core as core
+    import codefox.tools.file_tools as file_tools
+    import codefox.workflows.workflow_runtime as workflow_runtime
+    import codefox.agents.subagent as subagent_runtime
+    from codefox.agents import goal as goal_module
 
     core.WORKDIR = workdir
-    from agent_harness.runtime import permissions, hooks
+    from codefox.runtime import permissions, hooks
     permissions.settings_path = lambda: workdir / "debug-settings.json"
     host.initialize_runtime()
     permissions.SETTINGS.mode = "no_approval"  # 离线执行用例显式免审批，不读写真实用户设置。
@@ -242,13 +242,13 @@ def _main() -> int:
     def t_workflow():
         env = dict(os.environ, PYTHONPATH=str(SRC_DIR))
         first = subprocess.run(
-            [sys.executable, "-m", "agent_harness", "workflow", "demo"],
+            [sys.executable, "-m", "codefox", "workflow", "demo"],
             cwd=workdir, capture_output=True, text=True, timeout=180, env=env,
         )
         assert first.returncode == 0, first.stderr
         assert "status=completed" in first.stdout, first.stdout
         resumed = subprocess.run(
-            [sys.executable, "-m", "agent_harness", "workflow", "resume"],
+            [sys.executable, "-m", "codefox", "workflow", "resume"],
             cwd=workdir, capture_output=True, text=True, timeout=180, env=env,
         )
         assert resumed.returncode == 0, resumed.stderr
@@ -378,8 +378,8 @@ def _main() -> int:
 
 def main() -> int:
     sys.path.insert(0, str(SRC_DIR))
-    from agent_harness.runtime.lead_context import LeadContext, lead_context_scope
-    from agent_harness.workspace import tasks
+    from codefox.runtime.lead_context import LeadContext, lead_context_scope
+    from codefox.workspace import tasks
     with lead_context_scope(LeadContext(tasks.task_lock)):
         return _main()
 

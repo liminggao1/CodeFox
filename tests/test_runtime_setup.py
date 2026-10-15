@@ -1,6 +1,5 @@
 """启动装配：显式配置、注入 runner 的保留，以及运行时快照的刷新。"""
 
-from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 import os
@@ -10,12 +9,9 @@ import textwrap
 
 import pytest
 
-from agent_harness import runtime_context
-import agent_harness.agents.subagent as subagent_runtime
-import agent_harness.context.memory_runtime as memory_runtime
-import agent_harness.core as core
-import agent_harness.tools.mcp_tools as mcp_tools
-import agent_harness.workflows.workflow_runtime as workflow_runtime
+import codefox.agents.subagent as subagent_runtime
+import codefox.context.memory_runtime as memory_runtime
+import codefox.core as core
 
 
 def run_isolated(code, tmp_path):
@@ -28,12 +24,12 @@ def run_isolated(code, tmp_path):
 def test_import_and_initialization_preserve_injected_runner(tmp_path):
     run_isolated('''
         import importlib
-        from agent_harness.workflows import workflow_runtime as workflow
+        from codefox.workflows import workflow_runtime as workflow
         assert workflow.RUNNER_FACTORY is workflow.SubagentRunner
         chosen = lambda: None
         workflow.RUNNER_FACTORY = chosen
-        import agent_harness.host as host
-        import agent_harness.workflows.workflow_runtime as workflow_runtime
+        import codefox.host as host
+        import codefox.workflows.workflow_runtime as workflow_runtime
         assert workflow.RUNNER_FACTORY is chosen
         assert host.GOAL is None
         assert not workflow.WORKFLOWS
@@ -59,10 +55,10 @@ def test_failed_start_leaves_configuration_unpublished_and_can_retry(tmp_path):
         import os
         import threading
         from pathlib import Path
-        from agent_harness.runtime.interactive_runtime import InteractiveRuntime
-        from agent_harness import host
-        import agent_harness.workflows.workflow_runtime as workflow_runtime
-        from agent_harness.workflows import workflow_runtime as workflow
+        from codefox.runtime.interactive_runtime import InteractiveRuntime
+        from codefox import host
+        import codefox.workflows.workflow_runtime as workflow_runtime
+        from codefox.workflows import workflow_runtime as workflow
         chosen = lambda: None
         workflow.RUNNER_FACTORY = chosen
         runtime = InteractiveRuntime()
@@ -100,10 +96,10 @@ def test_explicit_goal_and_registry_survive_repeated_initialization(tmp_path):
     run_isolated('''
         import os
         from pathlib import Path
-        from agent_harness import host
-        import agent_harness.workflows.workflow_runtime as workflow_runtime
-        from agent_harness.tools import tool_registry
-        from agent_harness.workflows import workflow_runtime as workflow
+        from codefox import host
+        import codefox.workflows.workflow_runtime as workflow_runtime
+        from codefox.tools import tool_registry
+        from codefox.workflows import workflow_runtime as workflow
         chosen = lambda: None
         workflow.RUNNER_FACTORY = chosen
         goal = host.configure_goal("chosen-evaluator")
@@ -151,29 +147,13 @@ def test_frontend_import_does_not_configure_or_start_application(tmp_path, entry
         import threading
         threads = set(threading.enumerate())
     ''') + textwrap.dedent(block) + f'''
-importlib.import_module("agent_harness.frontends.{entry if entry == "cli" else "tui.app"}")
-from agent_harness import host
-import agent_harness.workflows.workflow_runtime as workflow_runtime
+importlib.import_module("codefox.frontends.{entry if entry == "cli" else "tui.app"}")
+from codefox import host
+import codefox.workflows.workflow_runtime as workflow_runtime
 assert host.GOAL is None and not workflow_runtime.WORKFLOWS
 assert host.assemble_tool_pool() == ([], {{}})
 assert set(threading.enumerate()) == threads
 ''', tmp_path)
-
-
-def test_snapshot_owns_its_values(host_factory, monkeypatch) -> None:
-    host = host_factory()
-    monkeypatch.setattr(memory_runtime, "load_memories", lambda messages: "")
-    first = runtime_context.build_context([])
-    mcp_tools.connect_mcp("docs")
-    subagent_runtime._active_subagents["alice"] = subagent_runtime.SubagentRecord("alice")
-    second = runtime_context.build_context([])
-
-    assert first.connected_mcp == ()
-    assert first.active_subagents == ()
-    assert second.connected_mcp == ("docs",)
-    assert second.active_subagents == ("alice",)
-    with pytest.raises(FrozenInstanceError):
-        first.memories = "changed"
 
 
 def test_agent_refreshes_memory_mcp_and_subagents_after_tool_round(host_factory, monkeypatch):

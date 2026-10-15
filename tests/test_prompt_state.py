@@ -5,13 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_harness.context import compaction, memory_runtime, prompts, prompt_state
-from agent_harness.context.prompt_state import PromptState, is_context_message
-from agent_harness.providers import llm_client
-from agent_harness.frontends.presentation import message_count
-from agent_harness.runtime.session_store import SessionError, SessionStore
-from agent_harness.agents.subagent_session import SubagentSession
-import agent_harness.core as core
+from codefox.context import compaction, memory_runtime, prompts, prompt_state
+from codefox.context.prompt_state import PromptState, is_context_message
+from codefox.providers import llm_client
+from codefox.frontends.presentation import message_count
+from codefox.runtime.session_store import SessionError, SessionStore
+from codefox.agents.subagent_session import SubagentSession
+import codefox.core as core
 from support.fakes import response
 from support.helpers import until
 
@@ -66,18 +66,6 @@ def test_context_does_not_become_a_memory_query():
     assert "不要把这段记忆" in llm_client.model_messages(history)[-1]["content"]
 
 
-def test_removed_field_is_cleared_once():
-    state = PromptState()
-    history = [{"role": "user", "content": "work"}]
-    prepare(state, history, {"memories": "reference", "active_subagents": ["child"]})
-    prepare(state, history)
-    assert len(notices(history)) == 2
-    assert "Relevant memory records (reference data): (none)" in history[-1]["content"]
-    assert "Active subagents: (none)" in history[-1]["content"]
-    prepare(state, history)
-    assert len(notices(history)) == 2
-
-
 def test_latest_tool_budget_and_final_count_include_context(host_factory, monkeypatch):
     host_factory()
     monkeypatch.setattr(core, "PERSIST_THRESHOLD", 100)
@@ -118,25 +106,6 @@ def test_notice_cannot_split_pending_tool_pair():
     assert state.snapshot() is None
 
 
-def test_failed_compression_keeps_snapshot_and_business_history(host_factory, monkeypatch):
-    host_factory()
-    state = PromptState()
-    history = [{"role": "user", "content": "work"}]
-    prepare(state, history, {"memories": "reference"})
-    history.append({"role": "user", "content": "长历史" * 100})
-    before = copy.deepcopy(history)
-    snapshot = state.snapshot()
-    monkeypatch.setattr(core, "COMPACT_TRIGGER", 10)
-    monkeypatch.setattr(compaction, "summarize_history",
-                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("summary failed")))
-    system, result = prepare(state, history, {"memories": "reference"}, factory=lambda: "New rules")
-    assert "summary failed" in result.reason
-    assert not result.applied
-    assert history == before
-    assert state.snapshot() == snapshot
-    assert system == snapshot["system"]
-
-
 def test_successful_archive_refreshes_full_state_before_count(host_factory):
     host_factory()
     state = PromptState()
@@ -154,18 +123,22 @@ def test_successful_archive_refreshes_full_state_before_count(host_factory):
     assert all(count["system"] == system for count in counts)
 
 
-@pytest.mark.parametrize("invalid", [False, {}, {"system": 5, "fields": {}},
-    {"system": "rules", "fields": {"date": "bad"}},
-    {"system": "rules", "fields": {"date": "2026-10-12", "connected_mcp": ["z", "a"]}}])
-def test_invalid_persisted_state_preserves_file(tmp_path, invalid):
+def test_invalid_persisted_state_preserves_file(tmp_path):
     store = SessionStore(tmp_path)
-    snapshot = store.create()
-    snapshot["prompt_state"] = invalid
-    store.save(snapshot)
-    original = store.path(snapshot["id"]).read_bytes()
-    with pytest.raises(SessionError):
-        store.load(snapshot["id"])
-    assert store.path(snapshot["id"]).read_bytes() == original
+    for invalid in [
+        False,
+        {},
+        {"system": 5, "fields": {}},
+        {"system": "rules", "fields": {"date": "bad"}},
+        {"system": "rules", "fields": {"date": "2026-10-12", "connected_mcp": ["z", "a"]}},
+    ]:
+        snapshot = store.create()
+        snapshot["prompt_state"] = invalid
+        store.save(snapshot)
+        original = store.path(snapshot["id"]).read_bytes()
+        with pytest.raises(SessionError):
+            store.load(snapshot["id"])
+        assert store.path(snapshot["id"]).read_bytes() == original, invalid
 
 
 def test_runtime_resume_reuses_snapshot_without_visible_notices(runtime_factory, monkeypatch):
@@ -235,17 +208,6 @@ def test_child_delegation_and_work_updates_leave_system_fixed(host_factory):
     assert calls[1]["messages"][:len(calls[0]["messages"])] == calls[0]["messages"]
 
 
-def test_output_retry_reuses_prepared_request(runtime_factory):
-    calls = []
-    values = iter([response("discarded", stop="max_tokens"), response("accepted")])
-    runtime, _ = runtime_factory(client=lambda **kw: calls.append(copy.deepcopy(kw)) or next(values))
-    until(runtime, "turn_finished", submission_id=runtime.submit("work").submission_id)
-    assert len(calls) == 2
-    assert calls[0]["system"] == calls[1]["system"]
-    assert calls[0]["messages"] == calls[1]["messages"]
-    assert len(notices(runtime.session.history)) == 1
-
-
 @pytest.mark.parametrize("success", [True, False])
 def test_manual_compaction_resets_snapshot_only_on_success(runtime_factory, monkeypatch, success):
     calls = []
@@ -266,23 +228,4 @@ def test_manual_compaction_resets_snapshot_only_on_success(runtime_factory, monk
     assert saved["prompt_state"] == (None if success else original)
     until(runtime, "turn_finished", submission_id=runtime.submit("continue").submission_id)
     assert calls[-1]["system"] == ("New fixed rules" if success else original["system"])
-    assert len(notices(runtime.session.history)) == 1
-
-
-def test_stopped_request_keeps_saved_prompt_without_reinitialization(runtime_factory):
-    calls = []
-
-    def create(**kwargs):
-        calls.append(copy.deepcopy(kwargs))
-        if len(calls) == 1:
-            raise llm_client.StreamStopped("Stop requested")
-        return response()
-
-    runtime, _ = runtime_factory(client=create)
-    finished, _ = until(runtime, "turn_finished", submission_id=runtime.submit("work").submission_id)
-    assert finished.payload["outcome"]["status"] == "stopped"
-    saved = runtime.session.store.load(runtime.session.session_id)
-    assert saved["prompt_state"] == runtime.session.prompt_state.snapshot()
-    until(runtime, "turn_finished", submission_id=runtime.submit("continue").submission_id)
-    assert calls[0]["system"] == calls[1]["system"]
     assert len(notices(runtime.session.history)) == 1

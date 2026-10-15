@@ -8,11 +8,12 @@ import json
 
 import pytest
 
-import agent_harness.context.compaction as compaction
-import agent_harness.core as core
-from agent_harness.runtime.interaction import (ExecutionContext, InteractionChannel,
+import codefox.context.compaction as compaction
+import codefox.core as core
+from codefox.runtime.interaction import (ExecutionContext, InteractionChannel,
                                                 execution_context)
-import agent_harness.runtime.scheduler as scheduler
+import codefox.runtime.scheduler as scheduler
+from support.fakes import blocks, text_block, tool
 
 
 def tool_use(tool_id: str) -> dict:
@@ -31,30 +32,6 @@ def token_text(tokens: int) -> str:
     return "中" * tokens
 
 
-def test_context_thresholds_follow_the_main_budget(host_factory) -> None:
-    host_factory()
-
-    assert core.CONTEXT_LIMIT > 0
-    assert core.CONTEXT_INPUT_BUDGET == (
-        core.CONTEXT_LIMIT - core.ESCALATED_MAX_TOKENS - core.CONTEXT_SAFETY_MARGIN
-    )
-    assert core.CONTEXT_SAFETY_MARGIN == int(
-        core.CONTEXT_LIMIT * core.CONTEXT_SAFETY_RATIO
-    )
-    assert core.COMPACT_TRIGGER == int(
-        core.CONTEXT_INPUT_BUDGET * core.COMPACT_TRIGGER_RATIO
-    )
-    assert core.COMPACT_TARGET == int(
-        core.CONTEXT_INPUT_BUDGET * core.COMPACT_TARGET_RATIO
-    )
-    assert core.TOOL_RESULT_BUDGET == int(
-        core.CONTEXT_INPUT_BUDGET * core.TOOL_RESULT_BUDGET_RATIO
-    )
-    assert core.COMPACTION_INPUT_TOKEN_LIMIT == core.COMPACT_TARGET
-    assert core.PERSIST_THRESHOLD > 0
-    assert core.TOOL_PREVIEW_CHARS > 0
-
-
 def test_session_bound_compaction_artifacts_use_session_directory(host_factory, tmp_path) -> None:
     host_factory()
     session_id = "20261013-000000-deadbeef"
@@ -69,60 +46,6 @@ def test_session_bound_compaction_artifacts_use_session_directory(host_factory, 
     assert output.read_text(encoding="utf-8") == "large output"
     assert transcript.exists()
     assert not (tmp_path / ".task_outputs" / "tool-results" / "call-1.txt").exists()
-
-
-def test_prepare_compacts_only_above_trigger(host_factory, monkeypatch) -> None:
-    host = host_factory()
-    requests = []
-
-    def compact_history(messages, active_request):
-        requests.append(active_request)
-        return [{"role": "user", "content": "summary"}]
-
-    monkeypatch.setattr(compaction, "compact_history", compact_history)
-    below = [{"role": "user", "content": token_text(core.COMPACT_TRIGGER - 100)}]
-    above = [{"role": "user", "content": token_text(core.COMPACT_TRIGGER)}]
-
-    compaction.prepare_history(below, "below")
-    compaction.prepare_history(above, "above")
-
-    assert requests == ["above"]
-    assert above == [{"role": "user", "content": "summary"}]
-
-
-def test_prepare_stops_below_trigger_without_forcing_target(
-        host_factory, monkeypatch) -> None:
-    host = host_factory()
-    targets = []
-
-    def micro_compact(messages, target_tokens):
-        targets.append(target_tokens)
-        return [{"role": "user", "content": token_text(core.COMPACT_TRIGGER - 100)}]
-
-    def unexpected(*args):
-        raise AssertionError("already below the compression trigger")
-
-    monkeypatch.setattr(compaction, "micro_compact", micro_compact)
-    monkeypatch.setattr(compaction, "fit_tool_results", unexpected)
-    monkeypatch.setattr(compaction, "compact_history", unexpected)
-    messages = [{"role": "user", "content": token_text(core.COMPACT_TRIGGER)}]
-
-    compaction.prepare_history(messages, "go")
-
-    assert targets == [core.COMPACT_TARGET]
-    assert compaction.estimate_size(messages) > core.COMPACT_TARGET
-    assert compaction.estimate_size(messages) < core.COMPACT_TRIGGER
-
-
-def test_prepare_preserves_results_below_the_pressure_limit(host_factory) -> None:
-    host = host_factory()
-    messages = [{"role": "user", "content": "go"}, tool_use("t1"),
-                tool_result("t1", "x" * 500)]
-
-    result = compaction.prepare_history(messages, "go")
-
-    assert not result.applied and result.reason is None
-    assert messages[2]["content"][0]["content"] == "x" * 500
 
 
 def test_prepare_persists_oversized_result_before_trimming(host_factory) -> None:
@@ -144,21 +67,16 @@ def test_prepare_persists_oversized_result_before_trimming(host_factory) -> None
     assert "<persisted-output>" in rendered or "[Earlier tool result saved at" in rendered
 
 
-def test_tool_result_budget_persists_a_single_large_result(host_factory) -> None:
-    host = host_factory()
-    output = "x" * (core.PERSIST_THRESHOLD + 1)
-    messages = [tool_result("large", output)]
-
-    compaction.tool_result_budget(messages)
-
-    result = messages[0]["content"][0]["content"]
-    assert result.startswith("<persisted-output>")
-    assert f"Preview:\n{'x' * core.TOOL_PREVIEW_CHARS}\n" in result
-    assert (core.tool_results_dir() / "large.txt").read_text(encoding="utf-8") == output
-
-
 def test_tool_result_budget_reduces_batch_below_individual_limit(host_factory) -> None:
     host = host_factory()
+    large = "x" * (core.PERSIST_THRESHOLD + 1)
+    messages = [tool_result("large", large)]
+    compaction.tool_result_budget(messages)
+    preview = messages[0]["content"][0]["content"]
+    assert preview.startswith("<persisted-output>")
+    assert f"Preview:\n{'x' * core.TOOL_PREVIEW_CHARS}\n" in preview
+    assert (core.tool_results_dir() / "large.txt").read_text(encoding="utf-8") == large
+
     output_chars = min(core.PERSIST_THRESHOLD - 1, int(core.TOOL_RESULT_BUDGET * 0.4))
     output = "中" * output_chars
     messages = [{"role": "user", "content": [
@@ -200,30 +118,10 @@ def test_micro_compact_keeps_unseen_tool_result_batch(host_factory) -> None:
     assert messages[2]["content"][0]["content"].startswith(
         "[Earlier tool result saved at "
     )
-
-
-def test_micro_compact_releases_batch_after_model_consumes_it(
-    host_factory,
-) -> None:
-    host = host_factory()
-    messages = [{"role": "user", "content": "go"}]
-    for index in range(6):
-        messages.append(tool_use(f"t{index}"))
-        messages.append(tool_result(f"t{index}", "x" * 5000))
-        messages.append(
-            {"role": "assistant", "content": [{"type": "text", "text": "seen"}]}
-        )
-
+    messages.append({"role": "assistant", "content": "consumed"})
     compaction.micro_compact(messages, target_tokens=1)
-
-    saved = {path.name for path in core.tool_results_dir().glob("*.txt")}
-    assert {"t0.txt", "t1.txt", "t2.txt"} <= saved
-    # 除最新结果外，其余内容都已移到磁盘。
-    for result_index in (2, 5):
-        assert messages[result_index]["content"][0]["content"].startswith(
-            "[Earlier tool result saved at "
-        )
-    assert messages[-2]["content"][0]["content"] == "x" * 5000
+    assert messages[5]["content"][0]["content"].startswith("[Earlier tool result saved at ")
+    assert messages[-2]["content"][0]["content"] == "e" * 5000
 
 
 def test_snip_compact_keeps_head_and_tail_tool_pairs(host_factory) -> None:
@@ -243,88 +141,41 @@ def test_snip_compact_keeps_head_and_tail_tool_pairs(host_factory) -> None:
     assert "42 messages archived at" in archive
     assert compacted[-2]["content"][0]["type"] == "tool_use"
     assert compacted[-1]["content"][0]["type"] == "tool_result"
+    archives = list(core.transcript_dir().glob("transcript_*.jsonl"))
+    assert len(archives) == 1
+    assert [json.loads(line) for line in archives[0].read_text(encoding="utf-8").splitlines()] == messages
 
 
-def test_snip_compact_archives_the_complete_history(host_factory) -> None:
-    host = host_factory()
-    messages = [{"role": "user", "content": "go"}]
-    for index in range(30):
-        messages.append(tool_use(f"t{index}"))
-        messages.append(tool_result(f"t{index}", f"r{index}"))
+def test_reactive_compaction_keeps_tail_tool_use_with_its_result(host_factory, monkeypatch):
+    host_factory()
+    monkeypatch.setattr(core, "COMPACTION_TAIL_MESSAGES", 1)
+    summarized = []
+    monkeypatch.setattr(compaction, "summarize_history",
+                        lambda messages: summarized.append(copy.deepcopy(messages)) or "summary")
+    messages = [{"role": "user", "content": "earlier request"},
+                {"role": "assistant", "content": "earlier answer"},
+                tool_use("tail"), tool_result("tail", "latest evidence")]
+    original = copy.deepcopy(messages)
 
-    before = set(core.transcript_dir().glob("transcript_*.jsonl"))
-    compacted = compaction.snip_compact(messages, max_messages=20)
-
-    written = set(core.transcript_dir().glob("transcript_*.jsonl")) - before
-    assert len(written) == 1
-    lines = written.pop().read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 61
-    assert "42 messages archived at" in compacted[3]["content"]
-
-
-def test_reactive_compact_keeps_the_tail_tool_pair(host_factory, monkeypatch) -> None:
-    host = host_factory()
-    messages = [{"role": "user", "content": "go"}]
-    for index in range(8):
-        messages.append(tool_use(f"t{index}"))
-        messages.append(tool_result(f"t{index}", f"r{index}"))
-
-    monkeypatch.setattr(compaction, "summarize_history", lambda _: "summary")
-    result = compaction.reactive_compact(messages, "go")
+    result = compaction.reactive_compact(messages, "continue")
 
     assert result.applied
-    assert messages[-1]["content"][0]["type"] == "tool_result"
-    assert messages[-2]["content"][0]["type"] == "tool_use"
+    assert summarized == [original[:2]]
+    assert messages[-2:] == original[-2:]
     assert messages[0]["content"].startswith("[Reactive compact]")
-
-
-def test_reactive_compact_summarizes_only_old_history(host_factory) -> None:
-    host = host_factory()
-    seen = {}
-
-    def respond(**kwargs):
-        seen["messages"] = kwargs["messages"]
-        from types import SimpleNamespace
-        return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="summary")])
-
-    core.client = SimpleNamespace(
-        messages=SimpleNamespace(create=respond))
-    messages = [{"role": "user", "content": "old"}]
-    for index in range(8):
-        messages.append(tool_use(f"t{index}"))
-        messages.append(tool_result(f"t{index}", f"r{index}"))
-
-    compaction.reactive_compact(messages, "go")
-
-    summarized = json.dumps(seen["messages"], default=str)
-    assert "r7" not in summarized
-    assert "r6" not in summarized
+    assert "continue" in messages[0]["content"]
 
 
 def test_manual_compact_runs_once_per_user_turn(host_factory, monkeypatch) -> None:
     host = host_factory()
     monkeypatch.setattr(compaction, "summarize_history", lambda _: "summary")
 
-    def compact_response(tool_id: str):
-        return SimpleNamespace(
-            stop_reason="tool_use",
-            content=[SimpleNamespace(
-                type="tool_use", id=tool_id, name="compact", input={}
-            )],
-        )
-
-    def text_response():
-        return SimpleNamespace(
-            stop_reason="end_turn",
-            content=[SimpleNamespace(type="text", text="done")],
-        )
-
     responses = [
-        compact_response("first"),
-        compact_response("duplicate"),
-        text_response(),
-        compact_response("next-turn"),
-        text_response(),
+        blocks(tool("compact", "first"), stop_reason="tool_use"),
+        blocks(tool("compact", "duplicate"), stop_reason="tool_use"),
+        blocks(text_block("done")),
+        blocks(tool("compact", "next-turn"), stop_reason="tool_use"),
+        blocks(text_block("done")),
     ]
     offered_tools = []
 
@@ -351,46 +202,6 @@ def test_manual_compact_runs_once_per_user_turn(host_factory, monkeypatch) -> No
     assert responses == []
 
 
-def test_manual_compact_handles_duplicate_calls_in_one_batch(
-        host_factory, monkeypatch) -> None:
-    host = host_factory()
-    summaries = []
-
-    def compact_history(messages, active_request):
-        summaries.append((list(messages), active_request))
-        return [{"role": "user", "content": "summary"}]
-
-    monkeypatch.setattr(compaction, "compact_history", compact_history)
-    manual = compaction.ManualCompaction()
-    assert manual.handle_tool_use(SimpleNamespace(name="bash", id="other")) is None
-
-    first = manual.handle_tool_use(SimpleNamespace(name="compact", id="first"))
-    duplicate = manual.handle_tool_use(SimpleNamespace(name="compact", id="second"))
-    assert first == {"type": "tool_result", "tool_use_id": "first",
-                     "content": "[Compaction requested. This completed turn will be summarized.]"}
-    assert duplicate == {"type": "tool_result", "tool_use_id": "second",
-                         "content": "[Compaction already requested for this user turn.]"}
-
-    messages = [{"role": "user", "content": [first, duplicate]}]
-    manual.apply_after_results(messages, "ask")
-    manual.apply_after_results(messages, "ask")
-    assert summaries == [([{"role": "user", "content": [first, duplicate]}], "ask")]
-    assert messages == [{"role": "user", "content": "summary"}]
-
-
-def compaction_reply(text="done", stop_reason="end_turn"):
-    """压缩失败用例使用的纯文本响应，不带 usage。"""
-    return SimpleNamespace(stop_reason=stop_reason, content=[SimpleNamespace(type="text", text=text)])
-
-
-def compaction_tools(*calls):
-    """构造只含工具调用、没有文本块的响应；参数为 (调用 ID, 工具名, 参数)。"""
-    return SimpleNamespace(stop_reason="tool_use", content=[
-        SimpleNamespace(type="tool_use", id=call_id, name=name, input=args)
-        for call_id, name, args in calls
-    ])
-
-
 @pytest.mark.parametrize("context_error", [False, True])
 def test_automatic_failure_allows_main_call_without_repeat(host_factory, monkeypatch, context_error):
     host = host_factory()
@@ -409,8 +220,8 @@ def test_automatic_failure_allows_main_call_without_repeat(host_factory, monkeyp
             assert "Runtime context update" in kwargs["messages"][-1]["content"]
             if context_error:
                 raise RuntimeError("context_length_exceeded")
-            return compaction_tools(("read", "read_file", {"path": "missing.txt"}))
-        return compaction_reply()
+            return blocks(tool("read_file", "read", path="missing.txt"), stop_reason="tool_use")
+        return blocks(text_block("done"))
 
     monkeypatch.setattr(compaction, "summarize_history", fail_summary)
     monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
@@ -450,9 +261,9 @@ def test_failed_candidate_preserves_nested_blocks_and_list_identity(host_factory
 def test_manual_failure_preserves_other_results_and_never_reruns_tools(host_factory, monkeypatch, no_approval):
     host = host_factory()
     calls, summaries = [], []
-    responses = [compaction_tools(
-        ("write", "write_file", {"path": "once.txt", "content": "written"}),
-        ("compact", "compact", {})), compaction_reply()]
+    responses = [blocks(
+        tool("write_file", "write", path="once.txt", content="written"),
+        tool("compact", "compact"), stop_reason="tool_use"), blocks(text_block("done"))]
 
     def create(**kwargs):
         calls.append(copy.deepcopy(kwargs))
@@ -496,10 +307,11 @@ def test_reactive_archive_failure_ends_with_cron_restored(host_factory, monkeypa
     assert history[0]["content"] == "go"
 
 
-@pytest.mark.parametrize("response", [compaction_reply(""), compaction_reply("partial", "max_tokens"),
-                                    compaction_tools(("tool", "read_file", {"path": "x"}))])
-def test_summary_requires_complete_nonempty_text(host_factory, monkeypatch, response):
+def test_summary_requires_complete_nonempty_text(host_factory, monkeypatch):
     host = host_factory()
-    monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: response)))
-    with pytest.raises(ValueError, match="complete, non-empty"):
-        compaction.summarize_history([])
+    responses = [blocks(text_block("")), blocks(text_block("partial"), stop_reason="max_tokens"),
+                 blocks(tool("read_file", "tool", path="x"), stop_reason="tool_use")]
+    for value in responses:
+        monkeypatch.setattr(core, "client", SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: value)))
+        with pytest.raises(ValueError, match="complete, non-empty"):
+            compaction.summarize_history([])

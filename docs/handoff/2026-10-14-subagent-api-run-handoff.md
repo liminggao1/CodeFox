@@ -43,7 +43,7 @@ ID 通信与协议、查询等待及深拷贝、停止通知、归档路径拦�
 在现有 `TurnEngine` 内统一 Lead、once 和 persistent 工作单元的模型—工具循环。
 `LeadTurn` 提供 Lead 恢复、cron、Goal/memory 和收尾策略；`SubagentSession` 提供独立配置、
 预算、白名单、计划门禁和上下文恢复，`run()` 执行完整委派。persistent 的信箱、空闲与交付仍在生命周期外层。
-模块职责以 [源码 agents 说明](../../src/agent_harness/agents/README.md) 为准，跨模块规则见
+模块职责以 [源码 agents 说明](../../src/codefox/agents/README.md) 为准，跨模块规则见
 [仓库事实第 8 节](../architecture/facts.md#8-运行期职责深化2026-10-10)。
 
 新增回归覆盖三类 agent 的历史顺序、拒绝和工具 Hook 异常配对、结果事件只发布一次、
@@ -93,8 +93,8 @@ tests/live/test_real_api.py::test_streaming_bounded_read_only_subagent_audit
 ```
 
 此初版结果来自能力边界复核修正前。
-persistent 的真实通信和关闭、真实预算耗尽、TUI 人工交互及 memory 抽取仍未覆盖，
-见 [待验证事项](../plans/2026-10-11-01待验证事项.md)。
+persistent 的真实通信和关闭、真实预算耗尽、TUI 人工交互及 memory 抽取仍未覆盖。
+后续真实 API 测试入口见 [tests/live/README.md](../../tests/live/README.md)。
 
 ## 网络故障证据与限制
 

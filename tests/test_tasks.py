@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from agent_harness import registrations
+from codefox import registrations
 
-import agent_harness.workspace.tasks as tasks
-import agent_harness.tools.shared_tools as shared_tools
+import codefox.workspace.tasks as tasks
+import codefox.tools.shared_tools as shared_tools
 
-
-import json
 
 import pytest
 
@@ -33,6 +31,8 @@ def test_dependencies_gate_claim_and_completion_checks_owner(host_factory) -> No
         tasks.complete_task(api.id, owner="other")
     assert "Completed" in tasks.complete_task(api.id)
     assert tasks.load_task(api.id).status == "completed"
+    assert tasks.release_completed_assignment("agent")
+    assert shared_tools.run_complete_task(api.id).content.startswith("Error:")
 
 
 def test_dependencies_are_added_after_create_returns_runtime_ids(host_factory) -> None:
@@ -83,23 +83,6 @@ def test_create_retries_instead_of_overwriting_an_existing_id(
     assert [task.subject for task in tasks.list_tasks()] == ["second", "first"]
 
 
-def test_update_rejects_invalid_graph_changes_without_partial_mutation(
-    host_factory,
-) -> None:
-    host = host_factory()
-    dependency = tasks.create_task("create schema")
-    target = tasks.create_task("write API")
-
-    missing = registrations.run_update_task(
-        target.id, [dependency.id, "task_00000000"]
-    ).content
-    self_dependency = registrations.run_update_task(target.id, [target.id]).content
-
-    assert missing == "Error: Dependency not found: task_00000000"
-    assert self_dependency == "Error: Task cannot depend on itself"
-    assert tasks.load_task(target.id).blockedBy == []
-
-
 def test_update_is_idempotent_and_rejects_cycles_or_started_tasks(
     host_factory,
 ) -> None:
@@ -116,28 +99,15 @@ def test_update_is_idempotent_and_rejects_cycles_or_started_tasks(
     assert cycle.startswith("Error: Dependency cycle detected")
     assert tasks.load_task(first.id).blockedBy == []
     assert tasks.load_task(second.id).blockedBy == [first.id]
+    invalid = registrations.run_update_task(third.id, [first.id, "task_00000000"]).content
+    assert invalid == "Error: Dependency not found: task_00000000"
+    assert tasks.load_task(third.id).blockedBy == [second.id]
+    assert registrations.run_update_task(first.id, [first.id]).content == "Error: Task cannot depend on itself"
+    assert tasks.load_task(first.id).blockedBy == []
 
     assert "Claimed" in tasks.claim_task(first.id)
     started = registrations.run_update_task(first.id, [second.id]).content
     assert "only be updated while pending and unowned" in started
-
-
-def test_task_record_round_trips_through_json(host_factory) -> None:
-    host = host_factory()
-    task = tasks.create_task("Round trip", "details")
-
-    payload = json.loads(tasks.get_task_json(task.id))
-
-    assert payload == {
-        "id": task.id,
-        "subject": "Round trip",
-        "description": "details",
-        "status": "pending",
-        "owner": None,
-        "blockedBy": [],
-        "worktree": None,
-        "session_id": None,
-    }
 
 
 def test_task_store_rejects_a_symlink_outside_the_workspace(
@@ -149,7 +119,7 @@ def test_task_store_rejects_a_symlink_outside_the_workspace(
     (tmp_path / ".tasks").symlink_to(outside, target_is_directory=True)
 
     # 符号链接 .tasks 指向工作区外，路径检查应拒绝写入，避免越过启动目录。
-    from agent_harness.workspace import tasks
+    from codefox.workspace import tasks
 
     with pytest.raises(ValueError, match="Invalid task ID"):
         tasks.create_task("unsafe")

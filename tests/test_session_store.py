@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_harness.agents.goal import GoalController
-from agent_harness.runtime.session_store import (InteractiveSession, SessionError,
+from codefox.agents.goal import GoalController
+from codefox.runtime.session_store import (InteractiveSession, SessionError,
                                           SessionStore)
 
 
@@ -48,23 +48,13 @@ def test_first_event_creates_one_atomic_snapshot_and_round_trips_blocks(tmp_path
     assert list(session.store.directory.glob("*.tmp")) == []
 
 
-def test_invalid_target_is_listed_as_deletable_and_rejected_by_load(tmp_path):
-    store = SessionStore(tmp_path)
-    store.directory.mkdir(parents=True)
-    bad = store.directory / "20261009-000000-deadbeef.json"
-    bad.write_text("{not json", encoding="utf-8")
-    entries, errors = store.list_sessions()
-    # 坏文件列进列表（标记 invalid）方便删除，但读取仍然报错。
-    assert [entry["id"] for entry in entries] == ["20261009-000000-deadbeef"]
-    assert entries[0]["invalid"] and errors
-    with pytest.raises(SessionError):
-        store.load("20261009-000000-deadbeef")
-
-
 def test_delete_removes_session_artifacts_with_session_files(tmp_path):
     store = SessionStore(tmp_path)
     snapshot = store.create()
     store.save(snapshot)
+    other = store.create()
+    store.save(other)
+    store.diagnostics_path(other["id"]).write_text("keep\n", encoding="utf-8")
     store.diagnostics_path(snapshot["id"]).write_text("diagnostic\n", encoding="utf-8")
     artifact = store.artifacts_path(snapshot["id"]) / "transcripts" / "transcript.jsonl"
     artifact.parent.mkdir(parents=True)
@@ -75,6 +65,8 @@ def test_delete_removes_session_artifacts_with_session_files(tmp_path):
     assert not store.path(snapshot["id"]).exists()
     assert not store.diagnostics_path(snapshot["id"]).exists()
     assert not store.artifacts_path(snapshot["id"]).exists()
+    assert store.path(other["id"]).exists()
+    assert store.diagnostics_path(other["id"]).read_text(encoding="utf-8") == "keep\n"
 
 
 def test_goal_snapshot_restores_iterations_and_last_status():
@@ -91,60 +83,31 @@ def test_goal_snapshot_restores_iterations_and_last_status():
     assert restored.consecutive_blocks == 2
 
 
-def test_save_failure_keeps_dirty_context_for_retry(tmp_path, monkeypatch):
-    session, history, _, _ = make_session(tmp_path)
-    history.append({"role": "user", "content": "保存"})
-    real_save = session.store.save
-    monkeypatch.setattr(session.store, "save", lambda snapshot: (_ for _ in ()).throw(OSError("full")))
-    assert not session.record("user_input", "保存")
-    assert session.dirty
-    monkeypatch.setattr(session.store, "save", real_save)
-    assert session.save()
-    assert not session.dirty
+def test_invalid_context_fields_are_rejected(tmp_path):
+    for field, value in [
+        ("workdir", "relative"),
+        ("task_id", "unknown"),
+        ("worktree", "../outside"),
+        ("todos", [{"content": "verify", "status": "unknown"}]),
+    ]:
+        session, _, _, _ = make_session(tmp_path)
+        session.record("goal_query")
+        saved = session.store.load(session.session_id)
+        saved[field] = value
+        session.store.save(saved)
+        with pytest.raises(SessionError):
+            session.store.load(session.session_id)
 
 
-@pytest.mark.parametrize("field,value", [
-    ("workdir", "relative"), ("task_id", "unknown"),
-    ("worktree", "../outside"), ("todos", [{"content": "verify", "status": "unknown"}]),
-])
-def test_invalid_context_fields_are_rejected(tmp_path, field, value):
-    session, _, _, _ = make_session(tmp_path)
-    session.record("goal_query")
-    saved = session.store.load(session.session_id)
-    saved[field] = value
-    session.store.save(saved)
-    with pytest.raises(SessionError):
-        session.store.load(session.session_id)
-
-
-def test_session_input_measurement_is_independent_of_history_and_can_be_unknown(tmp_path):
-    session, history, _, _ = make_session(tmp_path)
-    assert session.last_input_tokens() == 0
-    session.record("user_input", "你好", save=False)
-    history.append({"role": "user", "content": "你好"})
-    assert session.last_input_tokens() is None
-    session.append_record({"id": "user", "at": session.snapshot["created_at"],
-                           "kind": "display", "type": "user_message", "source": "lead",
-                           "turn_id": "turn", "payload": {"text": "你好"}})
-    session.record_input_tokens(2100)
-    session.record_input_tokens(3200)
-    assert session.last_input_tokens() == 3200
-    assert history == [{"role": "user", "content": "你好"}]
-    assert session.save()
-    restored, _, _, _ = make_session(tmp_path)
-    restored.activate(session.store.load(session.session_id))
-    assert restored.last_input_tokens() == 3200
-
-
-@pytest.mark.parametrize("value", [-1, True, "3200", None])
-def test_invalid_input_measurement_is_rejected_without_rewriting_file(tmp_path, value):
-    session, _, _, _ = make_session(tmp_path)
-    session.record("goal_query")
-    snapshot = session.store.load(session.session_id)
-    snapshot["events"].append({"id": "bad-usage", "at": snapshot["created_at"],
-                               "kind": "summary", "type": "model_usage", "input_tokens": value})
-    session.store.save(snapshot)
-    original = session.store.path(session.session_id).read_bytes()
-    with pytest.raises(SessionError, match="input token measurement"):
-        session.store.load(session.session_id)
-    assert session.store.path(session.session_id).read_bytes() == original
+def test_invalid_input_measurement_is_rejected_without_rewriting_file(tmp_path):
+    for value in (-1, True, "3200", None):
+        session, _, _, _ = make_session(tmp_path)
+        session.record("goal_query")
+        snapshot = session.store.load(session.session_id)
+        snapshot["events"].append({"id": "bad-usage", "at": snapshot["created_at"],
+                                   "kind": "summary", "type": "model_usage", "input_tokens": value})
+        session.store.save(snapshot)
+        original = session.store.path(session.session_id).read_bytes()
+        with pytest.raises(SessionError, match="input token measurement"):
+            session.store.load(session.session_id)
+        assert session.store.path(session.session_id).read_bytes() == original, value

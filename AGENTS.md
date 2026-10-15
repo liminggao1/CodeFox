@@ -3,7 +3,7 @@
 - 本项目在 WSL2 的 conda 环境 `learncc` 中运行（`/home/gaogao/miniconda3/envs/learncc`）。
 - WSL 项目路径：`/mnt/d/01dpan/01project/life/learncc/agent-harness`。
 - 不在 Windows Python 环境安装依赖或跑测试；`learncc` 不可用时报告问题，不静默切换。
-- 运行与测试走源码，不依赖安装：CLI 用 `PYTHONPATH=src ... python -m agent_harness`，pytest 由
+- 运行与测试走源码，不依赖安装：CLI 用 `PYTHONPATH=src ... python -m codefox`，pytest 由
   `tests/conftest.py` 注入 `src`。命令见 `README.md`；通用安装步骤见 `note/env-setup.md`。
 - 断点调试用 VS Code 的 **Remote-WSL 窗口**（文件仍在 D:，执行在 WSL），配置在 `.vscode/`，
   见 `note/dev-notes.md`。
@@ -15,7 +15,7 @@
 - 运行时状态（`.tasks` / `.memory` / `.runtime` / `.mailboxes` / `.worktrees` / `.transcripts`
   / `.task_outputs` / `.scheduled_tasks.json`）跟随**当前会话的启动目录**；`/resume` 可切回原目录。
   会话上下文统一存放在 `~/.agent-harness/sessions/`；`skills/` 随包，位于
-  `src/agent_harness/skills`。
+  `src/codefox/skills`。
 - 代码保持现有风格与分段注释：不做异步化重构，不引入 linter/formatter。
 - 重构时保留原有注释，并随实现迁移到对应模块；按新职责更新说明，不通过删除注释缩短代码。
 
