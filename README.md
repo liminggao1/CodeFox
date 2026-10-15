@@ -1,8 +1,17 @@
-# CodeFox
+<p align="center">
+  <img src="assets/logo/1F98A.svg" alt="CodeFox 狐狸标识" width="112">
+</p>
 
-本地代码 Agent 运行环境，提供命令行交互和 CodeFox 终端工作台（Textual TUI）。
+<h1 align="center">CodeFox</h1>
 
-在项目目录中用自然语言描述任务，让 Agent 阅读代码、修改文件、运行命令，也可以把独立工作交给子 agent。工具在本机执行，模型通过你配置的 API 调用。
+<p align="center">本地运行的代码 Agent 环境，提供命令行交互和终端工作台。</p>
+<p align="center">让 Agent 阅读代码、修改文件、执行命令，也可以把独立工作交给子 agent。</p>
+<p align="center">
+  <a href="#主要功能">主要功能</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#常用命令">常用命令</a> ·
+  <a href="#仓库导航">仓库导航</a>
+</p>
 
 ## 主要功能
 
@@ -91,6 +100,12 @@ codefox tui
 
 TUI 中 Enter 发送、Shift+Enter 换行，点击“停止”或按 Ctrl+C 停止当前回合，Ctrl+D 保存并退出。
 工具详情可以展开查看，顶部入口用于管理历史会话、查看会话状态和调整设置。
+
+### 界面预览
+
+<p align="center">
+  <img src="assets/logo/ui.png" alt="CodeFox 终端工作台界面预览" width="900">
+</p>
 
 默认权限模式允许工作区内的文件读写；需要确认的 Shell 命令、目录外文件访问和 MCP 操作会请求批准。
 CLI 显示 `Allow? [y/N]`，TUI 显示审批卡。
