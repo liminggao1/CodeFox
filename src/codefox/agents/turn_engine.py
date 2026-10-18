@@ -335,19 +335,25 @@ class TurnEngine:
             self.append({"role": "assistant", "content": response.content})
             # -- 由调用方决定当前工作是否允许结束 --
             if not message_content.has_tool_use(response.content):
+                # 模型输出不含工具调用
                 if turn.stopped():
+                    # turn标记为已停止（外部触发终止：超时、手动停止、任务中止）
                     return self._finish("stopped", response=response)
                 if (self.callbacks.before_complete is not None
                         and self.callbacks.before_complete()):
+                    # 存在完成前回调钩子，并且钩子返回True：不结束，继续循环
                     continue
                 feedback = turn.complete()
+                # 执行turn的complete逻辑，标记本轮任务尝试完成，生成反馈信息
                 if turn.stopped():
+                    # complete过程中turn被置为停止，中止任务
                     return self._finish("stopped", response=response)
                 if feedback is not None:
+                    # complete返回了反馈文本：把反馈作为user消息追加进对话，继续循环
                     self.append({"role": "user", "content": feedback})
                     continue
+                # 没有停止、没有额外反馈，任务正常结束
                 return self._finish("completed", response=response)
-
             # -- 逐项结算工具，再将完整结果批次交给模型 --
             # 当前阶段由 TurnEngine 管理，单工具入口只负责执行和结算。
             self._set_phase(TurnPhase.EXECUTING_TOOLS)

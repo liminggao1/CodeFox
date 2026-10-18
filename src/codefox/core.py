@@ -109,7 +109,7 @@ CRON_POLL_SECONDS = 1               # 定时任务检查间隔（秒）
 
 # ---------- 工具执行参数 ----------
 BASH_TIMEOUT_SECONDS = 120          # 同步及后台 shell 命令超时（秒）
-BASH_OUTPUT_CHAR_LIMIT = 500000      # shell 返回结果的字符上限
+BASH_OUTPUT_CHAR_LIMIT = 50000      # shell 返回结果的字符上限
 GIT_TIMEOUT_SECONDS = 30            # Git 命令超时（秒）
 GIT_OUTPUT_CHAR_LIMIT = 50000        # Git 工具返回结果的字符上限
 GLOB_RESULT_LIMIT = 200             # glob 最多展示的路径数

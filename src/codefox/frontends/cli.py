@@ -227,24 +227,43 @@ def run_cli():
 
 
 def main(argv: list[str] | None = None):
+    """程序主入口，根据命令行参数分发不同运行模式。
+    Args:
+        argv: 外部传入的命令行参数列表；为None时自动读取sys.argv
+    """
+    # 如果外部没有传入参数，则从系统命令行读取，跳过程序名本身(sys.argv[0])
     argv = sys.argv[1:] if argv is None else argv
+    # 命令行参数第一个是 workflow：启动工作流子代理演示模式
     if argv and argv[0] == "workflow":
+        # 注册所有预定义工作流
         workflow_demo.register_workflows()
+        # 替换runner工厂，使用Demo模拟客户端 + 核心模型配置，创建子代理运行器
         workflow_runtime.RUNNER_FACTORY = lambda: workflow_runtime.SubagentRunner(
             workflow_demo.DemoModelClient(), core.MODEL)
+        # 异步执行工作流demo，传入剩余命令行参数
         asyncio.run(workflow_demo.run_demo(argv[1:]))
+
+    # 命令行参数为 ["tui"]：启动Textual交互式终端UI界面
     elif argv == ["tui"]:
         try:
+            # 导入TUI应用类
             from .tui.app import HarnessApp
         except ModuleNotFoundError as exc:
+            # 缺失模块异常：如果不是textual包缺失，原样抛出
             if exc.name != "textual":
                 raise
+            # 是textual缺失，友好提示安装版本，直接退出程序
             raise SystemExit('Textual is required: python -m pip install "textual>=8.2.8,<9"') from None
+        # 启动TUI应用，阻塞运行
         result = HarnessApp().run()
+        # 如果TUI返回非空结果，将该结果作为退出码退出进程
         if result:
             raise SystemExit(result)
+
+    # 其他参数 / 无参数：进入默认命令行CLI模式
     else:
         run_cli()
+
 
 
 if __name__ == "__main__":

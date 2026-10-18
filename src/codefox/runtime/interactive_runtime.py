@@ -247,37 +247,64 @@ class InteractiveRuntime:
         return saved
 
     def _run(self):
+        """运行时后台线程主函数，负责持续轮询、接收事件、调度Agent任务回合(turn)。
+        这是Runtime后台线程入口，启动后循环等待唤醒信号，分发前台任务/后台任务，执行turn。
+        """
         try:
+            # 获取全局agent锁，同时绑定当前运行时上下文，隔离交互环境
             with host.agent_lock, interaction.execution_context(self._context()):
+                # 激活主代理上下文，初始化工作树、待办todo为空初始状态
                 self.lead_context.activate(None, {"worktree": None, "todos": []})
+                # 激活主代理的任务分配
                 tasks.activate_lead_assignment()
+                # 启动调度器后台服务（定时任务、事件监听等）
                 scheduler.start_runtime_services()
+                # 消费主代理收件箱消息（子代理发来的消息、事件），关闭协议路由
                 subagent_runtime.consume_lead_inbox(route_protocol=False)
+                # 对当前会话状态打快照，保存初始检查点
                 self._snapshot(self._context())
+            # 无限事件循环：等待唤醒，处理任务，直到收到关闭信号
             while True:
+                # 阻塞等待唤醒信号，超时时间为轮询间隔；可以被事件提前唤醒
                 self._wake.wait(core.ASYNC_EVENT_POLL_SECONDS)
+                # 清除唤醒标记，准备下一轮等待
                 self._wake.clear()
+                # 判断后台任务是否就绪（上下文压缩、记忆等后台任务）
                 background_ready = self._background_ready()
+
+                # 生命周期锁，保护运行时状态，防止并发修改
                 with self._lifecycle:
+                    # 如果标记为关闭：放弃所有待执行任务，跳出循环
                     if self._closing:
                         self.turns.abandon_pending()
                         break
+                    # 取出待处理任务（用户提交的前台turn任务）
                     work = self.turns.take_pending()
+                    # 没有前台任务，但后台任务就绪，并且成功预留后台任务槽位
                     if work is None and background_ready and self.turns.reserve_background():
+                        # 构造后台任务：类型background，使用当前会话请求
                         work = (None, "background", self.session.active_request)
+
+                # 如果拿到任务（前台/后台），执行本轮turn
                 if work is not None:
                     self.turns.run(*work)
+                # 无任何任务：执行轮询式检查点保存
                 else:
                     with host.agent_lock, interaction.execution_context(self._context()):
                         self._checkpoint(poll=True)
+
+        # 捕获整个运行时循环的顶层异常
         except Exception as exc:
             context = self._context()
             error = f"{type(exc).__name__}: {exc}"
+            # 向外发布错误日志、系统错误事件
             context.publish("log", text=error, category="runtime_error")
             context.publish("system_error", error=error)
             context.publish("runtime_error", error=error)
+            # 发生异常，关闭整个运行时
             self.close()
         finally:
+            # 无论正常退出还是异常崩溃，最终执行资源清理、关闭服务
             self._shutdown()
 
     # -- 会话切换已移入 session_switch.SessionSwitch；这里只提供它的窄回调。 --

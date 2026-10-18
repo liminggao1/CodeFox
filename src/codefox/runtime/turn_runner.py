@@ -192,6 +192,7 @@ class TurnRunner:
                 with interaction.execution_context(context):
                     self._session.finish_pending_tools()
                     if kind == "background":
+                        #后台回合回填消息，避免重复消费同一批损坏输入。
                         inbox = subagent_runtime.consume_lead_inbox(route_protocol=True)
                         if inbox:
                             self._session.history.append({"role": "user", "content": subagent_runtime.format_subagent_events(inbox)})
@@ -200,6 +201,7 @@ class TurnRunner:
                             text = "\n".join(f"Run scheduled task: {prompt}" for prompt in prompts)
                         self._record("background_notification", text, save=False)
                     else:
+                        #追加用户消息
                         self._session.history.append({"role": "user", "content": text})
                         self._record("user_input", text, save=False)
                     # 首条用户消息可能创建了持久会话 ID。

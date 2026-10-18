@@ -242,25 +242,38 @@ def evaluate_goal(messages: list):
 # Agent 主循环入口：实际执行顺序由 TurnEngine 拥有，host 只负责装配宿主回调。
 def agent_loop(history: list, active_request: str, save_context=None, on_usage=None, *, prompt_state=None):
     """兼容入口：装配宿主回调并执行一轮 TurnEngine。
-
     保留历史调用方使用的参数和返回值；共享 ``TurnEngine`` 负责循环与历史顺序，
     ``LeadTurn`` 提供 Lead 的模型恢复、Goal/memory 和定时任务收尾策略。
+    Args:
+        history: 完整对话消息历史列表，会在本轮agent执行中原地更新
+        active_request: 当前用户原始任务请求文本
+        save_context: 检查点回调函数，触发时保存会话快照（持久化）
+        on_usage: 用量统计回调，接收模型token消耗数据
+        prompt_state: 提示词状态对象，存放上下文压缩、提示词缓存相关状态
+    Returns:
+        TurnOutcome: 本轮执行结束结果对象，包含本轮是否完成、错误信息等
     """
+    # 实例化 LeadTurn：本轮主代理的会话管理对象
+    # 负责本轮的目标判断、记忆写入、模型异常恢复、工具结果管理
     turn = LeadTurn(
         history, save_context, prompt_state,
         evaluate_goal=evaluate_goal,
         remember_after_turn=remember_after_turn,
+        # 匿名lambda：读取全局GOAL对象，获取当前任务完成判断条件
         goal_condition=lambda: GOAL.active.condition if GOAL is not None and GOAL.active else "",
     )
+    # 组装回调集合 TurnCallbacks：把所有需要的钩子函数打包传给TurnEngine
+    # TurnEngine 在运行到不同阶段时，就会调用这里注册好的函数
     callbacks = TurnCallbacks(
         turn=turn,
-        assemble_tool_pool=assemble_tool_pool,
-        build_context=lambda history, request: (runtime_context.build_context(history).prompt_values(), request),
-        system_factory=prompts.assemble_system_prompt,
-        call_llm=lambda prepared: call_llm(prepared, turn.recovery),
-        execute_tool=turn.execute_tool,
-        build_user_content=build_user_content,
+        assemble_tool_pool=assemble_tool_pool, # 回调：组装本轮可用工具集合
+        build_context=lambda history, request: (runtime_context.build_context(history).prompt_values(), request), # 回调：把消息历史打包成模型prompt上下文
+        system_factory=prompts.assemble_system_prompt, # 回调：生成系统提示词
+        call_llm=lambda prepared: call_llm(prepared, turn.recovery), # 回调：调用大模型API，附带异常恢复逻辑
+        execute_tool=turn.execute_tool, # 回调：执行工具调用逻辑
+        build_user_content=build_user_content, # 回调：组装用户侧消息内容
     )
+    # 创建TurnEngine（真正的Agent循环调度器），传入回调，启动一轮Agent执行
     return TurnEngine(callbacks).run(TurnRequest(
         history=history,
         active_request=active_request,
