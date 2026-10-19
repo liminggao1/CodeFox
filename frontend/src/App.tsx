@@ -198,6 +198,44 @@ function tokenValue(value: unknown): string {
   return typeof value === "number" ? new Intl.NumberFormat("zh-CN").format(value) : "—";
 }
 
+/** 与 TUI 保持一致地压缩 token 数字，避免底栏挤占输入区。 */
+function compactTokenValue(value: unknown): string {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return "—";
+  if (value >= 1000) {
+    if (value % 1000 === 0) return `${value / 1000}k`;
+    return value >= 10000 ? `${(value / 1000).toFixed(1)}k` : `${(value / 1000).toFixed(2)}k`;
+  }
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+/** 判断输入是否为可在上下文满载时执行的压缩命令。 */
+function isCompactCommand(value: string): boolean {
+  return value.trim().split(/\s+/, 1)[0] === "/compact";
+}
+
+/** 底部摘要只读显示当前模型和最近一次请求的上下文窗口占用。 */
+function contextSummary(snapshot: Record<string, unknown>): {
+  model: string;
+  used: string;
+  limit: string;
+  percent: number | null;
+} {
+  const model = stringValue(snapshot.model, "未开始");
+  const used = snapshot.context_input_tokens;
+  const limit = snapshot.context_limit_tokens;
+  if (typeof used !== "number" || !Number.isInteger(used) || used < 0
+      || typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+    return { model, used: "暂无", limit: "暂无", percent: null };
+  }
+  const shown = Math.min(used, limit);
+  return {
+    model,
+    used: compactTokenValue(shown),
+    limit: compactTokenValue(limit),
+    percent: Math.min(100, (shown * 100) / limit),
+  };
+}
+
 /** 用于状态抽屉中展示目标、任务清单等结构化快照。 */
 function stateValue(value: unknown): string {
   if (typeof value === "string") return value || "—";
@@ -554,11 +592,23 @@ export function App() {
   const lastGoalStatus = isObject(goal.last_status) ? goal.last_status : null;
   const todos = Array.isArray(snapshot.todos) ? snapshot.todos : [];
   const subagents = Array.isArray(snapshot.subagents) ? snapshot.subagents : [];
+  const context = contextSummary(snapshot);
+  const contextClass = context.percent !== null
+    ? context.percent >= 100 ? " context-full"
+      : context.percent >= 80 ? " context-warning" : ""
+    : "";
+  const contextFull = context.percent === 100;
+  const compactDraft = isCompactCommand(input);
+  const sendDisabled = !connected || busy || !input.trim() || (contextFull && !compactDraft);
 
   /** 校验输入状态后，把用户消息提交给后端运行时。 */
   function submit(text = input) {
     const value = text.trim();
     if (!value || busy || !connected) return;
+    if (contextFull && !isCompactCommand(value)) {
+      setNotice("上下文已满，请先执行 /compact");
+      return;
+    }
     if (sendMessage({ type: "submit", text: value })) {
       setInput("");
       setNotice("");
@@ -904,12 +954,22 @@ export function App() {
                 </button>
               ) : (
                 <button type="submit" className="send-button" title="发送消息"
-                        aria-label="发送消息" disabled={!connected || busy || !input.trim()}>
+                        aria-label="发送消息" disabled={sendDisabled}>
                   <Send size={16} />
                 </button>
               )}
             </div>
           </form>
+          <div className={"composer-status" + contextClass}
+               title={`模型：${context.model} · 已使用上下文窗口：${context.used}/${context.limit}`}
+               aria-label={`模型：${context.model}，已使用上下文窗口：${context.used}/${context.limit}${context.percent === null ? "" : `（${context.percent.toFixed(0)}%）`}`}>
+            <span className="composer-status-model">模型：{context.model}</span>
+            <span className="composer-status-separator" aria-hidden="true">·</span>
+            <span className="composer-status-context">
+              已使用上下文窗口：{context.used}/{context.limit}
+              {context.percent === null ? "" : `（${context.percent.toFixed(0)}%）`}
+            </span>
+          </div>
           {connectionRejected && <div className="connection-blocked">此工作台只接受一个浏览器连接。</div>}
         </footer>
       </section>

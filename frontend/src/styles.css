@@ -925,6 +925,48 @@ button:disabled {
   box-shadow: 0 0 0 2px rgb(61 139 120 / 10%);
 }
 
+.composer-status {
+  display: flex;
+  min-height: 17px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  overflow: hidden;
+  padding: 4px 2px 0;
+  color: #899591;
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.composer-status.context-warning {
+  color: var(--amber);
+}
+
+.composer-status.context-full {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.composer-status-model,
+.composer-status-context {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-status-model {
+  flex: 0 1 42%;
+}
+
+.composer-status-context {
+  flex: 0 1 auto;
+}
+
+.composer-status-separator {
+  flex: 0 0 auto;
+}
+
 .composer textarea {
   display: block;
   width: 100%;
@@ -1105,6 +1147,11 @@ button:disabled {
 
   .composer-area {
     padding: 7px 12px 12px;
+  }
+
+  .composer-status {
+    justify-content: flex-start;
+    font-size: 9px;
   }
 
   .command-suggestions {
