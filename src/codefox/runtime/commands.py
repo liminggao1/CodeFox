@@ -54,15 +54,35 @@ class CommandRouter:
         if command == "/resume" and len(parts) == 1:
             entries, errors = self._store.list_sessions()
             return CommandOutcome(command, {"sessions": entries, "errors": errors})
+        if command == "/delete":
+            if len(parts) < 2:
+                raise SessionError("用法：/delete <会话 ID> [会话 ID ...]")
+            targets = list(dict.fromkeys(parts[1:]))
+            for target in targets:
+                self._store.path(target)
+            if self._session_id() in targets:
+                raise SessionError("不能删除当前正在使用的会话")
+
+            deleted, failed = [], []
+            for target in targets:
+                try:
+                    self._delete_session(target)
+                except SessionError as exc:
+                    failed.append({"id": target, "error": str(exc)})
+                else:
+                    deleted.append(target)
+            if failed:
+                text = f"已删除 {len(deleted)} 个会话，{len(failed)} 个失败：" + "；".join(
+                    f"{item['id']}：{item['error']}" for item in failed)
+            elif len(deleted) == 1:
+                text = f"已删除会话 {deleted[0]}"
+            else:
+                text = f"已删除 {len(deleted)} 个会话"
+            return CommandOutcome(command, {"text": text, "deleted": deleted, "failed": failed})
         if len(parts) != 2:
             raise SessionError(f"用法：{command} <会话 ID>")
         target = parts[1]
         self._store.path(target)
-        if command == "/delete":
-            if target == self._session_id():
-                raise SessionError("不能删除当前正在使用的会话")
-            self._delete_session(target)
-            return CommandOutcome(command, {"text": f"已删除会话 {target}"})
         if target == self._session_id():
             return CommandOutcome(command, {"text": f"当前已在会话 {target}"})
         return CommandOutcome(command, self._switch.switch(target))

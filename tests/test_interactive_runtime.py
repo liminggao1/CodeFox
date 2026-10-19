@@ -614,3 +614,37 @@ def test_command_dispatch_returns_explicit_outcome(runtime_factory):
     from codefox.runtime.session_store import SessionError
     with pytest.raises(SessionError):
         router.dispatch("/delete")
+
+
+def test_delete_command_accepts_multiple_inactive_sessions(runtime_factory):
+    runtime, _ = runtime_factory()
+    store = runtime.session.store
+    active, first, second = (store.create() for _ in range(3))
+    for snapshot in (active, first, second):
+        store.save(snapshot)
+    runtime.session.activate(active)
+
+    outcome = runtime.command_router.dispatch(
+        f"/delete {first['id']} {second['id']} {first['id']}")
+
+    assert outcome.data["deleted"] == [first["id"], second["id"]]
+    assert outcome.data["failed"] == []
+    assert outcome.data["text"] == "已删除 2 个会话"
+    assert not store.path(first["id"]).exists()
+    assert not store.path(second["id"]).exists()
+    assert store.path(active["id"]).exists()
+
+
+def test_delete_command_validates_active_session_before_deleting_any(runtime_factory):
+    runtime, _ = runtime_factory()
+    store = runtime.session.store
+    active, target = store.create(), store.create()
+    store.save(active)
+    store.save(target)
+    runtime.session.activate(active)
+
+    from codefox.runtime.session_store import SessionError
+    with pytest.raises(SessionError, match="不能删除当前正在使用的会话"):
+        runtime.command_router.dispatch(f"/delete {target['id']} {active['id']}")
+
+    assert store.path(target["id"]).exists()

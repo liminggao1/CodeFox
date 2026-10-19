@@ -16,7 +16,7 @@ LOCAL_COMMANDS = (
     LocalCommand("/compact", "压缩当前会话上下文", "/compact"),
     LocalCommand("/new", "保存当前会话并开启新会话", "/new"),
     LocalCommand("/resume", "打开会话列表或恢复会话", "/resume [会话 ID]"),
-    LocalCommand("/delete", "删除非活动会话", "/delete <会话 ID>", True),
+    LocalCommand("/delete", "删除非活动会话", "/delete <会话 ID> [会话 ID ...]", True),
     LocalCommand("/quit", "退出并保存会话", "/quit"),
 )
 

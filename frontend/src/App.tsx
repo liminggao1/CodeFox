@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronDown,
   Check,
   CircleAlert,
   Clock3,
@@ -11,6 +12,7 @@ import {
   Settings2,
   ShieldAlert,
   Square,
+  Trash2,
   X,
 } from "lucide-react";
 import mark from "../../assets/logo/1F98A.svg";
@@ -257,6 +259,7 @@ export function App() {
   const [records, setRecords] = useState<DisplayRecord[]>([]);
   const [streams, setStreams] = useState<Record<string, StreamBlock>>({});
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
+  const [selectedSessions, setSelectedSessions] = useState<Set<string>>(() => new Set());
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [approvalPending, setApprovalPending] = useState(false);
@@ -270,6 +273,7 @@ export function App() {
   const [commands, setCommands] = useState<LocalCommand[]>([]);
   const [snapshot, setSnapshot] = useState<Record<string, unknown>>({});
   const [diagnostics, setDiagnostics] = useState<DiagnosticRecord[]>([]);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(
     () => window.localStorage.getItem("codefox.showDiagnostics") !== "false",
   );
@@ -370,8 +374,15 @@ export function App() {
       });
     } else if (event.type === "session_changed") {
       setSessionId(event.session_id);
+      setSelectedSessions((current) => {
+        if (!event.session_id || !current.has(event.session_id)) return current;
+        const next = new Set(current);
+        next.delete(event.session_id);
+        return next;
+      });
       setRecords(displayRecords(payload.records));
       setDiagnostics(diagnosticEntries(payload.diagnostics));
+      setDiagnosticsOpen(false);
       setSnapshot({ session_id: event.session_id });
       setStreams({});
       setApproval(null);
@@ -418,7 +429,10 @@ export function App() {
     } else if (event.type === "command_result") {
       const result = isObject(payload.data) ? payload.data : {};
       if (Array.isArray(result.sessions)) {
-        setSessions(sessionEntries(result.sessions));
+        const entries = sessionEntries(result.sessions);
+        const ids = new Set(entries.map((session) => session.id));
+        setSessions(entries);
+        setSelectedSessions((current) => new Set([...current].filter((id) => ids.has(id))));
         sessionListRefreshPendingRef.current = false;
       } else if (stringValue(payload.status) === "failed") {
         setNotice(stringValue(result.error, "命令执行失败"));
@@ -600,12 +614,13 @@ export function App() {
   const contextFull = context.percent === 100;
   const compactDraft = isCompactCommand(input);
   const sendDisabled = !connected || busy || !input.trim() || (contextFull && !compactDraft);
+  const selectedSessionCount = Array.from(selectedSessions).filter((id) => id !== sessionId).length;
 
   /** 校验输入状态后，把用户消息提交给后端运行时。 */
-  function submit(text = input) {
+  function submit(text = input, allowAtContextLimit = false) {
     const value = text.trim();
     if (!value || busy || !connected) return;
-    if (contextFull && !isCompactCommand(value)) {
+    if (contextFull && !isCompactCommand(value) && !allowAtContextLimit) {
       setNotice("上下文已满，请先执行 /compact");
       return;
     }
@@ -617,6 +632,22 @@ export function App() {
       setRunStatus("");
       setBusy(true);
     }
+  }
+
+  function deleteSelectedSessions() {
+    const selected = Array.from(selectedSessions).filter((id) => id !== sessionId);
+    if (!selected.length || busy || !connected) return;
+    if (!window.confirm(`确定删除选中的 ${selected.length} 个会话？删除后无法恢复。`)) return;
+    submit("/delete " + selected.join(" "), true);
+  }
+
+  function toggleSessionSelection(id: string, checked: boolean) {
+    setSelectedSessions((current) => {
+      const next = new Set(current);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
   }
 
   /** 选中注册命令或匹配的会话 ID，并将焦点留在输入框。 */
@@ -668,26 +699,46 @@ export function App() {
         </button>
         <div className="session-heading">
           <span>最近会话</span>
-          <button className="icon-button refresh-button" title="刷新会话列表"
-                  aria-label="刷新会话列表" onClick={() => submit("/resume")} disabled={!connected || busy}>
-            <RefreshCw size={15} />
-          </button>
+          <div className="session-heading-actions">
+            {selectedSessionCount > 0 && <span className="session-selection-count">已选 {selectedSessionCount}</span>}
+            <button className="icon-button delete-selected-button"
+                    title={`删除已选会话（${selectedSessionCount}）`}
+                    aria-label={`删除已选会话，共 ${selectedSessionCount} 个`}
+                    onClick={deleteSelectedSessions}
+                    disabled={!connected || busy || selectedSessionCount === 0}>
+              <Trash2 size={15} />
+            </button>
+            <button className="icon-button refresh-button" title="刷新会话列表"
+                    aria-label="刷新会话列表" onClick={() => submit("/resume")} disabled={!connected || busy}>
+              <RefreshCw size={15} />
+            </button>
+          </div>
         </div>
         <nav className="session-list" aria-label="会话列表">
           {sessions.length ? sessions.map((session) => (
-            <button
+            <div
               key={session.id}
               className={"session-row" + (session.id === sessionId ? " is-active" : "")}
-              onClick={() => submit("/resume " + session.id)}
-              disabled={!connected || busy}
-              title={session.summary || session.id}
             >
-              <span className="session-summary">{session.summary || "空会话"}</span>
-              <span className="session-meta">
-                <span>{session.message_count} 条消息</span>
-                <span>{formatSessionDate(session.updated_at)}</span>
-              </span>
-            </button>
+              <button type="button" className="session-open"
+                      onClick={() => submit("/resume " + session.id)}
+                      disabled={!connected || busy}
+                      title={session.summary || session.id}>
+                <span className="session-summary">{session.summary || "空会话"}</span>
+                <span className="session-meta">
+                  <span>{session.message_count} 条消息</span>
+                  <span>{formatSessionDate(session.updated_at)}</span>
+                </span>
+              </button>
+              <label className="session-select"
+                     title={session.id === sessionId ? "当前会话不能删除" : "选择会话"}>
+                <input type="checkbox"
+                       aria-label={`选择会话 ${session.summary || session.id}`}
+                       checked={selectedSessions.has(session.id)}
+                       onChange={(event) => toggleSessionSelection(session.id, event.target.checked)}
+                       disabled={!connected || busy || session.id === sessionId} />
+              </label>
+            </div>
           )) : (
             <div className="session-empty">{connected ? "暂无历史会话" : "等待连接"}</div>
           )}
@@ -856,18 +907,25 @@ export function App() {
             </section>
           )}
           {showDiagnostics && diagnostics.length > 0 && (
-            <details className="diagnostics-panel">
-              <summary>运行日志 · {diagnostics.length} 条</summary>
-              <div className="diagnostics-list">
-                {diagnostics.slice(-80).map((entry) => (
-                  <div className="diagnostic-row" key={entry.id}>
-                    <span className="diagnostic-time">{formatSessionDate(entry.at)}</span>
-                    <span className="diagnostic-origin">{entry.origin}</span>
-                    <span className="diagnostic-text">{entry.text}</span>
-                  </div>
-                ))}
-              </div>
-            </details>
+            <section className={"diagnostics-panel" + (diagnosticsOpen ? " is-open" : "")}>
+              <button className="diagnostics-summary" type="button"
+                      aria-expanded={diagnosticsOpen}
+                      onClick={() => setDiagnosticsOpen((open) => !open)}>
+                <span>运行日志 · {diagnostics.length} 条</span>
+                <ChevronDown className={diagnosticsOpen ? "is-rotated" : ""} size={14} />
+              </button>
+              {diagnosticsOpen && (
+                <div className="diagnostics-list">
+                  {diagnostics.slice(-80).map((entry) => (
+                    <div className="diagnostic-row" key={entry.id}>
+                      <span className="diagnostic-time">{formatSessionDate(entry.at)}</span>
+                      <span className="diagnostic-origin">{entry.origin}</span>
+                      <span className="diagnostic-text">{entry.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
           )}
           {!records.length && !orderedStreams.length && !busy && (
             <div className="empty-conversation">
