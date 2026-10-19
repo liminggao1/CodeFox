@@ -7,7 +7,7 @@
 
 | 目录 | 职责与阅读入口 |
 | --- | --- |
-| [frontends/](frontends/README.md) | CLI 和 Textual 输入、显示及交互适配 |
+| [frontends/](frontends/README.md) | CLI、Textual 和 Web 输入、显示及交互适配 |
 | [runtime/](runtime/README.md) | 交互驱动、事件与审批、命令、会话存储、调度和 hooks |
 | [agents/](agents/README.md) | Lead 与子 agent 的共享完整循环、执行策略、子 agent 生命周期、goal 和错误恢复 |
 | [context/](context/README.md) | 提示词、历史压缩、memory 和技能加载 |

@@ -4,7 +4,7 @@
 
 <h1 align="center">CodeFox</h1>
 
-<p align="center">本地运行的代码 Agent 环境，提供命令行交互和终端工作台。</p>
+<p align="center">本地运行的代码 Agent 环境，提供命令行、终端工作台和 Web 工作台。</p>
 <p align="center">让 Agent 阅读代码、修改文件、执行命令，也可以把独立工作交给子 agent。</p>
 <p align="center">
   <a href="#主要功能">主要功能</a> ·
@@ -18,6 +18,7 @@
 - **代码任务**：查找和读写文件、执行 Shell 命令、维护 TODO 与任务板。
 - **子 agent 协作**：委派一次任务，或在同次运行中保留助手并分派后续工作。
 - **会话管理**：保存对话、工具记录、目标与 TODO，恢复后继续交流。
+- **多种交互入口**：CLI、Textual 和本地 Web 共用同一个运行时。
 - **上下文与目标**：自动或手动压缩历史；设置目标后评估是否需要继续执行。
 - **工作流**：用程序组织顺序和并行步骤，管理用量预算并恢复已完成步骤。
 - **扩展能力**：支持技能、MCP 工具和可选的长期记忆。
@@ -109,6 +110,30 @@ TUI 中 Enter 发送、Shift+Enter 换行，点击“停止”或按 Ctrl+C 停�
 
 默认权限模式允许工作区内的文件读写；需要确认的 Shell 命令、目录外文件访问和 MCP 操作会请求批准。
 CLI 显示 `Allow? [y/N]`，TUI 显示审批卡。
+
+### 本地 Web 工作台
+
+Web 前端使用 Node 24 和 nvm。在 WSL 仓库根目录执行：
+
+```sh
+nvm install
+nvm use
+python -m pip install -e ".[web]"
+npm --prefix frontend ci
+```
+
+在两个终端分别启动后端和前端：
+
+```sh
+PYTHONPATH=src python -m uvicorn codefox.frontends.web.app:app --host 127.0.0.1 --port 8000
+npm --prefix frontend run dev
+```
+
+打开 `http://127.0.0.1:5173`。Web 使用一个本地运行时；同一时刻只接受一个浏览器连接，
+会话列表、新建和恢复由共享运行时的 `/resume`、`/new` 命令处理。
+工作台支持流式对话、停止回合、工具审批和历史会话管理。输入 `/` 可补全运行时注册的命令，
+输入 `/resume ` 或 `/delete ` 可补全会话 ID。右上角的运行状态面板显示权限模式、模型、目标、
+任务清单、子 agent 与 token 用量，也可打开独立于对话内容的运行日志。
 
 <details>
 <summary>从源码运行，不安装项目包</summary>

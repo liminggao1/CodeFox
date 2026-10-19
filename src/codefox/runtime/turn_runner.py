@@ -96,6 +96,7 @@ class TurnRunner:
                 return interaction.SubmissionResult("invalid", reason="Runtime is not started")
             if self._busy:
                 return interaction.SubmissionResult("busy", reason="A turn or command is running")
+            # 以命令开头的输入走本地命令路由；普通文本进入一次模型回合。
             kind = "command" if find_command(text.split()[0]) else "turn"
             submission_id = uuid.uuid4().hex
             self._busy = True
@@ -163,7 +164,7 @@ class TurnRunner:
     # -- 回合执行 --
 
     def run(self, submission_id, kind, text):
-        """执行一次提交；命令与回合共用同一终态结算路径。"""
+        """执行一次提交；命令与普通文本共用同一终态结算路径。"""
         with self._host.agent_lock:
             context = self._context(origin="frontend" if kind != "background" else "background")
             try:
@@ -218,6 +219,7 @@ class TurnRunner:
                     self._checkpoint()
                     self._snapshot(context)
                     try:
+                        # 这里进入 Agent 主循环：准备上下文、调用模型、处理响应并保存助手消息。
                         outcome = self._host.agent_loop(self._session.history, text, self._checkpoint,
                                                         self.record_usage,
                                                         prompt_state=self._session.prompt_state)

@@ -226,6 +226,7 @@ class TurnEngine:
                 raise
 
     def _run(self, request: TurnRequest):
+        """循环准备请求、调用一次模型，并处理文本响应或工具请求。"""
         # 调用方持有自己的配置、预算和恢复状态；历史只有当前请求这一句柄。
         turn = self.callbacks.turn
         turn.history = request.history
@@ -278,6 +279,7 @@ class TurnEngine:
                 self.model_call_id = None
                 self._text_indices = {}
                 # 重试策略和模型降级由调用方的请求入口处理。
+                # 通过回调进入 host.call_llm；TurnEngine 不直接依赖具体模型 SDK。
                 response, call_id, operation_id = self.callbacks.call_llm(prepared_request)
             except Exception as exc:
                 if isinstance(exc, StreamStopped):
@@ -332,6 +334,7 @@ class TurnEngine:
                 return self._finish("truncated", "Output continuation limit reached", response=response)
 
             # 保存模型响应，供工具结果和后续调用引用。
+            # 先把模型的完整响应写入历史，前端随后会收到对应的 assistant_message 事件。
             self.append({"role": "assistant", "content": response.content})
             # -- 由调用方决定当前工作是否允许结束 --
             if not message_content.has_tool_use(response.content):

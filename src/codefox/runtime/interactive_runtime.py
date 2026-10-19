@@ -1,4 +1,4 @@
-"""One serialized interactive driver shared by CLI and Textual adapters."""
+"""One serialized interactive driver shared by CLI, Textual, and Web adapters."""
 
 from __future__ import annotations
 
@@ -125,17 +125,21 @@ class InteractiveRuntime:
             permissions.SETTINGS.save(mode)
 
     def start(self):
+        """初始化 Agent 宿主并启动后台线程，等待前端提交任务。"""
         with self._lifecycle:
             if self._started or self._closing:
                 return
             host.initialize_runtime()
             self._started = True
+            # 运行时线程负责从 TurnRunner 取任务，模型调用不会阻塞 FastAPI 请求线程。
             self._thread = threading.Thread(target=self._run, name="interactive-lead", daemon=True)
             self._thread.start()
 
     def submit(self, text: str) -> interaction.SubmissionResult:
+        """接收一条用户输入并唤醒后台线程；这里只排队，不直接调用模型。"""
         result = self.turns.admit(text)
         if result.status == "accepted":
+            # 后台线程正在等待时，用事件通知它取出刚排队的任务。
             self._wake.set()
         return result
 

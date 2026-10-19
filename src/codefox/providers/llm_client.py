@@ -462,12 +462,14 @@ class ResponsesClient:
 
     def stream(self, *, on_text, stopped, model, messages, system=None, tools=None,
                max_tokens=None, **_ignored):
+        """请求流式响应，把每个文本增量交给上层，再返回完整消息。"""
         payload = _to_responses_request(model, messages, system, tools, max_tokens)
         payload["stream"] = True
         headers = dict(self._headers(), Accept="text/event-stream")
         request = urllib.request.Request(self._endpoint(), data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                                          headers=headers, method="POST")
         try:
+            # urlopen 负责实际 HTTPS 请求；底层网络错误会在下方转换成 APIConnectionError。
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 for event in _sse_events(response, stopped):
                     kind = event.get("type")
@@ -497,11 +499,13 @@ class ResponsesClient:
         raise ProtocolResponseError("stream", "stream ended without a terminal response")
 
     def _endpoint(self) -> str:
+        """把配置中的 Base URL 规范成当前协议对应的 responses 端点。"""
         if self.base_url:
             return _responses_url(self.base_url)
         return _default_endpoint()
 
     def _post(self, payload: dict) -> dict:
+        """发送非流式请求，并把 HTTP、网络和 JSON 错误转换成项目异常。"""
         request = urllib.request.Request(
             self._endpoint(),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -538,7 +542,7 @@ class ResponsesClient:
 # ---------------------------------------------------------------------------
 
 def stream_message(client, *, on_text, stopped, **request):
-    """Stream visible text synchronously and return only a validated full message."""
+    """同步流式读取可见文本，并只返回校验完整的最终消息。"""
     if stopped():
         raise StreamStopped("Stopped before requesting model")
     if isinstance(client, ResponsesClient):

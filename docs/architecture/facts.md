@@ -158,11 +158,11 @@
 `textual>=8.2.8,<9`），普通 CLI 与离线 workflow 不加载它。
 
 - 核心执行沿用同步代码与现有线程：单 Lead 执行线程、CLI 唯一标准输入读取线程、Textual UI 线程；不做核心异步化。
-- `runtime/interactive_runtime.py` 的 `InteractiveRuntime` 是 CLI/TUI 共用驱动，interface 为
+- `runtime/interactive_runtime.py` 的 `InteractiveRuntime` 是 CLI/TUI 共用驱动；本地 Web 适配器也复用它，interface 为
   `start()` / `submit(text)` / `request_stop(turn_id)` / `close()`；停止与关闭只发请求，完成经事件通知。
 - `runtime/interaction.py` 提供事件信封、`TurnOutcome`、提交结果、执行上下文、线程安全事件通道与一次性审批 rendezvous；
   审批请求带唯一 `request_id`、会话代次、执行来源、工具名与待确认参数。
-- 审批必须等此前相关回合消息与工具调用展示完成后才交付前端；`InteractionChannel` 集中该条件，两个前端只报告展示完成。
+- 审批必须等此前相关回合消息与工具调用展示完成后才交付前端；`InteractionChannel` 集中该条件，各适配器只报告展示完成。
 - CLI 主线程是唯一 stdin 读取者，worker 只发布审批请求并等待响应；回合或命令真正结束后才恢复普通提示符。
 - 停止是合作式请求，不中断进行中的同步网络调用；host 在模型请求前后、每个工具开始前及审批返回后检查停止标志。
   停止不批量终止其他子 agent、workflow 或后台任务，也不触发 goal 自动续做。
@@ -357,3 +357,11 @@
   只有 `choice=complete` 且整体 `confidence` 高于 `JEV_COMPLETION_CONFIDENCE_THRESHOLD` 才能结束目标；默认阈值为 0.9。
   `probabilities` 校验后保留在响应中，不作为第二个完成门槛。原始响应写入会话诊断日志，不进入模型历史。
 - 评估器的对话输入默认最多 24000 个字符，由 `GOAL_EVALUATOR_MAX_TRANSCRIPT_CHARACTERS` 调整，单位不是 token。
+
+## 13. 本地 Web 工作台（2026-10-19）
+
+- FastAPI 通过 lifespan 创建并关闭一个 `InteractiveRuntime`；WebSocket 适配器复用同步运行时与线程，不改造 Agent loop。
+- Vite 开发服务器监听 `127.0.0.1:5173`，将 API 与 WebSocket 转发到 `127.0.0.1:8000`；健康检查为 `GET /api/health`。
+- `/api/runtime` 同时传递提交、停止、事件确认和审批决定。事件只有在浏览器确认后才从运行时通道移除；未确认事件与未处理审批在浏览器重连后重发。
+- 同一时间只接受一个浏览器连接。连接断开不会停止运行时；服务进程退出后，正在执行的回合不会恢复。
+- 会话列表、新建与恢复复用 `/resume` 和 `/new` 运行时命令；浏览器不直接访问会话文件。

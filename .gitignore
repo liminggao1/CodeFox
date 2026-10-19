@@ -24,6 +24,9 @@ dist/
 # Local scratch files
 tmp/
 
+# Web frontend dependencies
+frontend/node_modules/
+
 # Editors and OS
 .idea/
 .vscode/*

@@ -168,6 +168,8 @@ def build_user_content(results: list[dict]) -> list[dict]:
 def call_llm(prepared_request: PreparedRequest, state: recovery.RecoveryState):
     """调用模型并返回响应。
 
+    这一步是 Agent 到外部模型 API 的边界；Lead 回合会在这里接收流式文本事件。
+
     Args:
         prepared_request: 已完成上下文准备和计量的 API 请求快照。
         state: 本轮模型重试和恢复状态。
@@ -179,6 +181,7 @@ def call_llm(prepared_request: PreparedRequest, state: recovery.RecoveryState):
         if interaction.stopped():
             raise StreamStopped("Stopped before requesting model")
         execution = interaction.current_context()
+        # 有交互上下文时生成调用 ID，前端可用它把流式文本和最终消息配对。
         call_id = uuid.uuid4().hex if execution is not None else None
         operation = interaction.operation_status("model", "请求模型", "running", model_call_id=call_id) if call_id else None
         sequence = 0
@@ -195,6 +198,7 @@ def call_llm(prepared_request: PreparedRequest, state: recovery.RecoveryState):
             tools=prepared_request.tools,
             max_tokens=state.max_tokens)
         try:
+            # Lead 使用流式接口实时显示文本；没有交互上下文的调用只等待完整响应。
             response = (stream_message(core.client, on_text=on_text, stopped=interaction.stopped, **kwargs)
                         if execution is not None and execution.source == "lead"
                         else core.client.messages.create(**kwargs))

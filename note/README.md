@@ -6,5 +6,6 @@
 | --- | --- |
 | [env-setup.md](env-setup.md) | 新机器或全新克隆：环境隔离、安装选项、API 配置、验证与常见问题 |
 | [dev-notes.md](dev-notes.md) | 维护者本机：WSL2 / conda、Remote-WSL 断点、Textual 操作和调试观察点 |
+| [web重启与API排查.md](web重启与API排查.md) | 本地 Web 前后端启动、重启和模型 API 连接排查 |
 
 日常用法见 [项目 README](../README.md)，辅助脚本见 [scripts/](../scripts/README.md)，测试维护见 [tests/](../tests/README.md)。

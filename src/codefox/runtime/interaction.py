@@ -272,6 +272,11 @@ class InteractionChannel:
             self._changed.notify_all()
             return True
 
+    def has_unacknowledged_event(self, sequence: int) -> bool:
+        """Check whether a delivered event survived session-generation pruning."""
+        with self._changed:
+            return sequence in self._unacknowledged
+
     def request_approval(self, context: ExecutionContext, tool_name: str,
                          tool_call_id: str, arguments: dict) -> ApprovalDecision:
         if context.scope != "session" or context.origin != "frontend" or context.turn_id is None:

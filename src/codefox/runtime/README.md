@@ -1,6 +1,6 @@
 # runtime：交互会话运行时
 
-集中管理 CLI/TUI 共用的交互规则，以及支撑执行的事件、审批、调度和 hooks。
+集中管理 CLI/TUI/Web 共用的交互规则，以及支撑执行的事件、审批、调度和 hooks。
 这里的交互运行时与 [workflows/](../workflows/README.md) 的工作流运行时不同。
 
 | 文件 | 职责 |

@@ -5,7 +5,7 @@
 先安装开发依赖：
 
 ```sh
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,web]"
 ```
 
 ```sh
@@ -45,6 +45,7 @@ LIVE_API=1 PYTHONPATH=src python -m pytest -q tests/live
 | `test_turn_engine.py` | Lead 与子 agent 共用的回合循环、请求快照、阶段和工具结果配对 |
 | `test_subagents.py`、`test_subagent_session.py`、`test_subagent_lifetimes.py` | 创建与协议、执行会话、真实线程及消息生命周期 |
 | `test_interactive_runtime.py` | 命令、会话切换、后台交付和共享驱动的停止行为 |
+| `test_web_frontend.py` | WebSocket 事件与审批重连、离线模型集成、停止和会话命令 |
 | `test_conversation.py` | 展示记录持久化、回放及前端呈现；`test_tui_integration.py` 验证真实驱动与界面的连接 |
 | 其余 `test_*.py` | 对应模块的规则与失败分支，包括协议、压缩、goal、任务、调度和工作流 |
 
