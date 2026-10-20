@@ -361,7 +361,9 @@
 ## 13. 本地 Web 工作台（2026-10-19）
 
 - FastAPI 通过 lifespan 创建并关闭一个 `InteractiveRuntime`；WebSocket 适配器复用同步运行时与线程，不改造 Agent loop。
-- Vite 开发服务器监听 `127.0.0.1:5173`，将 API 与 WebSocket 转发到 `127.0.0.1:8000`；健康检查为 `GET /api/health`。
+- Vite 开发服务器监听 `127.0.0.1:5173`，将 API 与 WebSocket 转发到 `127.0.0.1:8010`；健康检查为 `GET /api/health`。
 - `/api/runtime` 同时传递提交、停止、事件确认和审批决定。事件只有在浏览器确认后才从运行时通道移除；未确认事件与未处理审批在浏览器重连后重发。
 - 同一时间只接受一个浏览器连接。连接断开不会停止运行时；服务进程退出后，正在执行的回合不会恢复。
 - 会话列表、新建与恢复复用 `/resume` 和 `/new` 运行时命令；浏览器不直接访问会话文件。
+- `/api/diff` 读取 FastAPI 启动时及会话切换后的 `InteractiveRuntime.session.store.workdir`，返回 staged 与 unstaged Git 变更、分支、提交、增删行数和统一 Diff。接口不接受客户端路径，不调用模型，不修改文件，不提交 Git；二进制文件和超过大小限制的文件只返回元信息，Git 错误使用结构化错误响应。
+- Web 工作台的 Diff 视图在页面首次加载、手动刷新、`/new`/`/resume` 会话切换和 `turn_finished` 事件后刷新；第一版只读，不提供应用、丢弃或提交操作。

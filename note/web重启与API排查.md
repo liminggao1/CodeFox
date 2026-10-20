@@ -11,7 +11,7 @@
 如果原来的终端已经关闭，但启动时提示端口被占用，先在 WSL 中查看占用进程：
 
 ```sh
-ss -ltnp | grep -E ':(8000|5173)\b'
+ss -ltnp | grep -E ':(8010|5173)\b'
 ```
 
 输出中的 `pid=数字` 就是进程号。确认端口对应的是本项目旧进程后，执行：
@@ -29,7 +29,7 @@ kill 12345
 再次确认端口已经释放：
 
 ```sh
-ss -ltnp | grep -E ':(8000|5173)\b'
+ss -ltnp | grep -E ':(8010|5173)\b'
 ```
 
 没有输出后，再执行下面的“启动后端”和“启动前端”步骤。不要直接按进程名批量关闭，以免误停其他项目的服务。
@@ -41,13 +41,13 @@ ss -ltnp | grep -E ':(8000|5173)\b'
 ```sh
 conda activate learncc
 cd /mnt/d/01dpan/01project/life/learncc/agent-harness
-PYTHONPATH=src python -m uvicorn codefox.frontends.web.app:app --host 127.0.0.1 --port 8000
+PYTHONPATH=src python -m uvicorn codefox.frontends.web.app:app --host 127.0.0.1 --port 8010
 ```
 
 看到类似下面的内容，说明 Web 后端已经监听：
 
 ```text
-Uvicorn running on http://127.0.0.1:8000
+Uvicorn running on http://127.0.0.1:8010
 ```
 
 这个终端需要保持运行，不要关闭。
@@ -86,13 +86,13 @@ http://127.0.0.1:5173
 
 先确认后端终端仍在运行。后端启动失败时，浏览器通常只能显示请求失败。
 
-可以在 WSL 中检查 8000 端口：
+可以在 WSL 中检查 8010 端口：
 
 ```sh
-curl -i http://127.0.0.1:8000/api/health
+curl -i http://127.0.0.1:8010/api/health
 ```
 
-返回 `200` 和 `{"status":"ok"}` 说明后端已经连通；如果出现 `Connection refused`，说明后端没有启动或端口不是 8000。
+返回 `200` 和 `{"status":"ok"}` 说明后端已经连通；如果出现 `Connection refused`，说明后端没有启动或端口不是 8010。
 
 ### 页面显示 `SSL: UNEXPECTED_EOF_WHILE_READING`
 
@@ -117,14 +117,14 @@ curl -i --connect-timeout 10 --max-time 20 \
 
 ## 6. 常见端口问题
 
-如果启动时提示 8000 或 5173 已被占用，先回到之前启动服务的终端按 `Ctrl+C`，再重新启动。不要在多个终端同时启动同一个后端实例。
+如果启动时提示 8010 或 5173 已被占用，先回到之前启动服务的终端按 `Ctrl+C`，再重新启动。不要在多个终端同时启动同一个后端实例。
 
 本项目的标准端口是：
 
 | 服务 | 地址 |
 | --- | --- |
 | Web 前端 | `127.0.0.1:5173` |
-| Web 后端 | `127.0.0.1:8000` |
+| Web 后端 | `127.0.0.1:8010` |
 | 模型 API | `.env` 中的 `ANTHROPIC_BASE_URL` |
 
 ## 7. 前后端调试
@@ -164,7 +164,7 @@ curl -i --connect-timeout 10 --max-time 20 \
     "--host",
     "127.0.0.1",
     "--port",
-    "8000"
+    "8010"
   ],
   "cwd": "${workspaceFolder}",
   "console": "integratedTerminal",

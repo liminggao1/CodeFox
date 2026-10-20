@@ -5,8 +5,9 @@
 
 ## 本层职责
 
-- `src/App.tsx`：连接 WebSocket，展示对话、工具调用、审批、会话和运行状态；会话支持多选删除，运行日志可展开；输入区底部显示模型与上下文占用，满载时保留 `/compact` 并阻止普通消息提交。
-- `src/protocol.ts`：定义浏览器与 Web 适配器之间的消息形状和 JSON 安全读取函数。
+- `src/App.tsx`：连接 WebSocket，展示对话、工具调用、审批、会话和运行状态；会话支持多选删除，运行日志可展开；输入区底部显示模型与上下文占用，满载时保留 `/compact` 并阻止普通消息提交；顶部的 Diff 入口切换只读工作区变更视图。
+- `src/DiffWorkspace.tsx`：读取 `/api/diff`，展示当前运行目录的 Git 状态、文件列表和统一 Diff；页面首次加载、手动刷新、会话切换和回合结束都会刷新数据。
+- `src/protocol.ts`：定义浏览器与 Web 适配器之间的消息形状、Diff 响应类型和 JSON 安全读取函数。
 - `src/styles.css`：工作台布局、响应式样式和状态面板样式。
 - `vite.config.ts`：本地开发服务器和 `/api`、WebSocket 代理。
 - `package.json`：Node 依赖与开发、构建命令。
@@ -29,4 +30,4 @@ npm --prefix frontend run dev
 npm --prefix frontend run build
 ```
 
-开发服务器默认是 `http://127.0.0.1:5173`，会把 `/api` 转发到本地 FastAPI 服务 `127.0.0.1:8000`。
+开发服务器默认是 `http://127.0.0.1:5173`，会把 `/api` 转发到本地 FastAPI 服务 `127.0.0.1:8010`。

@@ -82,7 +82,8 @@ def _worktree_branch(name: str) -> str:
 run_git_impl = None
 
 
-def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
+def _run_git(args: list[str], cwd: Path | None = None,
+             *, preserve_output: bool = False) -> tuple[bool, str]:
     """执行 Git 并保留完整输出；测试时可使用注入的替代执行器。
 
     输入：
@@ -102,7 +103,10 @@ def _run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"{type(exc).__name__}: {exc}"
-    output = (result.stdout + result.stderr).strip()
+    output = result.stdout + result.stderr
+    if preserve_output:
+        return result.returncode == 0, output
+    output = output.strip()
     return result.returncode == 0, output or "(no output)"
 
 
@@ -118,6 +122,15 @@ def run_git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
     """
     ok, output = _run_git(args, cwd)
     return ok, output[:core.GIT_OUTPUT_CHAR_LIMIT]
+
+
+def run_git_full(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
+    """执行 Git 并保留完整输出，供只读工作区查询使用。
+
+    工具层仍使用 ``run_git`` 的输出上限；Diff 等需要解析完整补丁的内部
+    查询通过这个入口复用同一套超时和错误处理，但由调用方自行限制响应大小。
+    """
+    return _run_git(args, cwd, preserve_output=True)
 
 
 def _registered_worktrees(workdir: Path | None = None) -> tuple[dict[Path, dict[str, str]], str | None]:

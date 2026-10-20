@@ -7,9 +7,11 @@ from dataclasses import asdict
 from typing import Callable
 
 from fastapi import FastAPI, WebSocket
+from fastapi.responses import JSONResponse
 
 from ...runtime.interactive_runtime import InteractiveRuntime
 from ...runtime.local_commands import LOCAL_COMMANDS
+from ...workspace.diff import DiffError, collect_diff
 from .bridge import RuntimeBridge
 
 
@@ -38,6 +40,24 @@ def create_app(runtime_factory: Callable[[], InteractiveRuntime] = InteractiveRu
     def commands() -> dict[str, list[dict[str, object]]]:
         """返回运行时注册的命令元数据，供浏览器输入补全使用。"""
         return {"commands": [asdict(command) for command in LOCAL_COMMANDS]}
+
+    @app.get("/api/diff", response_model=None)
+    def diff_snapshot() -> dict | JSONResponse:
+        """读取后端运行时当前项目的 Git 变更，供 Web Diff 工作区展示。"""
+        bridge: RuntimeBridge | None = getattr(app.state, "runtime_bridge", None)
+        if bridge is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "runtime_unavailable", "message": "运行时尚未启动"}},
+            )
+        try:
+            return collect_diff(bridge.runtime.session.store.workdir)
+        except DiffError as exc:
+            status_code = 503 if exc.code in {"not_git_repository", "git_command_failed"} else 400
+            return JSONResponse(
+                status_code=status_code,
+                content={"error": {"code": exc.code, "message": exc.message}},
+            )
 
     @app.websocket("/api/runtime")
     async def runtime_socket(websocket: WebSocket) -> None:

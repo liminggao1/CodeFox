@@ -60,6 +60,35 @@ export interface DiagnosticRecord {
   text: string;
 }
 
+export interface DiffFile {
+  path: string;
+  previous_path: string | null;
+  status: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  truncated: boolean;
+  size_bytes: number | null;
+  patch: string;
+}
+
+export interface DiffSnapshot {
+  workdir: {
+    name: string;
+    branch: string;
+    commit: string | null;
+  };
+  files: DiffFile[];
+  generated_at: string;
+}
+
+export interface DiffErrorPayload {
+  error: {
+    code: string;
+    message: string;
+  };
+}
+
 // 浏览器可以提交输入、停止回合、确认事件、处理审批或切换权限模式。
 export type ClientMessage =
   | { type: "submit"; text: string }

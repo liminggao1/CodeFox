@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,9 +18,12 @@ from codefox.runtime import interaction
 class FakeRuntime:
     """Small channel-backed runtime for exercising the adapter without a model."""
 
-    def __init__(self):
+    def __init__(self, workdir=None):
         self.channel = interaction.InteractionChannel()
         self.channel.set_projector(self._display_record)
+        self.session = SimpleNamespace(
+            store=SimpleNamespace(workdir=Path(workdir or Path.cwd()).resolve()),
+        )
         self.session_id = uuid.uuid4().hex[:8]
         self.generation = 1
         self.sessions = [{
@@ -264,6 +269,31 @@ def test_command_metadata_comes_from_shared_registry(runtime):
         "/goal", "/compact", "/new", "/resume", "/delete", "/quit",
     ]
     assert commands[4]["requires_argument"] is True
+
+
+def test_diff_endpoint_reads_runtime_workdir_without_accepting_client_path(tmp_path):
+    from tests.test_workspace_diff import init_repo
+
+    init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("before\nchanged\nend\n", encoding="utf-8")
+    runtime = FakeRuntime(tmp_path)
+    with TestClient(create_app(lambda: runtime)) as client:
+        response = client.get("/api/diff?path=../outside")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["workdir"]["name"] == tmp_path.name
+    assert [item["path"] for item in payload["files"]] == ["tracked.txt"]
+    assert "+changed" in payload["files"][0]["patch"]
+
+
+def test_diff_endpoint_returns_structured_non_git_error(tmp_path):
+    runtime = FakeRuntime(tmp_path)
+    with TestClient(create_app(lambda: runtime)) as client:
+        response = client.get("/api/diff")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "not_git_repository"
 
 
 def test_permission_mode_message_updates_runtime_and_reports_failures(runtime):

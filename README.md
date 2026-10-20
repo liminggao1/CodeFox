@@ -125,7 +125,7 @@ npm --prefix frontend ci
 在两个终端分别启动后端和前端：
 
 ```sh
-PYTHONPATH=src python -m uvicorn codefox.frontends.web.app:app --host 127.0.0.1 --port 8000
+PYTHONPATH=src python -m uvicorn codefox.frontends.web.app:app --host 127.0.0.1 --port 8010
 npm --prefix frontend run dev
 ```
 

@@ -4,6 +4,7 @@ import {
   Check,
   CircleAlert,
   Clock3,
+  FileDiff,
   LoaderCircle,
   MessageSquarePlus,
   PanelRight,
@@ -29,6 +30,7 @@ import {
   type SessionEntry,
   stringValue,
 } from "./protocol";
+import { DiffWorkspace } from "./DiffWorkspace";
 
 interface StreamBlock {
   key: string;
@@ -282,6 +284,8 @@ export function App() {
   const [commandFeedback, setCommandFeedback] = useState("");
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const [diffRefreshKey, setDiffRefreshKey] = useState(0);
 
   useEffect(() => {
     let disposed = false;
@@ -373,6 +377,7 @@ export function App() {
         };
       });
     } else if (event.type === "session_changed") {
+      setDiffRefreshKey((value) => value + 1);
       setSessionId(event.session_id);
       setSelectedSessions((current) => {
         if (!event.session_id || !current.has(event.session_id)) return current;
@@ -412,6 +417,7 @@ export function App() {
       setStopping(false);
       setRunStatus("处理中");
     } else if (event.type === "turn_finished") {
+      setDiffRefreshKey((value) => value + 1);
       refreshSessions = sessionListRefreshPendingRef.current;
       if (typeof payload.submission_id === "string") {
         finalizedSubmissionsRef.current.add(payload.submission_id);
@@ -439,6 +445,7 @@ export function App() {
       } else {
         if (typeof result.text === "string") setCommandFeedback(result.text);
         if (["/new", "/resume", "/delete"].includes(stringValue(payload.command))) {
+          setDiffRefreshKey((value) => value + 1);
           sessionListRefreshPendingRef.current = true;
           refreshSessions = true;
         }
@@ -762,6 +769,15 @@ export function App() {
                     aria-expanded={stateOpen} onClick={() => setStateOpen((open) => !open)}>
               <PanelRight size={17} />
             </button>
+            <button className={"icon-button header-toggle" + (diffOpen ? " is-active" : "")}
+                    title="查看工作区变更" aria-label="查看工作区变更"
+                    aria-pressed={diffOpen}
+                    onClick={() => {
+                      setDiffOpen((open) => !open);
+                      setStateOpen(false);
+                    }}>
+              <FileDiff size={17} />
+            </button>
           </div>
         </header>
 
@@ -875,7 +891,11 @@ export function App() {
           </aside>
         )}
 
-        <div className="transcript" ref={scrollRef} aria-live="polite">
+        <div className="diff-view" hidden={!diffOpen}>
+          <DiffWorkspace refreshKey={diffRefreshKey} />
+        </div>
+        <div className="transcript-view" hidden={diffOpen}>
+          <div className="transcript" ref={scrollRef} aria-live="polite">
           {records.filter((record) => record.type !== "command_result").map((record) => (
             <RecordView key={record.id} record={record} />
           ))}
@@ -933,6 +953,7 @@ export function App() {
               <p>发送一条消息开始工作</p>
             </div>
           )}
+          </div>
         </div>
 
         <footer className="composer-area">
